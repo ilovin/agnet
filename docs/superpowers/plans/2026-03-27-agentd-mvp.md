@@ -309,31 +309,36 @@ type Event struct {
 	Data map[string]any `json:"data"`
 }
 
-// EventBuffer is a capped ring buffer of Events, safe for concurrent use.
+// EventBuffer is a capped circular buffer of Events, safe for concurrent use.
+// Uses head/tail indices for O(1) append instead of O(n) shift.
 type EventBuffer struct {
-	mu   sync.Mutex
-	cap  int
-	seq  uint64
-	buf  []Event
+	mu    sync.Mutex
+	cap   int
+	seq   uint64
+	buf   []Event
+	head  int // index of oldest element
+	count int // number of elements currently in buffer
 }
 
 // New creates an EventBuffer with the given capacity.
 func New(cap int) *EventBuffer {
-	return &EventBuffer{cap: cap, buf: make([]Event, 0, cap)}
+	return &EventBuffer{cap: cap, buf: make([]Event, cap)}
 }
 
-// Append adds data to the buffer, evicting the oldest entry if at capacity.
+// Append adds data to the buffer, evicting the oldest entry if at capacity. O(1).
 func (eb *EventBuffer) Append(data map[string]any) uint64 {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 	eb.seq++
 	e := Event{Seq: eb.seq, Data: data}
-	if len(eb.buf) >= eb.cap {
-		// shift left (evict oldest)
-		copy(eb.buf, eb.buf[1:])
-		eb.buf[len(eb.buf)-1] = e
+	if eb.count < eb.cap {
+		// Buffer not yet full: write at head+count
+		eb.buf[(eb.head+eb.count)%eb.cap] = e
+		eb.count++
 	} else {
-		eb.buf = append(eb.buf, e)
+		// Buffer full: overwrite oldest at head, advance head
+		eb.buf[eb.head] = e
+		eb.head = (eb.head + 1) % eb.cap
 	}
 	return eb.seq
 }
@@ -343,7 +348,8 @@ func (eb *EventBuffer) Since(afterSeq uint64) []Event {
 	eb.mu.Lock()
 	defer eb.mu.Unlock()
 	var result []Event
-	for _, e := range eb.buf {
+	for i := 0; i < eb.count; i++ {
+		e := eb.buf[(eb.head+i)%eb.cap]
 		if e.Seq > afterSeq {
 			result = append(result, e)
 		}
@@ -515,12 +521,14 @@ func (p *Process) SetReadDeadline(t time.Time) {
 }
 
 // Kill sends SIGKILL to the child process and closes the PTY.
+// Process is killed first to avoid SIGHUP-induced zombie from closing ptmx early.
 func (p *Process) Kill() error {
-	_ = p.ptmx.Close()
+	var err error
 	if p.cmd.Process != nil {
-		return p.cmd.Process.Kill()
+		err = p.cmd.Process.Kill()
 	}
-	return nil
+	_ = p.ptmx.Close()
+	return err
 }
 
 // Wait waits for the child process to exit.
@@ -1241,6 +1249,7 @@ Create `agentd/internal/agent/agent.go`:
 package agent
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/phone-talk/agentd/internal/eventbuf"
@@ -1264,6 +1273,8 @@ type Agent struct {
 	Name     string
 	Provider string
 	WorkDir  string
+	Cmd      string   // original command used to spawn this agent
+	Args     []string // original args used to spawn this agent
 
 	mu      sync.RWMutex
 	status  Status
@@ -1271,12 +1282,14 @@ type Agent struct {
 	buf     *eventbuf.EventBuffer
 }
 
-func newAgent(id, name, provider, workDir string) *Agent {
+func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {
 	return &Agent{
 		ID:       id,
 		Name:     name,
 		Provider: provider,
 		WorkDir:  workDir,
+		Cmd:      cmd,
+		Args:     args,
 		status:   StatusCreated,
 		buf:      eventbuf.New(10000),
 	}
@@ -1318,6 +1331,18 @@ func (a *Agent) kill() {
 		_ = p.Kill()
 	}
 }
+
+// WriteInput sends text to the agent's PTY stdin (as if typed by the user).
+func (a *Agent) WriteInput(text string) error {
+	a.mu.RLock()
+	p := a.process
+	a.mu.RUnlock()
+	if p == nil {
+		return fmt.Errorf("agent process not running")
+	}
+	_, err := p.Write([]byte(text))
+	return err
+}
 ```
 
 - [ ] **Step 5: Implement manager.go**
@@ -1355,7 +1380,7 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 // Create spawns a new agent process using the given command/args (provider-resolved by caller).
 func (m *Manager) Create(name, cmd string, args []string, workDir string) (string, error) {
 	id := uuid.New().String()
-	ag := newAgent(id, name, "custom", workDir)
+	ag := newAgent(id, name, "custom", workDir, cmd, args)
 
 	m.mu.Lock()
 	m.agents[id] = ag
@@ -1580,6 +1605,41 @@ func TestAgentCreateAndList(t *testing.T) {
 		t.Errorf("expected 1 agent, got %d", len(agents))
 	}
 }
+
+func TestConversationSend(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	// Create a long-running agent (sleep) so we can send to it
+	workDir := t.TempDir()
+	createResp := rpc(conn, "agent.create", map[string]any{
+		"name": "cat-agent", "cmd": "cat", "args": []string{},
+		"workDir": workDir,
+	})
+	if createResp["error"] != nil {
+		t.Fatalf("create error: %v", createResp["error"])
+	}
+	result := createResp["result"].(map[string]any)
+	agentID := result["id"].(string)
+
+	// Send a message
+	sendResp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": agentID,
+		"message": "hello agent",
+	})
+	if sendResp["error"] != nil {
+		t.Fatalf("send error: %v", sendResp["error"])
+	}
+
+	// Send to non-existent agent should fail
+	errResp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": "nonexistent",
+		"message": "hello",
+	})
+	if errResp["error"] == nil {
+		t.Error("expected error for non-existent agent")
+	}
+}
 ```
 
 - [ ] **Step 2: Run test — expect FAIL**
@@ -1679,9 +1739,16 @@ func New(mgr *agent.Manager, token string) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Auth check
+	// Auth: accept either Authorization header or ?token= query param
+	// (Flutter mobile clients can't set custom WS headers)
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.token {
+	queryToken := r.URL.Query().Get("token")
+	headerToken := strings.TrimPrefix(auth, "Bearer ")
+	token := headerToken
+	if token == "" {
+		token = queryToken
+	}
+	if token != s.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1764,6 +1831,8 @@ func (h *handler) dispatch(req RPCRequest) RPCResponse {
 		return h.agentStop(req)
 	case "agent.restart":
 		return h.agentRestart(req)
+	case "conversation.send":
+		return h.conversationSend(req)
 	case "conversation.history":
 		return h.conversationHistory(req)
 	default:
@@ -1839,14 +1908,29 @@ func (h *handler) agentRestart(req RPCRequest) RPCResponse {
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found")
 	}
-	// Stop then recreate with same params
+	// Stop then recreate with same params (uses stored cmd/args)
 	_ = h.server.manager.Stop(id)
-	newID, err := h.server.manager.Create(ag.Name, "claude",
-		[]string{"--dangerously-skip-permissions"}, ag.WorkDir)
+	newID, err := h.server.manager.Create(ag.Name, ag.Cmd, ag.Args, ag.WorkDir)
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error())
 	}
 	return okResp(req.ID, map[string]any{"id": newID})
+}
+
+func (h *handler) conversationSend(req RPCRequest) RPCResponse {
+	agentID, _ := req.Params["agentId"].(string)
+	message, _ := req.Params["message"].(string)
+	if message == "" {
+		return errResp(req.ID, -32602, "message is required")
+	}
+	ag := h.server.manager.Get(agentID)
+	if ag == nil {
+		return errResp(req.ID, -32000, "agent not found")
+	}
+	if err := ag.WriteInput(message + "\n"); err != nil {
+		return errResp(req.ID, -32000, "write to agent: "+err.Error())
+	}
+	return okResp(req.ID, map[string]any{"ok": true})
 }
 
 func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
@@ -2235,20 +2319,20 @@ git commit -m "feat(agentd): wire ClaudeWatcher into agent lifecycle for event b
 ## Self-Review Notes
 
 **Spec coverage check:**
-- ✅ WebSocket API (agent.list, agent.create, agent.stop, agent.restart, conversation.history) — Task 7
+- ✅ WebSocket API (agent.list, agent.create, agent.stop, agent.restart, conversation.history, conversation.send) — Task 7
 - ✅ Agent state machine (Created→Starting→Idle⇄Working→Stopped→Crashed) — Task 6
 - ✅ Claude JSONL watcher + TurnState detection — Tasks 4 & 9
-- ✅ EventBuffer with replay (Since/lastSeq) — Task 2
-- ✅ PTY process management — Task 3
+- ✅ EventBuffer with replay (Since/lastSeq), O(1) circular buffer — Task 2
+- ✅ PTY process management (correct kill order: process first, then ptmx) — Task 3
 - ✅ SQLite persistence — Task 5
 - ✅ Static token auth — Task 7
 - ✅ Config file (token, port, data_dir) — Task 1
 - ✅ CLI entrypoint (agentd start) — Task 8
-- ⚠️ `conversation.send` handler — not yet implemented (requires piping stdin to PTY); marked as follow-up for agentgw plan since the MVP focuses on monitoring/read-only conversation first
-- ⚠️ `agent.restart` reuses hardcoded `claude` — acceptable for MVP, parameterized in agentgw plan
+- ✅ Agent stores cmd/args for restart — Task 6 (agent.go stores Cmd/Args, agentRestart uses them)
 
 **Type consistency check:**
 - `EventBuffer.Since(afterSeq uint64)` used consistently in eventbuf.go, agent.go, handler.go ✅
 - `AgentStatus` (watcher package) vs `Status` (agent package) — distinct types, no collision ✅
 - `AgentRecord` fields match between store.go and manager.go ✅
 - `RPCRequest.Params` is `map[string]any` — handler.go accesses via type assertions ✅
+- `Agent.Cmd/Args` stored at creation, reused by agentRestart ✅

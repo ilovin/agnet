@@ -394,6 +394,8 @@ Create `agentgw/internal/tunnel/tunnel_test.go`:
 package tunnel_test
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -465,15 +467,13 @@ func handleSSHConn(conn net.Conn, cfg *gossh.ServerConfig, remoteTarget string) 
 }
 
 func generateSigner() (gossh.Signer, error) {
-	// Use a fixed test key for determinism
-	const testKey = `-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACBY5PH9k3l4Fgt+0RqzWFaOH/t5e/eY5tDWGKJqDAAAAKBjVSBjY1Ug
-YwAAAAtzc2gtZWQyNTUxOQAAACBY5PH9k3l4Fgt+0RqzWFaOH/t5e/eY5tDWGKJqDA
-AAAEBf1kp/RFJvkYzJMDW3cHHKmX5TFHtLzpEbZ+a5JKJq7Fjk8f2TeXgWC37RGrNY
-Vo4f+3l795jm0NYYomoMAAAADHRlc3RAZXhhbXBsZQ==
------END OPENSSH PRIVATE KEY-----`
-	return gossh.ParsePrivateKey([]byte(testKey))
+	// Dynamically generate an ed25519 key pair for testing — avoids hardcoded
+	// key strings that may have encoding issues.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	return gossh.NewSignerFromKey(priv)
 }
 
 func TestTunnelForwardsTraffic(t *testing.T) {
@@ -932,10 +932,10 @@ func (p *Proxy) Call(method string, params any, timeout time.Duration) (any, err
 	ch := make(chan rpcMsg, 1)
 	p.pending[id] = &pending{ch: ch}
 	req := rpcMsg{JSONRPC: "2.0", ID: id, Method: method, Params: params}
-	err := p.conn.WriteJSON(req)
 	p.mu.Unlock()
 
-	if err != nil {
+	// WriteJSON outside mutex to avoid blocking other Call() goroutines
+	if err := p.conn.WriteJSON(req); err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
@@ -1384,11 +1384,21 @@ package node
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
+	"github.com/phone-talk/agentgw/internal/proxy"
+	"github.com/phone-talk/agentgw/internal/tunnel"
+	gossh "golang.org/x/crypto/ssh"
 )
+
+// EventCallback is called when a node's agentd pushes an event.
+// The nodeId is injected by the manager before calling.
+type EventCallback func(nodeID string, event map[string]any)
 
 // Manager tracks all configured nodes and their runtime state.
 type Manager struct {
@@ -1396,6 +1406,7 @@ type Manager struct {
 	nodes     map[string]*Node
 	store     *nodecfg.Store
 	agentdBin []byte // embedded agentd binary (may be nil in tests)
+	onEvent   EventCallback
 }
 
 func NewManager(store *nodecfg.Store, agentdBin []byte) *Manager {
@@ -1403,6 +1414,35 @@ func NewManager(store *nodecfg.Store, agentdBin []byte) *Manager {
 		nodes:     make(map[string]*Node),
 		store:     store,
 		agentdBin: agentdBin,
+	}
+}
+
+// OnEvent registers a callback for agentd push events (with nodeId injected).
+func (m *Manager) OnEvent(cb EventCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onEvent = cb
+}
+
+// LoadAll populates nodes from persisted config without writing back to disk.
+// Use this at startup to avoid N redundant file writes from calling Add() in a loop.
+func (m *Manager) LoadAll(entries []nodecfg.NodeEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range entries {
+		if entry.ID == "" {
+			entry.ID = uuid.New().String()
+		}
+		m.nodes[entry.ID] = &Node{
+			ID:         entry.ID,
+			Name:       entry.Name,
+			Host:       entry.Host,
+			SSHPort:    entry.SSHPort,
+			AgentdPort: entry.AgentdPort,
+			Token:      entry.Token,
+			SSHKeyPath: entry.SSHKeyPath,
+			status:     StatusDisconnected,
+		}
 	}
 }
 
@@ -1431,6 +1471,93 @@ func (m *Manager) Add(entry nodecfg.NodeEntry) (string, error) {
 		return n.ID, fmt.Errorf("save nodes: %w", err)
 	}
 	return n.ID, nil
+}
+
+// Connect establishes SSH tunnel + WS proxy to a node's agentd and starts
+// forwarding events. This is the core connection chain:
+//   SSH tunnel (local random port → remote agentd port) → WS proxy → event callback
+func (m *Manager) Connect(id string) error {
+	n := m.Get(id)
+	if n == nil {
+		return fmt.Errorf("node %q not found", id)
+	}
+	n.SetStatus(StatusConnecting)
+
+	// Read SSH key
+	keyPath := n.SSHKeyPath
+	if keyPath == "" {
+		keyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
+	}
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		n.SetStatus(StatusError)
+		return fmt.Errorf("read ssh key %s: %w", keyPath, err)
+	}
+	signer, err := gossh.ParsePrivateKey(keyData)
+	if err != nil {
+		n.SetStatus(StatusError)
+		return fmt.Errorf("parse ssh key: %w", err)
+	}
+
+	// Establish SSH tunnel
+	tun, err := tunnel.New(tunnel.Config{
+		SSHHost:    n.Host,
+		SSHPort:    n.SSHPort,
+		RemoteHost: "127.0.0.1",
+		RemotePort: n.AgentdPort,
+		AuthMethod: gossh.PublicKeys(signer),
+	})
+	if err != nil {
+		n.SetStatus(StatusError)
+		return fmt.Errorf("ssh tunnel: %w", err)
+	}
+
+	localPort, err := tun.LocalPort()
+	if err != nil {
+		tun.Close()
+		n.SetStatus(StatusError)
+		return fmt.Errorf("local port: %w", err)
+	}
+
+	// Connect WS proxy through tunnel to agentd
+	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", localPort)
+	p, err := proxy.New(wsURL, n.Token)
+	if err != nil {
+		tun.Close()
+		n.SetStatus(StatusError)
+		return fmt.Errorf("ws proxy: %w", err)
+	}
+
+	// Wire event forwarding: inject nodeId into every agentd push event
+	m.mu.RLock()
+	cb := m.onEvent
+	m.mu.RUnlock()
+	if cb != nil {
+		p.OnEvent(func(ev map[string]any) {
+			// Inject nodeId into params
+			if params, ok := ev["params"].(map[string]any); ok {
+				params["nodeId"] = n.ID
+			}
+			cb(n.ID, ev)
+		})
+	}
+
+	n.SetProxy(p)
+	n.SetStatus(StatusConnected)
+	return nil
+}
+
+// ConnectAll attempts to connect all disconnected nodes. Errors are logged, not returned.
+func (m *Manager) ConnectAll() {
+	for _, n := range m.List() {
+		if n.Status() == StatusDisconnected {
+			go func(id string) {
+				if err := m.Connect(id); err != nil {
+					log.Printf("connect node %s: %v", id, err)
+				}
+			}(n.ID)
+		}
+	}
 }
 
 // Remove disconnects and deletes a node.
@@ -1464,6 +1591,19 @@ func (m *Manager) List() []*Node {
 		out = append(out, n)
 	}
 	return out
+}
+
+// ForwardCall sends a JSON-RPC call to a specific node's agentd via its proxy.
+func (m *Manager) ForwardCall(nodeID, method string, params map[string]any, timeout time.Duration) (any, error) {
+	n := m.Get(nodeID)
+	if n == nil {
+		return nil, fmt.Errorf("node %q not found", nodeID)
+	}
+	p := n.Proxy()
+	if p == nil {
+		return nil, fmt.Errorf("node %q not connected", nodeID)
+	}
+	return p.Call(method, params, timeout)
 }
 
 func (m *Manager) toEntries() []nodecfg.NodeEntry {
@@ -1718,8 +1858,16 @@ func New(mgr *node.Manager, token string) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Auth: accept either Authorization header or ?token= query param
+	// (Flutter mobile clients can't set custom WS headers)
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.token {
+	queryToken := r.URL.Query().Get("token")
+	headerToken := strings.TrimPrefix(auth, "Bearer ")
+	token := headerToken
+	if token == "" {
+		token = queryToken
+	}
+	if token != s.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -1801,6 +1949,8 @@ func (h *handler) dispatch(req RPCRequest) RPCResponse {
 		return h.nodeAdd(req)
 	case "node.remove":
 		return h.nodeRemove(req)
+	case "node.connect":
+		return h.nodeConnect(req)
 	case "node.deploy":
 		return h.nodeDeploy(req)
 	case "agent.list", "agent.create", "agent.stop", "agent.restart",
@@ -1859,6 +2009,21 @@ func (h *handler) nodeAdd(req RPCRequest) RPCResponse {
 	h.server.Broadcast(newEvent("node.status_changed", map[string]any{
 		"nodeId": id, "status": "disconnected",
 	}))
+
+	// Attempt connection in background
+	go func() {
+		if err := h.server.manager.Connect(id); err != nil {
+			log.Printf("auto-connect node %s: %v", id, err)
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": id, "status": "error",
+			}))
+		} else {
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": id, "status": "connected",
+			}))
+		}
+	}()
+
 	return okResp(req.ID, map[string]any{"nodeId": id})
 }
 
@@ -1868,6 +2033,28 @@ func (h *handler) nodeRemove(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, err.Error())
 	}
 	return okResp(req.ID, map[string]any{"ok": true})
+}
+
+func (h *handler) nodeConnect(req RPCRequest) RPCResponse {
+	nodeID, _ := req.Params["nodeId"].(string)
+	n := h.server.manager.Get(nodeID)
+	if n == nil {
+		return errResp(req.ID, -32000, fmt.Sprintf("node %q not found", nodeID))
+	}
+	// Connect in background, return immediately
+	go func() {
+		if err := h.server.manager.Connect(nodeID); err != nil {
+			log.Printf("connect node %s: %v", nodeID, err)
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": nodeID, "status": "error",
+			}))
+		} else {
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": nodeID, "status": "connected",
+			}))
+		}
+	}()
+	return okResp(req.ID, map[string]any{"ok": true, "message": "connecting"})
 }
 
 func (h *handler) nodeDeploy(req RPCRequest) RPCResponse {
@@ -1989,18 +2176,25 @@ func runServer() {
 	store := nodecfg.New(cfg.NodesFile)
 	mgr := node.NewManager(store, nil) // embed wired at build time
 
-	// Load persisted nodes
+	// Load persisted nodes in batch (no redundant file writes)
 	entries, err := store.Load()
 	if err != nil {
 		log.Printf("warn: could not load nodes: %v", err)
 	}
-	for _, e := range entries {
-		if _, err := mgr.Add(e); err != nil {
-			log.Printf("warn: could not add node %q: %v", e.Name, err)
-		}
-	}
+	mgr.LoadAll(entries)
 
 	srv := ws.New(mgr, cfg.Token)
+
+	// Wire event forwarding: agentd push events → broadcast to all App clients
+	mgr.OnEvent(func(nodeID string, ev map[string]any) {
+		method, _ := ev["method"].(string)
+		params := ev["params"]
+		srv.Broadcast(ws.RPCEvent{JSONRPC: "2.0", Method: method, Params: params})
+	})
+
+	// Connect all loaded nodes in background
+	mgr.ConnectAll()
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	http.Handle("/ws", srv)
 	log.Printf("agentgw listening on %s (token: %s...)", addr, cfg.Token[:8])

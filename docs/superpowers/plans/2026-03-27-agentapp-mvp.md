@@ -532,17 +532,19 @@ class WsClient {
   void onEvent(EventCallback cb) => _onEvent = cb;
 
   /// Connects to agentgw. Call once; reconnects automatically.
+  ///
+  /// Auth: token is passed as a query parameter (?token=...) because
+  /// web_socket_channel does not support custom HTTP headers on all platforms
+  /// (notably mobile). The agentgw server accepts both:
+  ///   1. Authorization: Bearer <token> header (for Go/desktop clients)
+  ///   2. ?token=<token> query parameter (for Flutter/mobile clients)
   Future<void> connect() async {
     if (_disposed) return;
     try {
-      _channel = WebSocketChannel.connect(
-        Uri.parse(url),
-        protocols: [],
-      );
-      // Add auth header workaround: send auth as first message
-      // (web_socket_channel doesn't support custom headers on all platforms)
+      // Append token as query parameter for cross-platform auth
+      final uri = Uri.parse(url).replace(queryParameters: {'token': token});
+      _channel = WebSocketChannel.connect(uri);
       await _channel!.ready;
-      _channel!.sink.add(jsonEncode({'type': 'auth', 'token': token}));
       _sub = _channel!.stream.listen(
         _onMessage,
         onError: (_) => _scheduleReconnect(),
@@ -899,6 +901,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/connection_config.dart';
 import '../services/ws_client.dart';
 import '../services/connection_store.dart';
+import 'nodes_provider.dart';
 
 enum ConnectionStatus { disconnected, connecting, connected }
 
@@ -912,43 +915,33 @@ class ConnectionState {
 
 class ConnectionNotifier extends StateNotifier<ConnectionState> {
   final Ref _ref;
+  WsClient? _client;
+
   ConnectionNotifier(this._ref) : super(const ConnectionState());
 
+  /// Connects to agentgw. Wires event forwarding to NodesNotifier via Ref.
   Future<void> connect(ConnectionConfig cfg) async {
     state = state.copyWith(config: cfg, status: ConnectionStatus.connecting);
     await ConnectionStore().save(cfg);
-    final client = _ref.read(wsClientProvider);
-    client.onEvent((msg) => _ref.read(nodesNotifierProvider.notifier).handleEvent(msg));
-    await client.connect();
+    _client?.dispose();
+    _client = WsClient(url: cfg.url, token: cfg.token);
+    _client!.onEvent((msg) => _ref.read(nodesProvider.notifier).handleEvent(msg));
+    await _client!.connect();
     state = state.copyWith(status: ConnectionStatus.connected);
   }
 
+  WsClient? get client => _client;
+
   void disconnect() {
-    _ref.read(wsClientProvider).dispose();
+    _client?.dispose();
+    _client = null;
     state = const ConnectionState();
   }
 }
 
-// Lazy singleton WsClient — recreated when config changes
-final wsClientProvider = Provider<WsClient>((ref) {
-  // Placeholder; real client created in ConnectionNotifier.connect
-  return WsClient(url: '', token: '');
-});
-
 final connectionProvider = StateNotifierProvider<ConnectionNotifier, ConnectionState>(
   (ref) => ConnectionNotifier(ref),
 );
-
-// Forward reference for cross-provider event handling
-final nodesNotifierProvider = StateNotifierProvider<NodesNotifier, Map<String, dynamic>>(
-  (ref) => throw UnimplementedError('override in nodes_provider.dart'),
-);
-
-// Avoid circular import: define stub here, real impl in nodes_provider.dart
-class NodesNotifier extends StateNotifier<Map<String, dynamic>> {
-  NodesNotifier() : super({});
-  void handleEvent(dynamic msg) {}
-}
 ```
 
 Create `agentapp/lib/providers/nodes_provider.dart`:
@@ -1089,59 +1082,7 @@ final conversationProvider =
 );
 ```
 
-- [ ] **Step 4: Fix import in nodes_provider_test.dart**
-
-The test imports `nodesProvider` and `agentsForNodeProvider` — update the test to not import from `connection_provider.dart`. The `NodesNotifier` in `nodes_provider.dart` is the real one; remove the stub from `connection_provider.dart` and simplify the provider file.
-
-Edit `agentapp/lib/providers/connection_provider.dart` — remove the `NodesNotifier` stub class and `nodesNotifierProvider`:
-
-```dart
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../models/connection_config.dart';
-import '../services/ws_client.dart';
-import '../services/connection_store.dart';
-import 'nodes_provider.dart';
-
-enum ConnectionStatus { disconnected, connecting, connected }
-
-class ConnectionState {
-  final ConnectionConfig? config;
-  final ConnectionStatus status;
-  const ConnectionState({this.config, this.status = ConnectionStatus.disconnected});
-  ConnectionState copyWith({ConnectionConfig? config, ConnectionStatus? status}) =>
-      ConnectionState(config: config ?? this.config, status: status ?? this.status);
-}
-
-class ConnectionNotifier extends StateNotifier<ConnectionState> {
-  WsClient? _client;
-
-  ConnectionNotifier() : super(const ConnectionState());
-
-  Future<void> connect(ConnectionConfig cfg, NodesNotifier nodesNotifier) async {
-    state = state.copyWith(config: cfg, status: ConnectionStatus.connecting);
-    await ConnectionStore().save(cfg);
-    _client?.dispose();
-    _client = WsClient(url: cfg.url, token: cfg.token);
-    _client!.onEvent((msg) => nodesNotifier.handleEvent(msg));
-    await _client!.connect();
-    state = state.copyWith(status: ConnectionStatus.connected);
-  }
-
-  WsClient? get client => _client;
-
-  void disconnect() {
-    _client?.dispose();
-    _client = null;
-    state = const ConnectionState();
-  }
-}
-
-final connectionProvider = StateNotifierProvider<ConnectionNotifier, ConnectionState>(
-  (ref) => ConnectionNotifier(),
-);
-```
-
-- [ ] **Step 5: Run tests — expect PASS**
+- [ ] **Step 4: Run tests — expect PASS**
 
 ```bash
 cd /Users/fengming.xie/Documents/project/phone-talk/agentapp
@@ -1153,7 +1094,7 @@ Expected:
 All tests passed!
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd /Users/fengming.xie/Documents/project/phone-talk
@@ -1295,8 +1236,7 @@ class _ConnectFormState extends State<_ConnectForm> {
     setState(() { _loading = true; _error = null; });
     try {
       final cfg = ConnectionConfig(url: _urlCtrl.text.trim(), token: _tokenCtrl.text.trim());
-      final nodesNotifier = widget.ref.read(nodesProvider.notifier);
-      await widget.ref.read(connectionProvider.notifier).connect(cfg, nodesNotifier);
+      await widget.ref.read(connectionProvider.notifier).connect(cfg);
       if (mounted) context.go('/dashboard');
     } catch (e) {
       setState(() { _error = e.toString(); });
