@@ -29,6 +29,7 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -42,7 +43,10 @@ func (s *Store) migrate() error {
 		work_dir TEXT NOT NULL,
 		resume_session_id TEXT NOT NULL DEFAULT ''
 	)`)
-	return err
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -52,7 +56,10 @@ func (s *Store) SaveAgent(r AgentRecord) error {
 		`INSERT OR REPLACE INTO agents (id, name, provider, work_dir, resume_session_id) VALUES (?,?,?,?,?)`,
 		r.ID, r.Name, r.Provider, r.WorkDir, r.ResumeSessionID,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("save agent %s: %w", r.ID, err)
+	}
+	return nil
 }
 
 func (s *Store) ListAgents() ([]AgentRecord, error) {
@@ -73,11 +80,25 @@ func (s *Store) ListAgents() ([]AgentRecord, error) {
 }
 
 func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
-	_, err := s.db.Exec(`UPDATE agents SET resume_session_id=? WHERE id=?`, sessionID, id)
-	return err
+	result, err := s.db.Exec(`UPDATE agents SET resume_session_id=? WHERE id=?`, sessionID, id)
+	if err != nil {
+		return fmt.Errorf("update resume session for agent %s: %w", id, err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	return nil
 }
 
 func (s *Store) DeleteAgent(id string) error {
-	_, err := s.db.Exec(`DELETE FROM agents WHERE id=?`, id)
-	return err
+	result, err := s.db.Exec(`DELETE FROM agents WHERE id=?`, id)
+	if err != nil {
+		return fmt.Errorf("delete agent %s: %w", id, err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	return nil
 }
