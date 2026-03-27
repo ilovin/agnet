@@ -23,7 +23,18 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
   void handleEvent(WsMessage event) {
     if (event.method != 'conversation.message') return;
     final params = event.params as Map<String, dynamic>;
-    final msg = MessageModel.fromJson(params);
+    final nodeId = params['nodeId'] as String? ?? '';
+    final agentId = params['agentId'] as String? ?? '';
+    // seq not provided in push events — use current length as seq
+    final key = (nodeId, agentId);
+    final existing = state[key] ?? [];
+    final msg = MessageModel(
+      nodeId: nodeId,
+      agentId: agentId,
+      role: (params['role'] as String?) == 'user' ? MessageRole.user : MessageRole.assistant,
+      text: params['text'] as String? ?? '',
+      seq: existing.length,
+    );
     _appendMessage(msg);
   }
 

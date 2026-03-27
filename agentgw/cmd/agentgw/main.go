@@ -64,6 +64,7 @@ func runServer() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	http.Handle("/ws", srv)
+	http.Handle("/", srv)
 
 	tokenPreview := cfg.Token
 	if len(tokenPreview) > 8 {

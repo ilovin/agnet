@@ -3,6 +3,10 @@ package ws
 import (
 	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -47,6 +51,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.agentStop(req)
 	case "agent.restart":
 		return h.agentRestart(req)
+	case "opencode.discover":
+		return h.opencodeDiscover(req), nil
 	case "conversation.send":
 		return h.conversationSend(req), nil
 	case "conversation.history":
@@ -77,8 +83,10 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 
 func (h *handler) agentCreate(req RPCRequest) (RPCResponse, func()) {
 	name, _ := req.Params["name"].(string)
+	provider, _ := req.Params["provider"].(string)
 	cmd, _ := req.Params["cmd"].(string)
 	workDir, _ := req.Params["workDir"].(string)
+	sessionID, _ := req.Params["sessionId"].(string)
 
 	var args []string
 	if raw, ok := req.Params["args"]; ok {
@@ -86,15 +94,27 @@ func (h *handler) agentCreate(req RPCRequest) (RPCResponse, func()) {
 		_ = json.Unmarshal(b, &args)
 	}
 
-	if cmd == "" {
-		cmd = "claude"
-		args = []string{"--dangerously-skip-permissions"}
+	// Determine command based on provider
+	switch provider {
+	case "opencode":
+		cmd = "opencode"
+		if sessionID != "" {
+			args = []string{"-s", sessionID}
+		} else {
+			args = []string{}
+		}
+	default: // "claude" or empty
+		if cmd == "" {
+			cmd = "claude"
+			args = []string{"--dangerously-skip-permissions"}
+		}
 	}
+
 	if workDir == "" {
 		workDir = "/tmp"
 	}
 
-	id, err := h.server.manager.Create(name, cmd, args, workDir)
+	id, err := h.server.manager.Create(name, provider, cmd, args, workDir)
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
@@ -131,7 +151,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	if err := h.server.manager.Stop(id); err != nil {
 		log.Printf("stop agent %s on restart: %v", id, err)
 	}
-	newID, err := h.server.manager.Create(ag.Name, ag.Cmd, ag.Args, ag.WorkDir)
+	newID, err := h.server.manager.Create(ag.Name, ag.Provider, ag.Cmd, ag.Args, ag.WorkDir)
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
@@ -174,5 +194,63 @@ func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{
 		"events":  events,
 		"lastSeq": ag.EventBuf().LastSeq(),
+	})
+}
+
+// opencodeDiscover scans for available opencode sessions on the machine.
+func (h *handler) opencodeDiscover(req RPCRequest) RPCResponse {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errResp(req.ID, -32000, "cannot get home dir: "+err.Error())
+	}
+
+	// Scan session_diff directory
+	sessionDir := filepath.Join(home, ".local", "share", "opencode", "storage", "session_diff")
+	type sessionInfo struct {
+		ID         string    `json:"id"`
+		Name       string    `json:"name"`
+		ModifiedAt time.Time `json:"modifiedAt"`
+		Size       int64     `json:"size"`
+	}
+
+	var sessions []sessionInfo
+
+	entries, err := os.ReadDir(sessionDir)
+	if err != nil {
+		// Directory might not exist, return empty list
+		return okResp(req.ID, map[string]any{
+			"sessions": sessions,
+		})
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		// Extract session ID from filename (ses_xxx.json -> ses_xxx)
+		sessionID := strings.TrimSuffix(name, ".json")
+		if !strings.HasPrefix(sessionID, "ses_") {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		sessions = append(sessions, sessionInfo{
+			ID:         sessionID,
+			Name:       sessionID,
+			ModifiedAt: info.ModTime(),
+			Size:       info.Size(),
+		})
+	}
+
+	return okResp(req.ID, map[string]any{
+		"sessions": sessions,
 	})
 }

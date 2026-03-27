@@ -11,7 +11,6 @@ import (
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 	"github.com/phone-talk/agentgw/internal/proxy"
 	"github.com/phone-talk/agentgw/internal/tunnel"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 // EventCallback is called when a node's agentd pushes an event.
@@ -102,23 +101,13 @@ func (m *Manager) Connect(id string) error {
 	if keyPath == "" {
 		keyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
 	}
-	keyData, err := os.ReadFile(keyPath)
-	if err != nil {
-		n.SetStatus(StatusError)
-		return fmt.Errorf("read ssh key %s: %w", keyPath, err)
-	}
-	signer, err := gossh.ParsePrivateKey(keyData)
-	if err != nil {
-		n.SetStatus(StatusError)
-		return fmt.Errorf("parse ssh key: %w", err)
-	}
 
 	tun, err := tunnel.New(tunnel.Config{
 		SSHHost:    n.Host,
 		SSHPort:    n.SSHPort,
 		RemoteHost: "127.0.0.1",
 		RemotePort: n.AgentdPort,
-		AuthMethod: gossh.PublicKeys(signer),
+		SSHKeyPath: keyPath,
 	})
 	if err != nil {
 		n.SetStatus(StatusError)

@@ -20,6 +20,7 @@ class AgentModel {
   final String name;
   final String workDir;
   final String nodeId;
+  final String provider;
   final AgentStatus status;
 
   const AgentModel({
@@ -27,6 +28,7 @@ class AgentModel {
     required this.name,
     required this.workDir,
     required this.nodeId,
+    required this.provider,
     required this.status,
   });
 
@@ -35,6 +37,7 @@ class AgentModel {
         name: json['name'] as String? ?? '',
         workDir: json['workDir'] as String? ?? '',
         nodeId: json['nodeId'] as String? ?? '',
+        provider: json['provider'] as String? ?? 'custom',
         status: _parseAgentStatus(json['status'] as String? ?? ''),
       );
 
@@ -43,6 +46,7 @@ class AgentModel {
     String? name,
     String? workDir,
     String? nodeId,
+    String? provider,
     AgentStatus? status,
   }) =>
       AgentModel(
@@ -50,6 +54,7 @@ class AgentModel {
         name: name ?? this.name,
         workDir: workDir ?? this.workDir,
         nodeId: nodeId ?? this.nodeId,
+        provider: provider ?? this.provider,
         status: status ?? this.status,
       );
 }

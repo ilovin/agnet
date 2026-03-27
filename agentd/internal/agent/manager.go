@@ -3,6 +3,7 @@ package agent
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"sync"
 
 	agentpty "github.com/phone-talk/agentd/internal/pty"
@@ -22,10 +23,11 @@ func newUUID() string {
 
 // Manager creates, tracks, and controls Agent instances.
 type Manager struct {
-	mu      sync.RWMutex
-	agents  map[string]*Agent
-	store   *store.Store
-	dataDir string
+	mu        sync.RWMutex
+	agents    map[string]*Agent
+	store     *store.Store
+	dataDir   string
+	onOutput  func(agentID string, data map[string]any) // broadcast hook
 }
 
 func NewManager(s *store.Store, dataDir string) *Manager {
@@ -36,17 +38,56 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 	}
 }
 
+// LoadFromStore loads persisted agents from the store into memory.
+// Agents are registered with status=stopped; use agent.restart to start them.
+func (m *Manager) LoadFromStore() error {
+	records, err := m.store.ListAgents()
+	if err != nil {
+		return fmt.Errorf("list agents from store: %w", err)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range records {
+		var cmd string
+		var args []string
+		switch r.Provider {
+		case "opencode":
+			cmd = "opencode"
+			if r.ResumeSessionID != "" {
+				args = []string{"-s", r.ResumeSessionID}
+			}
+		default:
+			cmd = "claude"
+			args = []string{"--dangerously-skip-permissions"}
+		}
+		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
+		ag.setStatus(StatusStopped)
+		m.agents[r.ID] = ag
+	}
+	return nil
+}
+
+// SetOnOutput registers a callback invoked whenever an agent produces PTY output.
+func (m *Manager) SetOnOutput(fn func(agentID string, data map[string]any)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onOutput = fn
+}
+
 // Create spawns a new agent process using the given command/args.
-func (m *Manager) Create(name, cmd string, args []string, workDir string) (string, error) {
+func (m *Manager) Create(name, provider, cmd string, args []string, workDir string) (string, error) {
 	id := newUUID()
-	ag := newAgent(id, name, "custom", workDir, cmd, args)
+	if provider == "" {
+		provider = "custom"
+	}
+	ag := newAgent(id, name, provider, workDir, cmd, args)
 
 	m.mu.Lock()
 	m.agents[id] = ag
 	m.mu.Unlock()
 
 	_ = m.store.SaveAgent(store.AgentRecord{
-		ID: id, Name: name, Provider: "custom", WorkDir: workDir,
+		ID: id, Name: name, Provider: provider, WorkDir: workDir,
 	})
 
 	ag.setStatus(StatusStarting)
@@ -59,8 +100,29 @@ func (m *Manager) Create(name, cmd string, args []string, workDir string) (strin
 	ag.setProcess(p)
 	ag.setStatus(StatusIdle)
 
+	// Read PTY output, store in EventBuffer, and broadcast to WS clients.
 	go func() {
-		_ = p.Wait()
+		buf := make([]byte, 4096)
+		for {
+			n, err := p.Read(buf)
+			if n > 0 {
+				text := string(buf[:n])
+				data := map[string]any{"role": "assistant", "text": text}
+				ag.AppendEvent(data)
+				m.mu.RLock()
+				cb := m.onOutput
+				m.mu.RUnlock()
+				if cb != nil {
+					cb(id, data)
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					_ = err
+				}
+				break
+			}
+		}
 		ag.setStatus(StatusStopped)
 	}()
 
@@ -68,8 +130,8 @@ func (m *Manager) Create(name, cmd string, args []string, workDir string) (strin
 }
 
 // CreateWithWatcher spawns an agent and starts a ClaudeWatcher on sessionFile.
-func (m *Manager) CreateWithWatcher(name, cmd string, args []string, workDir, sessionFile string) (string, error) {
-	id, err := m.Create(name, cmd, args, workDir)
+func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, workDir, sessionFile string) (string, error) {
+	id, err := m.Create(name, provider, cmd, args, workDir)
 	if err != nil {
 		return id, err
 	}

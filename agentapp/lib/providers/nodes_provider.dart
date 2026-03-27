@@ -39,7 +39,11 @@ class NodesNotifier extends StateNotifier<NodeState> {
   /// Load agents for a given node from [agent.list] response.
   void loadAgents(String nodeId, List<dynamic> rawAgents) {
     final list = rawAgents
-        .map((a) => AgentModel.fromJson(a as Map<String, dynamic>))
+        .map((a) {
+          final json = a as Map<String, dynamic>;
+          json['nodeId'] = nodeId; // inject nodeId
+          return AgentModel.fromJson(json);
+        })
         .toList();
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = list;
@@ -68,7 +72,7 @@ class NodesNotifier extends StateNotifier<NodeState> {
   }
 
   void _handleAgentStatus(Map<String, dynamic> params) {
-    final nodeId = params['nodeId'] as String;
+    final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String;
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);

@@ -43,13 +43,22 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
     if (client != null) {
       try {
         final result = await client.call('node.list', {});
-        final nodes = (result['nodes'] as List?) ?? [];
+        final nodes = (result is List ? result : (result['nodes'] as List?) ?? []);
         ref.read(nodesProvider.notifier).loadNodes(nodes);
         // Subscribe to events
         client.onEvent((event) {
           ref.read(nodesProvider.notifier).handleEvent(event);
           ref.read(conversationProvider.notifier).handleEvent(event);
         });
+        // Load agents for each node
+        for (final n in nodes) {
+          final nodeId = (n as Map<String, dynamic>)['id'] as String;
+          try {
+            final ar = await client.call('agent.list', {'nodeId': nodeId});
+            final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
+            ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
+          } catch (_) {}
+        }
       } catch (_) {}
     }
     if (mounted) context.go('/dashboard');

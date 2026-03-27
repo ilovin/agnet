@@ -52,6 +52,9 @@ func runServer() {
 	defer s.Close()
 
 	mgr := agent.NewManager(s, cfg.DataDir)
+	if err := mgr.LoadFromStore(); err != nil {
+		log.Printf("warning: failed to load agents from store: %v", err)
+	}
 	srv := ws.New(mgr, cfg.Token)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)

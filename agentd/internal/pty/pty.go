@@ -17,6 +17,25 @@ type Process struct {
 
 // Spawn starts cmd with args in workDir, attached to a PTY. env is merged with os.Environ().
 func Spawn(cmd string, args []string, workDir string, env []string) (*Process, error) {
+	// Resolve command via user's home bin paths if not absolute
+	if cmd != "" && cmd[0] != '/' {
+		home, _ := os.UserHomeDir()
+		extraPaths := []string{
+			home + "/.local/bin",
+			home + "/.cargo/bin",
+			home + "/.opencode/bin",
+			home + "/.npm-global/bin",
+			"/usr/local/bin",
+		}
+		for _, dir := range extraPaths {
+			full := dir + "/" + cmd
+			if _, err := os.Stat(full); err == nil {
+				cmd = full
+				break
+			}
+		}
+	}
+
 	c := exec.Command(cmd, args...)
 	c.Dir = workDir
 	c.Env = append(os.Environ(), env...)

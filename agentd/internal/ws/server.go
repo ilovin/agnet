@@ -37,11 +37,24 @@ type Server struct {
 }
 
 func New(mgr *agent.Manager, token string) *Server {
-	return &Server{
+	srv := &Server{
 		manager: mgr,
 		token:   token,
 		clients: make(map[*websocket.Conn]*client),
 	}
+	// Wire PTY output → broadcast to all WS clients
+	mgr.SetOnOutput(func(agentID string, data map[string]any) {
+		srv.broadcast(RPCEvent{
+			JSONRPC: "2.0",
+			Method:  "conversation.message",
+			Params: map[string]any{
+				"agentId": agentID,
+				"role":    data["role"],
+				"text":    data["text"],
+			},
+		}, nil)
+	})
+	return srv
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

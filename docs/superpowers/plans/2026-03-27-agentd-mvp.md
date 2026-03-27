@@ -2212,13 +2212,195 @@ func TestClaudeWatcherIntegration(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Add `CreateWithWatcher` to manager.go**
+- [ ] **Step 2: Add `AppendEvent` and `setWatcher` to agent.go**
 
-Edit `agentd/internal/agent/manager.go` — add after the `Remove` function:
+Edit `agentd/internal/agent/agent.go` — replace the entire file with this updated version that adds the `watcher` field, `setWatcher`, and `AppendEvent` methods:
 
 ```go
+package agent
+
+import (
+	"fmt"
+	"sync"
+
+	"github.com/phone-talk/agentd/internal/eventbuf"
+	agentpty "github.com/phone-talk/agentd/internal/pty"
+	"github.com/phone-talk/agentd/internal/watcher"
+)
+
+type Status string
+
+const (
+	StatusCreated  Status = "created"
+	StatusStarting Status = "starting"
+	StatusIdle     Status = "idle"
+	StatusWorking  Status = "working"
+	StatusStopped  Status = "stopped"
+	StatusCrashed  Status = "crashed"
+)
+
+// Agent represents a single managed AI agent process.
+type Agent struct {
+	ID       string
+	Name     string
+	Provider string
+	WorkDir  string
+	Cmd      string   // original command used to spawn this agent
+	Args     []string // original args used to spawn this agent
+
+	mu      sync.RWMutex
+	status  Status
+	process *agentpty.Process
+	buf     *eventbuf.EventBuffer
+	w       *watcher.ClaudeWatcher
+}
+
+func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {
+	return &Agent{
+		ID:       id,
+		Name:     name,
+		Provider: provider,
+		WorkDir:  workDir,
+		Cmd:      cmd,
+		Args:     args,
+		status:   StatusCreated,
+		buf:      eventbuf.New(10000),
+	}
+}
+
+func (a *Agent) Status() Status {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.status
+}
+
+func (a *Agent) setStatus(s Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.status = s
+}
+
+// Buffer returns the EventBuffer for this agent (typed as interface{} to avoid import cycle in tests).
+func (a *Agent) Buffer() interface{} {
+	return a.buf
+}
+
+// EventBuf returns the typed EventBuffer.
+func (a *Agent) EventBuf() *eventbuf.EventBuffer {
+	return a.buf
+}
+
+// AppendEvent adds a conversation event to this agent's EventBuffer.
+func (a *Agent) AppendEvent(data map[string]any) {
+	a.buf.Append(data)
+}
+
+func (a *Agent) setProcess(p *agentpty.Process) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.process = p
+}
+
+func (a *Agent) setWatcher(w *watcher.ClaudeWatcher) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.w = w
+}
+
+func (a *Agent) kill() {
+	a.mu.RLock()
+	p := a.process
+	w := a.w
+	a.mu.RUnlock()
+	if w != nil {
+		w.Stop()
+	}
+	if p != nil {
+		_ = p.Kill()
+	}
+}
+
+// WriteInput sends text to the agent's PTY stdin (as if typed by the user).
+func (a *Agent) WriteInput(text string) error {
+	a.mu.RLock()
+	p := a.process
+	a.mu.RUnlock()
+	if p == nil {
+		return fmt.Errorf("agent process not running")
+	}
+	_, err := p.Write([]byte(text))
+	return err
+}
+```
+
+- [ ] **Step 3: Add `CreateWithWatcher` to manager.go**
+
+Edit `agentd/internal/agent/manager.go` — replace the entire file with this updated version:
+
+```go
+package agent
+
+import (
+	"fmt"
+	"sync"
+
+	"github.com/google/uuid"
+	agentpty "github.com/phone-talk/agentd/internal/pty"
+	"github.com/phone-talk/agentd/internal/store"
+	"github.com/phone-talk/agentd/internal/watcher"
+)
+
+// Manager creates, tracks, and controls Agent instances.
+type Manager struct {
+	mu      sync.RWMutex
+	agents  map[string]*Agent
+	store   *store.Store
+	dataDir string
+}
+
+func NewManager(s *store.Store, dataDir string) *Manager {
+	return &Manager{
+		agents:  make(map[string]*Agent),
+		store:   s,
+		dataDir: dataDir,
+	}
+}
+
+// Create spawns a new agent process using the given command/args (provider-resolved by caller).
+func (m *Manager) Create(name, cmd string, args []string, workDir string) (string, error) {
+	id := uuid.New().String()
+	ag := newAgent(id, name, "custom", workDir, cmd, args)
+
+	m.mu.Lock()
+	m.agents[id] = ag
+	m.mu.Unlock()
+
+	// Persist metadata
+	_ = m.store.SaveAgent(store.AgentRecord{
+		ID: id, Name: name, Provider: "custom", WorkDir: workDir,
+	})
+
+	ag.setStatus(StatusStarting)
+
+	p, err := agentpty.Spawn(cmd, args, workDir, nil)
+	if err != nil {
+		ag.setStatus(StatusCrashed)
+		return id, fmt.Errorf("spawn: %w", err)
+	}
+	ag.setProcess(p)
+	ag.setStatus(StatusIdle)
+
+	// Watch for process exit
+	go func() {
+		_ = p.Wait()
+		ag.setStatus(StatusStopped)
+	}()
+
+	return id, nil
+}
+
 // CreateWithWatcher spawns an agent and starts a ClaudeWatcher on sessionFile.
-// Use this for Claude Code agents where the JSONL session file is known.
+// Use this for Claude Code agents where the JSONL session file path is known at launch.
 func (m *Manager) CreateWithWatcher(name, cmd string, args []string, workDir, sessionFile string) (string, error) {
 	id, err := m.Create(name, cmd, args, workDir)
 	if err != nil {
@@ -2242,7 +2424,7 @@ func (m *Manager) CreateWithWatcher(name, cmd string, args []string, workDir, se
 				ag.setStatus(StatusIdle)
 			}
 		}
-		ag.buf.Append(data)
+		ag.AppendEvent(data)
 	})
 
 	if err := w.Start(); err != nil {
@@ -2251,41 +2433,56 @@ func (m *Manager) CreateWithWatcher(name, cmd string, args []string, workDir, se
 	ag.setWatcher(w)
 	return id, nil
 }
-```
 
-- [ ] **Step 3: Add watcher field and setWatcher/setStatus export to agent.go**
-
-Edit `agentd/internal/agent/agent.go` — add the watcher field and methods:
-
-```go
-// Add to import block:
-// "github.com/phone-talk/agentd/internal/watcher"
-
-// Add field to Agent struct:
-// watcher *watcher.ClaudeWatcher
-
-func (a *Agent) setWatcher(w *watcher.ClaudeWatcher) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.watcher = w
+// List returns a snapshot of all agents.
+func (m *Manager) List() []*Agent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Agent, 0, len(m.agents))
+	for _, ag := range m.agents {
+		out = append(out, ag)
+	}
+	return out
 }
 
-// Make setStatus exported for manager use (rename to SetStatus):
-func (a *Agent) SetStatus(s Status) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.status = s
+// Get returns an agent by ID or nil.
+func (m *Manager) Get(id string) *Agent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.agents[id]
+}
+
+// Stop kills the agent process.
+func (m *Manager) Stop(id string) error {
+	ag := m.Get(id)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found", id)
+	}
+	ag.kill()
+	ag.setStatus(StatusStopped)
+	return nil
+}
+
+// Remove stops and removes the agent from tracking.
+func (m *Manager) Remove(id string) error {
+	if err := m.Stop(id); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.agents, id)
+	m.mu.Unlock()
+	return m.store.DeleteAgent(id)
 }
 ```
 
-Update `manager.go` to call `ag.SetStatus` instead of `ag.setStatus` where needed.
+- [ ] **Step 4: Run unit tests to verify no regressions**
 
-- [ ] **Step 4: Add watcher import to manager.go**
-
-```go
-// Add to imports in manager.go:
-"github.com/phone-talk/agentd/internal/watcher"
+```bash
+cd /Users/fengming.xie/Documents/project/phone-talk/agentd
+go test ./internal/agent/... -v -timeout 15s
 ```
+
+Expected: all existing agent tests still PASS.
 
 - [ ] **Step 5: Run integration test**
 
