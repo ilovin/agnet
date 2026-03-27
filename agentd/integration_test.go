@@ -3,6 +3,7 @@
 package agentd_test
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -46,21 +47,35 @@ func TestEndToEnd(t *testing.T) {
 			"args": []string{"integration test ok"}, "workDir": t.TempDir(),
 		},
 	}
-	conn.WriteJSON(req)
+	if err := conn.WriteJSON(req); err != nil {
+		t.Fatalf("write agent.create: %v", err)
+	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var resp map[string]any
-	conn.ReadJSON(&resp)
+	if err := conn.ReadJSON(&resp); err != nil {
+		t.Fatalf("read agent.create response: %v", err)
+	}
 	if resp["error"] != nil {
 		t.Fatalf("create error: %v", resp["error"])
 	}
 
-	// List and verify
-	conn.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "agent.list", "params": nil})
+	// List and verify agent was created
+	if err := conn.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "agent.list", "params": nil}); err != nil {
+		t.Fatalf("write agent.list: %v", err)
+	}
 	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	var listResp map[string]any
-	conn.ReadJSON(&listResp)
-	t.Logf("agent.list response: %v", listResp)
+	if err := conn.ReadJSON(&listResp); err != nil {
+		t.Fatalf("read agent.list response: %v", err)
+	}
 	if listResp["error"] != nil {
 		t.Fatalf("list error: %v", listResp["error"])
+	}
+	// Assert the created agent is in the list
+	b, _ := json.Marshal(listResp["result"])
+	var agents []map[string]any
+	json.Unmarshal(b, &agents)
+	if len(agents) == 0 {
+		t.Error("expected at least 1 agent in list after create")
 	}
 }

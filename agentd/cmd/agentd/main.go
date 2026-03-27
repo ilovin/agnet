@@ -30,7 +30,11 @@ func main() {
 }
 
 func runServer() {
-	cfgPath := filepath.Join(os.Getenv("HOME"), ".agentd", "config.yaml")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("get home dir: %v", err)
+	}
+	cfgPath := filepath.Join(home, ".agentd", "config.yaml")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -52,7 +56,11 @@ func runServer() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	http.Handle("/ws", srv)
-	log.Printf("agentd listening on %s (token: %s...)", addr, cfg.Token[:8])
+	tokenPreview := cfg.Token
+	if len(tokenPreview) > 8 {
+		tokenPreview = tokenPreview[:8]
+	}
+	log.Printf("agentd listening on %s (token: %s...)", addr, tokenPreview)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
