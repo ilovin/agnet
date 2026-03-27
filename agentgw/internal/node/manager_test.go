@@ -31,8 +31,8 @@ func TestAddAndListNode(t *testing.T) {
 	if nodes[0].ID != id {
 		t.Errorf("expected id=%q, got %q", id, nodes[0].ID)
 	}
-	if nodes[0].Status != node.StatusDisconnected {
-		t.Errorf("expected Disconnected status, got %v", nodes[0].Status)
+	if nodes[0].GetStatus() != node.StatusDisconnected {
+		t.Errorf("expected Disconnected status, got %v", nodes[0].GetStatus())
 	}
 }
 

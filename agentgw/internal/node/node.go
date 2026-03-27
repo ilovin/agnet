@@ -25,24 +25,24 @@ type Node struct {
 	AgentdPort int
 	Token      string
 	SSHKeyPath string
-	Status     Status // readable directly; use SetStatus for thread-safe updates
 
-	mu    sync.RWMutex
-	proxy *proxy.Proxy
+	mu     sync.RWMutex
+	status Status  // private — use GetStatus()/SetStatus()
+	proxy  *proxy.Proxy
 }
 
-// SetStatus updates Status under the write lock.
+// SetStatus updates status under the write lock.
 func (n *Node) SetStatus(s Status) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.Status = s
+	n.status = s
 }
 
-// GetStatus reads Status under the read lock.
+// GetStatus reads status under the read lock.
 func (n *Node) GetStatus() Status {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return n.Status
+	return n.status
 }
 
 // GetProxy returns the node's WS proxy client under the read lock.

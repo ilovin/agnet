@@ -59,7 +59,7 @@ func (m *Manager) LoadAll(entries []nodecfg.NodeEntry) {
 			AgentdPort: entry.AgentdPort,
 			Token:      entry.Token,
 			SSHKeyPath: entry.SSHKeyPath,
-			Status:     StatusDisconnected,
+			status:     StatusDisconnected,
 		}
 	}
 }
@@ -77,7 +77,7 @@ func (m *Manager) Add(entry nodecfg.NodeEntry) (string, error) {
 		AgentdPort: entry.AgentdPort,
 		Token:      entry.Token,
 		SSHKeyPath: entry.SSHKeyPath,
-		Status:     StatusDisconnected,
+		status:     StatusDisconnected,
 	}
 	m.mu.Lock()
 	m.nodes[n.ID] = n
