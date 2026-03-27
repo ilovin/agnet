@@ -46,3 +46,31 @@ data_dir: "/tmp/agentd-data"
 		t.Errorf("expected token 'mytoken', got %q", cfg.Token)
 	}
 }
+
+func TestLoadEmptyTokenGeneratesToken(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	content := "port: 8080\n" // no token field
+	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Token == "" {
+		t.Error("expected non-empty token when config has no token field")
+	}
+}
+
+func TestLoadDefaultsWritesFile(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	_, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		t.Error("expected config file to be written on first boot")
+	}
+}
