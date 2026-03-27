@@ -10,6 +10,7 @@ import (
 type handler struct {
 	server *Server
 	conn   *websocket.Conn
+	self   *client
 }
 
 func (h *handler) loop() {
@@ -20,11 +21,11 @@ func (h *handler) loop() {
 		}
 		var req RPCRequest
 		if err := json.Unmarshal(msg, &req); err != nil {
-			_ = h.conn.WriteJSON(errResp(nil, -32700, "parse error"))
+			_ = h.self.writeJSON(errResp(nil, -32700, "parse error"))
 			continue
 		}
 		resp, afterSend := h.dispatch(req)
-		if err := h.conn.WriteJSON(resp); err != nil {
+		if err := h.self.writeJSON(resp); err != nil {
 			log.Printf("ws write: %v", err)
 			return
 		}
@@ -45,7 +46,7 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 	case "agent.stop":
 		return h.agentStop(req)
 	case "agent.restart":
-		return h.agentRestart(req), nil
+		return h.agentRestart(req)
 	case "conversation.send":
 		return h.conversationSend(req), nil
 	case "conversation.history":
@@ -121,18 +122,26 @@ func (h *handler) agentStop(req RPCRequest) (RPCResponse, func()) {
 	}
 }
 
-func (h *handler) agentRestart(req RPCRequest) RPCResponse {
+func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	id, _ := req.Params["agentId"].(string)
 	ag := h.server.manager.Get(id)
 	if ag == nil {
-		return errResp(req.ID, -32000, "agent not found")
+		return errResp(req.ID, -32000, "agent not found"), nil
 	}
-	_ = h.server.manager.Stop(id)
+	if err := h.server.manager.Stop(id); err != nil {
+		log.Printf("stop agent %s on restart: %v", id, err)
+	}
 	newID, err := h.server.manager.Create(ag.Name, ag.Cmd, ag.Args, ag.WorkDir)
 	if err != nil {
-		return errResp(req.ID, -32000, err.Error())
+		return errResp(req.ID, -32000, err.Error()), nil
 	}
-	return okResp(req.ID, map[string]any{"id": newID})
+	resp := okResp(req.ID, map[string]any{"id": newID})
+	conn := h.conn
+	return resp, func() {
+		h.server.broadcast(event("agent.status_changed", map[string]any{
+			"agentId": newID, "status": "idle",
+		}), conn)
+	}
 }
 
 func (h *handler) conversationSend(req RPCRequest) RPCResponse {

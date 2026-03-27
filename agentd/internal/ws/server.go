@@ -14,20 +14,33 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// client wraps a WebSocket connection with its own write mutex.
+// gorilla/websocket connections are not safe for concurrent writes.
+type client struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+func (c *client) writeJSON(v any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteJSON(v)
+}
+
 // Server is the WebSocket HTTP handler.
 type Server struct {
 	manager *agent.Manager
 	token   string
 
 	mu      sync.RWMutex
-	clients map[*websocket.Conn]struct{}
+	clients map[*websocket.Conn]*client
 }
 
 func New(mgr *agent.Manager, token string) *Server {
 	return &Server{
 		manager: mgr,
 		token:   token,
-		clients: make(map[*websocket.Conn]struct{}),
+		clients: make(map[*websocket.Conn]*client),
 	}
 }
 
@@ -53,8 +66,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	c := &client{conn: conn}
+
 	s.mu.Lock()
-	s.clients[conn] = struct{}{}
+	s.clients[conn] = c
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -62,7 +77,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	h := &handler{server: s, conn: conn}
+	h := &handler{server: s, conn: conn, self: c}
 	h.loop()
 }
 
@@ -71,10 +86,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) broadcast(ev RPCEvent, exclude *websocket.Conn) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for conn := range s.clients {
+	for conn, c := range s.clients {
 		if conn == exclude {
 			continue
 		}
-		_ = conn.WriteJSON(ev)
+		_ = c.writeJSON(ev)
 	}
 }
