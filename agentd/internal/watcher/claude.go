@@ -3,7 +3,9 @@ package watcher
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -26,6 +28,7 @@ type ClaudeWatcher struct {
 	path     string
 	callback func(ConversationEvent)
 	stop     chan struct{}
+	once     sync.Once
 	offset   int64
 }
 
@@ -43,7 +46,7 @@ func (w *ClaudeWatcher) Start() error {
 }
 
 func (w *ClaudeWatcher) Stop() {
-	close(w.stop)
+	w.once.Do(func() { close(w.stop) })
 }
 
 func (w *ClaudeWatcher) loop() {
@@ -66,19 +69,28 @@ func (w *ClaudeWatcher) poll() error {
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(w.offset, 0); err != nil {
+	if _, err := f.Seek(w.offset, io.SeekStart); err != nil {
 		return err
 	}
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		w.offset += int64(len(line)) + 1 // +1 for newline
 		if ev, ok := parseLine(line); ok {
 			w.callback(ev)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// Get the actual file position after scanning to avoid newline-encoding assumptions
+	pos, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	w.offset = pos
+	return nil
 }
 
 // claudeLine is the minimal structure we need from Claude's JSONL output.

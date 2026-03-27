@@ -111,3 +111,16 @@ func collectStatuses(ch <-chan watcher.AgentStatus, count int, timeout time.Dura
 		}
 	}
 }
+
+func TestClaudeWatcherStopIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "test.jsonl")
+	os.WriteFile(sessionFile, []byte{}, 0644)
+
+	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {})
+	w.Start()
+
+	// Calling Stop twice must not panic
+	w.Stop()
+	w.Stop() // should be a no-op, not a panic
+}
