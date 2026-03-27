@@ -25,7 +25,8 @@ type pending struct {
 
 // Proxy is a WebSocket JSON-RPC client connected to a remote agentd.
 type Proxy struct {
-	mu      sync.Mutex
+	writeMu sync.Mutex   // serializes all conn.WriteJSON calls
+	mu      sync.Mutex   // protects pending map and nextID
 	conn    *websocket.Conn
 	pending map[float64]*pending
 	nextID  float64
@@ -111,7 +112,10 @@ func (p *Proxy) Call(method string, params any, timeout time.Duration) (any, err
 	req := rpcMsg{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	p.mu.Unlock()
 
-	if err := p.conn.WriteJSON(req); err != nil {
+	p.writeMu.Lock()
+	err := p.conn.WriteJSON(req)
+	p.writeMu.Unlock()
+	if err != nil {
 		p.mu.Lock()
 		delete(p.pending, id)
 		p.mu.Unlock()
@@ -137,9 +141,9 @@ func (p *Proxy) Call(method string, params any, timeout time.Duration) (any, err
 
 // Send sends a JSON-RPC request without waiting for a response.
 func (p *Proxy) Send(method string, params any) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	req := rpcMsg{JSONRPC: "2.0", Method: method, Params: params}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	return p.conn.WriteJSON(req)
 }
 
