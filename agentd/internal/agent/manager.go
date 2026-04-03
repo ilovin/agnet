@@ -287,7 +287,7 @@ func (m *Manager) tryParseStreamJSON(text string) *streamJSONEvent {
 
 	// Validate it's a known stream-json event type
 	switch ev.Type {
-	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request":
+	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request", "stream_event":
 		return &ev
 	default:
 		return nil
@@ -360,8 +360,65 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		}
 
 	case "result":
+		// Final result with complete response
+		if result, ok := ev.Raw["result"].(string); ok && result != "" {
+			data = map[string]any{
+				"role": "assistant",
+				"text": result,
+				"raw":  false,
+				"kind": "result",
+			}
+			seq := m.appendAndPersistEvent(agentID, ag, data)
+			data["seq"] = seq
+
+			m.mu.RLock()
+			cb := m.onOutput
+			m.mu.RUnlock()
+			if cb != nil {
+				cb(agentID, data)
+			}
+		}
 		ag.setStatus(StatusIdle)
 		return
+
+	case "stream_event":
+		// Handle stream_event from Claude's -p mode
+		if ev.Raw == nil {
+			return
+		}
+		eventData, ok := ev.Raw["event"].(map[string]any)
+		if !ok {
+			return
+		}
+		eventType, _ := eventData["type"].(string)
+		
+		switch eventType {
+		case "message_start":
+			ag.setStatus(StatusWorking)
+		case "content_block_delta":
+			if delta, ok := eventData["delta"].(map[string]any); ok {
+				// Extract text_delta (actual response)
+				if text, ok := delta["text"].(string); ok && text != "" {
+					data = map[string]any{
+						"role": "assistant",
+						"text": text,
+						"raw":  false,
+						"kind": "text_delta",
+					}
+					seq := m.appendAndPersistEvent(agentID, ag, data)
+					data["seq"] = seq
+
+					m.mu.RLock()
+					cb := m.onOutput
+					m.mu.RUnlock()
+					if cb != nil {
+						cb(agentID, data)
+					}
+				}
+			}
+		case "message_stop":
+			ag.setStatus(StatusIdle)
+		}
 
 	case "control_request":
 		// Handle permission requests from Claude
