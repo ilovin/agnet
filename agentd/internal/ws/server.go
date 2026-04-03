@@ -44,14 +44,19 @@ func New(mgr *agent.Manager, token string) *Server {
 	}
 	// Wire PTY output → broadcast to all WS clients
 	mgr.SetOnOutput(func(agentID string, data map[string]any) {
+		params := map[string]any{
+			"agentId": agentID,
+			"role":    data["role"],
+			"text":    data["text"],
+		}
+		// Pass through raw flag if present
+		if raw, ok := data["raw"].(bool); ok {
+			params["raw"] = raw
+		}
 		srv.broadcast(RPCEvent{
 			JSONRPC: "2.0",
 			Method:  "conversation.message",
-			Params: map[string]any{
-				"agentId": agentID,
-				"role":    data["role"],
-				"text":    data["text"],
-			},
+			Params:  params,
 		}, nil)
 	})
 	return srv

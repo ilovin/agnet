@@ -10,6 +10,10 @@ final _router = GoRouter(
   initialLocation: '/connections',
   routes: [
     GoRoute(
+      path: '/',
+      redirect: (_, __) => '/connections',
+    ),
+    GoRoute(
       path: '/connections',
       builder: (_, __) => const ConnectionsScreen(),
     ),

@@ -17,7 +17,8 @@ type NodeEntry struct {
 	SSHPort    int    `yaml:"ssh_port"`
 	AgentdPort int    `yaml:"agentd_port"`
 	SSHKeyPath string `yaml:"ssh_key_path"`
-	Token      string `yaml:"token"` // agentd bearer token
+	Token      string `yaml:"token"`    // agentd bearer token
+	SSHAlias   string `yaml:"ssh_alias"` // SSH config alias (e.g., "ws"), takes precedence over Host
 }
 
 // Store persists NodeEntry list to a YAML file.

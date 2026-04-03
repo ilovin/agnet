@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // Config holds parameters for establishing an SSH tunnel.
@@ -14,6 +16,8 @@ type Config struct {
 	RemotePort int
 	SSHKeyPath string
 	SSHUser    string
+	AuthMethod gossh.AuthMethod // optional auth method (if nil, uses SSHKeyPath)
+	SSHAlias   string           // optional SSH config alias (e.g., "ws"), takes precedence over SSHHost
 }
 
 // Tunnel forwards a local TCP port to a remote host:port via ssh subprocess.
@@ -42,15 +46,23 @@ func New(cfg Config) (*Tunnel, error) {
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "ServerAliveInterval=30",
 	}
-	if cfg.SSHKeyPath != "" {
-		args = append(args, "-i", cfg.SSHKeyPath)
-	}
-	if cfg.SSHPort != 0 && cfg.SSHPort != 22 {
-		args = append(args, "-p", fmt.Sprintf("%d", cfg.SSHPort))
-	}
+
+	// Determine SSH target host
 	host := cfg.SSHHost
-	if cfg.SSHUser != "" {
-		host = cfg.SSHUser + "@" + host
+	if cfg.SSHAlias != "" {
+		// Use SSH config alias (e.g., "ws" from .ssh/config)
+		host = cfg.SSHAlias
+	} else {
+		// Manual configuration
+		if cfg.SSHKeyPath != "" {
+			args = append(args, "-i", cfg.SSHKeyPath)
+		}
+		if cfg.SSHPort != 0 && cfg.SSHPort != 22 {
+			args = append(args, "-p", fmt.Sprintf("%d", cfg.SSHPort))
+		}
+		if cfg.SSHUser != "" {
+			host = cfg.SSHUser + "@" + host
+		}
 	}
 	args = append(args, host)
 

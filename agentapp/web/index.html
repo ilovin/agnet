@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="Agent Manager - A multi-AI-agent remote management system">
+
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="agentapp">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>Agent Manager</title>
+  <link rel="manifest" href="manifest.json">
+
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #fafafa;
+    }
+    #loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #333;
+    }
+    #loading .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #e0e0e0;
+      border-top: 3px solid #3f51b5;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 16px;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="spinner"></div>
+    <div>Loading Agent Manager...</div>
+  </div>
+
+  <script>
+    // Set locale for Flutter
+    Object.defineProperty(navigator, 'language', {
+      get: function() { return 'en-US'; }
+    });
+    Object.defineProperty(navigator, 'languages', {
+      get: function() { return ['en-US', 'en']; }
+    });
+
+    // Hide loading when Flutter is ready
+    window.addEventListener('flutter-first-frame', function() {
+      const loading = document.getElementById('loading');
+      if (loading) loading.style.display = 'none';
+    });
+
+    // Fallback: hide after 15 seconds
+    setTimeout(function() {
+      const loading = document.getElementById('loading');
+      if (loading) loading.style.display = 'none';
+    }, 15000);
+
+    // Intercept the loader to inject our config
+    (function() {
+      var originalSetter = null;
+      var realLoadFn = null;
+      var intercepted = false;
+
+      // Define _flutter with getter/setter
+      Object.defineProperty(window, '_flutter', {
+        configurable: true,
+        get: function() {
+          return window.__flutter_real;
+        },
+        set: function(val) {
+          window.__flutter_real = val;
+
+          // Only intercept once
+          if (intercepted) return;
+
+          if (val && val.loader && val.loader.load) {
+            intercepted = true;
+
+            // Capture the real load function
+            realLoadFn = val.loader.load.bind(val.loader);
+
+            // Replace with our interceptor
+            val.loader.load = function(options) {
+              // Inject config
+              options = options || {};
+              options.config = options.config || {};
+              options.config.canvasKitBaseUrl = "/canvaskit/";
+
+              // Call real loader
+              return realLoadFn(options);
+            };
+          }
+        }
+      });
+    })();
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

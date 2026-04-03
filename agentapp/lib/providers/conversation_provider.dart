@@ -25,15 +25,16 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
-    // seq not provided in push events — use current length as seq
     final key = (nodeId, agentId);
     final existing = state[key] ?? [];
+    final seq = (params['seq'] as num?)?.toInt() ??
+        (existing.isEmpty ? 0 : (existing.last.seq + 1));
     final msg = MessageModel(
       nodeId: nodeId,
       agentId: agentId,
       role: (params['role'] as String?) == 'user' ? MessageRole.user : MessageRole.assistant,
       text: params['text'] as String? ?? '',
-      seq: existing.length,
+      seq: seq,
     );
     _appendMessage(msg);
   }

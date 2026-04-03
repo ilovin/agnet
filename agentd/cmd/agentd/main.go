@@ -30,11 +30,16 @@ func main() {
 }
 
 func runServer() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("get home dir: %v", err)
+	var cfgPath string
+	if envPath := os.Getenv("AGENTD_CONFIG"); envPath != "" {
+		cfgPath = envPath
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("get home dir: %v", err)
+		}
+		cfgPath = filepath.Join(home, ".agentd", "config.yaml")
 	}
-	cfgPath := filepath.Join(home, ".agentd", "config.yaml")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)

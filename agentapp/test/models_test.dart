@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:agentapp/models/connection_config.dart';
 import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/models/agent_model.dart';
-import 'package:agentapp/models/message_model.dart';
+import 'package:agentapp/screens/dashboard_screen.dart';
 
 void main() {
   group('ConnectionConfig', () {
@@ -49,18 +49,49 @@ void main() {
     });
   });
 
-  group('MessageModel', () {
-    test('fromJson parses role and text', () {
-      final m = MessageModel.fromJson({
-        'role': 'assistant',
-        'text': 'Hello!',
-        'seq': 42,
-        'nodeId': 'n1',
-        'agentId': 'a1',
+  group('SessionCandidate', () {
+    test('fromJson parses fields and lowercases provider', () {
+      final c = SessionCandidate.fromJson({
+        'pid': 123,
+        'provider': 'Claude',
+        'workDir': '/tmp/work',
+        'session': 'ses_abc',
+        'terminal': 'ttys001',
       });
-      expect(m.role, equals(MessageRole.assistant));
-      expect(m.text, equals('Hello!'));
-      expect(m.seq, equals(42));
+
+      expect(c.pid, equals(123));
+      expect(c.provider, equals('claude'));
+      expect(c.workDir, equals('/tmp/work'));
+      expect(c.sessionId, equals('ses_abc'));
+      expect(c.terminal, equals('ttys001'));
+    });
+
+    test('fromJson derives sessionId from sessionFile path', () {
+      final c = SessionCandidate.fromJson({
+        'provider': 'opencode',
+        'workDir': '/tmp',
+        'sessionFile': '/home/user/.claude/projects/ses_file123.jsonl',
+      });
+
+      expect(c.sessionId, equals('ses_file123'));
+    });
+  });
+
+  group('parseSessionCandidates', () {
+    test('parses both list and wrapped map response', () {
+      final fromList = parseSessionCandidates([
+        {'pid': 1, 'provider': 'claude', 'workDir': '/a'},
+      ]);
+      final fromMap = parseSessionCandidates({
+        'processes': [
+          {'pid': 2, 'provider': 'opencode', 'workDir': '/b'},
+        ],
+      });
+
+      expect(fromList.length, equals(1));
+      expect(fromList.first.pid, equals(1));
+      expect(fromMap.length, equals(1));
+      expect(fromMap.first.pid, equals(2));
     });
   });
 }

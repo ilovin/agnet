@@ -15,11 +15,28 @@ class ConnectionsScreen extends ConsumerStatefulWidget {
 
 class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
   List<ConnectionConfig> _saved = [];
+  bool _autoConnected = false;
 
   @override
   void initState() {
     super.initState();
     _loadSaved();
+    // Auto-connect to default gateway after a short delay
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && !_autoConnected) {
+        _autoConnectDefault();
+      }
+    });
+  }
+
+  Future<void> _autoConnectDefault() async {
+    _autoConnected = true;
+    // Default connection: localhost gateway with demo token
+    const defaultCfg = ConnectionConfig(
+      url: 'ws://localhost:8080',
+      token: 'testtoken123',
+    );
+    await _connect(defaultCfg);
   }
 
   Future<void> _loadSaved() async {

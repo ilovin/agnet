@@ -25,9 +25,10 @@ type Node struct {
 	AgentdPort int
 	Token      string
 	SSHKeyPath string
+	SSHAlias   string // SSH config alias (e.g., "ws")
 
 	mu     sync.RWMutex
-	status Status  // private — use GetStatus()/SetStatus()
+	status Status // private — use GetStatus()/SetStatus()
 	proxy  *proxy.Proxy
 }
 

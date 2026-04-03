@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -98,10 +99,7 @@ type claudeLine struct {
 	Type    string `json:"type"`
 	Message struct {
 		Role    string `json:"role"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
-		} `json:"content"`
+		Content interface{} `json:"content"` // Can be string or array
 	} `json:"message"`
 }
 
@@ -110,33 +108,61 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 	if err := json.Unmarshal(data, &line); err != nil {
 		return ConversationEvent{}, false
 	}
+	// Only process user and assistant messages
 	if line.Type != "user" && line.Type != "assistant" {
 		return ConversationEvent{}, false
 	}
 
 	ev := ConversationEvent{Role: line.Message.Role}
-	hasToolUse := false
-	isTextStop := false
 
-	for _, c := range line.Message.Content {
-		switch c.Type {
-		case "text":
-			ev.Text += c.Text
-			isTextStop = true
-		case "tool_use":
-			hasToolUse = true
+	// Content can be either a string or an array of content blocks
+	switch content := line.Message.Content.(type) {
+	case string:
+		// Simple text content
+		ev.Text = content
+	case []interface{}:
+		// Array of content blocks (text, tool_use, etc.)
+		hasToolUse := false
+		isTextStop := false
+		for _, item := range content {
+			if block, ok := item.(map[string]interface{}); ok {
+				blockType, _ := block["type"].(string)
+				switch blockType {
+				case "text":
+					if text, ok := block["text"].(string); ok {
+						ev.Text += text
+						isTextStop = true
+					}
+				case "tool_use":
+					hasToolUse = true
+					if name, ok := block["name"].(string); ok {
+						if input, ok := block["input"].(map[string]interface{}); ok {
+							cmd, _ := input["command"].(string)
+							if cmd != "" {
+								ev.Text += fmt.Sprintf("[%s: %s]", name, cmd)
+							} else {
+								ev.Text += fmt.Sprintf("[%s]", name)
+							}
+						} else {
+							ev.Text += fmt.Sprintf("[%s]", name)
+						}
+					}
+				}
+			}
 		}
-	}
-
-	// Status change detection
-	if line.Type == "assistant" {
-		if hasToolUse {
-			s := StatusWorking
-			ev.StatusChange = &s
-		} else if isTextStop {
-			s := StatusStandby
-			ev.StatusChange = &s
+		// Status change detection
+		if line.Type == "assistant" {
+			if hasToolUse {
+				s := StatusWorking
+				ev.StatusChange = &s
+			} else if isTextStop {
+				s := StatusStandby
+				ev.StatusChange = &s
+			}
 		}
+	default:
+		// Unknown content type, skip
+		return ConversationEvent{}, false
 	}
 
 	return ev, true

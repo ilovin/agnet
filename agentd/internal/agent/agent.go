@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	agentpty "github.com/phone-talk/agentd/internal/pty"
@@ -29,23 +30,28 @@ type Agent struct {
 	Cmd      string   // original command used to spawn this agent
 	Args     []string // original args used to spawn this agent
 
-	mu      sync.RWMutex
-	status  Status
-	process *agentpty.Process
-	buf     *eventbuf.EventBuffer
-	w       *watcher.ClaudeWatcher
+	mu                       sync.RWMutex
+	status                   Status
+	process                  *agentpty.Process
+	buf                      *eventbuf.EventBuffer
+	w                        *watcher.ClaudeWatcher
+	permissionPromptActive    bool
+	permissionPromptResolved  bool      // once resolved, suppress re-detection
+	permissionResolvedAt      time.Time // when the prompt was resolved
+	permissionManager        *PermissionManager // manages permission requests
 }
 
 func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {
 	return &Agent{
-		ID:       id,
-		Name:     name,
-		Provider: provider,
-		WorkDir:  workDir,
-		Cmd:      cmd,
-		Args:     args,
-		status:   StatusCreated,
-		buf:      eventbuf.New(10000),
+		ID:                id,
+		Name:              name,
+		Provider:          provider,
+		WorkDir:           workDir,
+		Cmd:               cmd,
+		Args:              args,
+		status:            StatusCreated,
+		buf:               eventbuf.New(10000),
+		permissionManager: NewPermissionManager(),
 	}
 }
 
@@ -72,8 +78,8 @@ func (a *Agent) EventBuf() *eventbuf.EventBuffer {
 }
 
 // AppendEvent adds a conversation event to this agent's EventBuffer.
-func (a *Agent) AppendEvent(data map[string]any) {
-	a.buf.Append(data)
+func (a *Agent) AppendEvent(data map[string]any) uint64 {
+	return a.buf.Append(data)
 }
 
 func (a *Agent) setProcess(p *agentpty.Process) {
@@ -86,6 +92,41 @@ func (a *Agent) setWatcher(w *watcher.ClaudeWatcher) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.w = w
+}
+
+func (a *Agent) setPermissionPromptActive(active bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.permissionPromptActive = active
+}
+
+func (a *Agent) SetPermissionPromptActive(active bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.permissionPromptActive = active
+	if !active {
+		// Mark as resolved so we don't re-trigger on TUI footer text immediately.
+		a.permissionPromptResolved = true
+		a.permissionResolvedAt = time.Now()
+	}
+}
+
+func (a *Agent) PermissionPromptActive() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.permissionPromptActive
+}
+
+// PermissionPromptResolved returns true if the permission prompt was recently
+// resolved (within 10s), to suppress re-detection from stale TUI footer output.
+func (a *Agent) PermissionPromptResolved() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.permissionPromptResolved {
+		return false
+	}
+	// Auto-expire suppression window so future real prompts can still be detected.
+	return time.Since(a.permissionResolvedAt) < 10*time.Second
 }
 
 func (a *Agent) kill() {
@@ -101,12 +142,31 @@ func (a *Agent) kill() {
 	}
 }
 
+// Process returns the underlying PTY process
+func (a *Agent) Process() *agentpty.Process {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.process
+}
+
+// PermissionManager returns the permission manager for this agent
+func (a *Agent) PermissionManager() *PermissionManager {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.permissionManager
+}
+
 // WriteInput sends text to the agent's PTY stdin (as if typed by the user).
 func (a *Agent) WriteInput(text string) error {
 	a.mu.RLock()
 	p := a.process
+	w := a.w
 	a.mu.RUnlock()
 	if p == nil {
+		// Check if this is an attached agent (has watcher but no process)
+		if w != nil {
+			return fmt.Errorf("attached agents are read-only; use the original terminal to interact")
+		}
 		return fmt.Errorf("agent process not running")
 	}
 	_, err := p.Write([]byte(text))

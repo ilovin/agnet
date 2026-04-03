@@ -59,8 +59,13 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 	case "node.deploy":
 		return h.nodeDeploy(req)
 	case "agent.list", "agent.create", "agent.stop", "agent.restart",
-		"conversation.history", "conversation.send":
+		"conversation.history", "conversation.send", "conversation.key",
+		"session.list", "session.create", "session.attach", "session.catalog":
 		return dispatchResult{resp: h.proxyToNode(req)}
+	case "session.list_all":
+		return dispatchResult{resp: h.sessionListAll(req)}
+	case "session.catalog_all":
+		return dispatchResult{resp: h.sessionCatalogAll(req)}
 	default:
 		return dispatchResult{resp: errResp(req.ID, -32601, "method not found: "+req.Method)}
 	}
@@ -169,6 +174,10 @@ func (h *handler) nodeConnect(req RPCRequest) dispatchResult {
 
 func (h *handler) nodeDeploy(req RPCRequest) dispatchResult {
 	nodeID, _ := req.Params["nodeId"].(string)
+	remoteDir, _ := req.Params["remoteDir"].(string)
+	if remoteDir == "" {
+		remoteDir = "/opt/agentd"
+	}
 	n := h.server.manager.Get(nodeID)
 	if n == nil {
 		return dispatchResult{resp: errResp(req.ID, -32000, fmt.Sprintf("node %q not found", nodeID))}
@@ -177,11 +186,134 @@ func (h *handler) nodeDeploy(req RPCRequest) dispatchResult {
 		h.server.Broadcast(newEvent("node.status_changed", map[string]any{
 			"nodeId": nodeID, "status": "deploying",
 		}))
+		if err := h.server.manager.Deploy(nodeID, remoteDir); err != nil {
+			log.Printf("deploy node %s: %v", nodeID, err)
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": nodeID, "status": "error", "error": err.Error(),
+			}))
+		} else {
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": nodeID, "status": "deployed",
+			}))
+			// Auto-connect after successful deploy
+			if err := h.server.manager.Connect(nodeID); err != nil {
+				log.Printf("auto-connect node %s after deploy: %v", nodeID, err)
+				h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+					"nodeId": nodeID, "status": "error", "error": err.Error(),
+				}))
+			} else {
+				h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+					"nodeId": nodeID, "status": "connected",
+				}))
+			}
+		}
 	}
 	return dispatchResult{
 		resp:     okResp(req.ID, map[string]any{"ok": true, "message": "deploy started"}),
 		postSend: postSend,
 	}
+}
+
+func (h *handler) sessionListAll(req RPCRequest) RPCResponse {
+	nodes := h.server.manager.List()
+	items := make([]map[string]any, 0)
+	errors := make([]map[string]any, 0)
+
+	for _, n := range nodes {
+		result, err := h.server.manager.ForwardCall(n.ID, "session.list", nil, 30*time.Second)
+		if err != nil {
+			errors = append(errors, map[string]any{
+				"nodeId": n.ID,
+				"error":  err.Error(),
+			})
+			continue
+		}
+
+		resMap, ok := result.(map[string]any)
+		if !ok {
+			errors = append(errors, map[string]any{
+				"nodeId": n.ID,
+				"error":  "invalid session.list response",
+			})
+			continue
+		}
+
+		rawProcesses, ok := resMap["processes"].([]any)
+		if !ok {
+			errors = append(errors, map[string]any{
+				"nodeId": n.ID,
+				"error":  "missing processes in session.list response",
+			})
+			continue
+		}
+
+		for _, raw := range rawProcesses {
+			proc, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			item := make(map[string]any, len(proc)+1)
+			for k, v := range proc {
+				item[k] = v
+			}
+			item["nodeId"] = n.ID
+			items = append(items, item)
+		}
+	}
+
+	return okResp(req.ID, map[string]any{
+		"items":  items,
+		"errors": errors,
+	})
+}
+
+func (h *handler) sessionCatalogAll(req RPCRequest) RPCResponse {
+	nodes := h.server.manager.List()
+	items := make([]map[string]any, 0, len(nodes))
+	errors := make([]map[string]any, 0)
+
+	for _, n := range nodes {
+		result, err := h.server.manager.ForwardCall(n.ID, "session.catalog", nil, 30*time.Second)
+		if err != nil {
+			errors = append(errors, map[string]any{
+				"nodeId": n.ID,
+				"error":  err.Error(),
+			})
+			continue
+		}
+
+		resMap, ok := result.(map[string]any)
+		if !ok {
+			errors = append(errors, map[string]any{
+				"nodeId": n.ID,
+				"error":  "invalid session.catalog response",
+			})
+			continue
+		}
+
+		item := map[string]any{
+			"nodeId":        n.ID,
+			"managed":       []any{},
+			"attachable":    []any{},
+			"opencodeFiles": []any{},
+		}
+		if managed, ok := resMap["managed"].([]any); ok {
+			item["managed"] = managed
+		}
+		if attachable, ok := resMap["attachable"].([]any); ok {
+			item["attachable"] = attachable
+		}
+		if files, ok := resMap["opencodeFiles"].([]any); ok {
+			item["opencodeFiles"] = files
+		}
+
+		items = append(items, item)
+	}
+
+	return okResp(req.ID, map[string]any{
+		"items":  items,
+		"errors": errors,
+	})
 }
 
 func (h *handler) proxyToNode(req RPCRequest) RPCResponse {

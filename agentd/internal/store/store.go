@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -14,6 +16,16 @@ type AgentRecord struct {
 	Provider        string
 	WorkDir         string
 	ResumeSessionID string
+}
+
+// ConversationEventRecord is a persisted conversation event.
+type ConversationEventRecord struct {
+	AgentID   string
+	Seq       uint64
+	Role      string
+	Text      string
+	Raw       bool
+	CreatedAt string
 }
 
 // Store wraps a SQLite database for agent metadata.
@@ -45,6 +57,17 @@ func (s *Store) migrate() error {
 	)`)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+
+	_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS conversation_events (
+		agent_id TEXT NOT NULL,
+		seq INTEGER NOT NULL,
+		data_json TEXT NOT NULL,
+		created_at TEXT NOT NULL,
+		PRIMARY KEY (agent_id, seq)
+	)`)
+	if err != nil {
+		return fmt.Errorf("migrate conversation_events: %w", err)
 	}
 	return nil
 }
@@ -101,4 +124,72 @@ func (s *Store) DeleteAgent(id string) error {
 		return fmt.Errorf("agent %s not found", id)
 	}
 	return nil
+}
+
+func (s *Store) SaveConversationEvent(agentID string, seq uint64, data map[string]any) error {
+	if agentID == "" {
+		return fmt.Errorf("agent id is required")
+	}
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("marshal event data: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT OR REPLACE INTO conversation_events (agent_id, seq, data_json, created_at) VALUES (?,?,?,?)`,
+		agentID,
+		seq,
+		string(payload),
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("save conversation event agent=%s seq=%d: %w", agentID, seq, err)
+	}
+	return nil
+}
+
+func (s *Store) ListConversationEventsSince(agentID string, afterSeq uint64, limit int) ([]ConversationEventRecord, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	rows, err := s.db.Query(
+		`SELECT agent_id, seq, data_json, created_at
+		 FROM conversation_events
+		 WHERE agent_id=? AND seq>?
+		 ORDER BY seq ASC
+		 LIMIT ?`,
+		agentID,
+		afterSeq,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation events: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ConversationEventRecord, 0)
+	for rows.Next() {
+		var r ConversationEventRecord
+		var dataJSON string
+		if err := rows.Scan(&r.AgentID, &r.Seq, &dataJSON, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		_ = json.Unmarshal([]byte(dataJSON), &data)
+		r.Role, _ = data["role"].(string)
+		r.Text, _ = data["text"].(string)
+		r.Raw, _ = data["raw"].(bool)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) LastConversationSeq(agentID string) (uint64, error) {
+	var last sql.NullInt64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM conversation_events WHERE agent_id=?`, agentID).Scan(&last); err != nil {
+		return 0, fmt.Errorf("last conversation seq: %w", err)
+	}
+	if !last.Valid || last.Int64 < 0 {
+		return 0, nil
+	}
+	return uint64(last.Int64), nil
 }

@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/phone-talk/agentgw/internal/deployer"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 	"github.com/phone-talk/agentgw/internal/proxy"
 	"github.com/phone-talk/agentgw/internal/tunnel"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 // EventCallback is called when a node's agentd pushes an event.
@@ -58,6 +60,7 @@ func (m *Manager) LoadAll(entries []nodecfg.NodeEntry) {
 			AgentdPort: entry.AgentdPort,
 			Token:      entry.Token,
 			SSHKeyPath: entry.SSHKeyPath,
+			SSHAlias:   entry.SSHAlias,
 			status:     StatusDisconnected,
 		}
 	}
@@ -76,6 +79,7 @@ func (m *Manager) Add(entry nodecfg.NodeEntry) (string, error) {
 		AgentdPort: entry.AgentdPort,
 		Token:      entry.Token,
 		SSHKeyPath: entry.SSHKeyPath,
+		SSHAlias:   entry.SSHAlias,
 		status:     StatusDisconnected,
 	}
 	m.mu.Lock()
@@ -90,6 +94,7 @@ func (m *Manager) Add(entry nodecfg.NodeEntry) (string, error) {
 }
 
 // Connect establishes an SSH tunnel + WS proxy to a node's agentd.
+// For localhost/127.0.0.1, it connects directly without SSH tunnel.
 func (m *Manager) Connect(id string) error {
 	n := m.Get(id)
 	if n == nil {
@@ -97,34 +102,44 @@ func (m *Manager) Connect(id string) error {
 	}
 	n.SetStatus(StatusConnecting)
 
-	keyPath := n.SSHKeyPath
-	if keyPath == "" {
-		keyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
+	var wsURL string
+
+	// For localhost, connect directly without SSH tunnel
+	if n.Host == "localhost" || n.Host == "127.0.0.1" {
+		wsURL = fmt.Sprintf("ws://%s:%d/ws", n.Host, n.AgentdPort)
+	} else {
+		tunCfg := tunnel.Config{
+			SSHHost:    n.Host,
+			SSHPort:    n.SSHPort,
+			RemoteHost: "127.0.0.1",
+			RemotePort: n.AgentdPort,
+			SSHKeyPath: n.SSHKeyPath,
+			SSHAlias:   n.SSHAlias,
+		}
+
+		// If SSHAlias is set, use it; otherwise use key-based auth
+		if tunCfg.SSHAlias == "" && tunCfg.SSHKeyPath == "" {
+			tunCfg.SSHKeyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
+		}
+
+		tun, err := tunnel.New(tunCfg)
+		if err != nil {
+			n.SetStatus(StatusError)
+			return fmt.Errorf("ssh tunnel: %w", err)
+		}
+
+		localPort, err := tun.LocalPort()
+		if err != nil {
+			tun.Close()
+			n.SetStatus(StatusError)
+			return fmt.Errorf("local port: %w", err)
+		}
+
+		wsURL = fmt.Sprintf("ws://127.0.0.1:%d/ws", localPort)
 	}
 
-	tun, err := tunnel.New(tunnel.Config{
-		SSHHost:    n.Host,
-		SSHPort:    n.SSHPort,
-		RemoteHost: "127.0.0.1",
-		RemotePort: n.AgentdPort,
-		SSHKeyPath: keyPath,
-	})
-	if err != nil {
-		n.SetStatus(StatusError)
-		return fmt.Errorf("ssh tunnel: %w", err)
-	}
-
-	localPort, err := tun.LocalPort()
-	if err != nil {
-		tun.Close()
-		n.SetStatus(StatusError)
-		return fmt.Errorf("local port: %w", err)
-	}
-
-	wsURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", localPort)
 	p, err := proxy.New(wsURL, n.Token)
 	if err != nil {
-		tun.Close()
 		n.SetStatus(StatusError)
 		return fmt.Errorf("ws proxy: %w", err)
 	}
@@ -157,6 +172,70 @@ func (m *Manager) ConnectAll() {
 			}(n.ID)
 		}
 	}
+}
+
+// Deploy uploads the agentd binary to the remote node and starts it.
+// It requires the node to have SSH credentials configured.
+func (m *Manager) Deploy(id string, remoteDir string) error {
+	n := m.Get(id)
+	if n == nil {
+		return fmt.Errorf("node %q not found", id)
+	}
+
+	m.mu.RLock()
+	agentdBin := m.agentdBin
+	m.mu.RUnlock()
+
+	if len(agentdBin) == 0 {
+		return fmt.Errorf("no agentd binary embedded")
+	}
+
+	// Determine SSH user and key path
+	sshUser := os.Getenv("USER")
+	if sshUser == "" {
+		sshUser = "root"
+	}
+	keyPath := n.SSHKeyPath
+	if keyPath == "" {
+		keyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
+	}
+
+	// Read SSH private key
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return fmt.Errorf("read ssh key: %w", err)
+	}
+
+	signer, err := gossh.ParsePrivateKey(key)
+	if err != nil {
+		return fmt.Errorf("parse ssh key: %w", err)
+	}
+
+	// Create SSH client config
+	config := &gossh.ClientConfig{
+		User: sshUser,
+		Auth: []gossh.AuthMethod{
+			gossh.PublicKeys(signer),
+		},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+
+	// Connect to SSH server
+	sshHost := fmt.Sprintf("%s:%d", n.Host, n.SSHPort)
+	client, err := gossh.Dial("tcp", sshHost, config)
+	if err != nil {
+		return fmt.Errorf("ssh connect: %w", err)
+	}
+	defer client.Close()
+
+	// Create deployer and execute deployment
+	d := deployer.New(client)
+	if err := d.Deploy(remoteDir, agentdBin); err != nil {
+		return fmt.Errorf("deploy: %w", err)
+	}
+
+	return nil
 }
 
 // Remove disconnects and deletes a node, then persists the updated list.
@@ -219,6 +298,7 @@ func (m *Manager) toEntries() []nodecfg.NodeEntry {
 			AgentdPort: n.AgentdPort,
 			SSHKeyPath: n.SSHKeyPath,
 			Token:      n.Token,
+			SSHAlias:   n.SSHAlias,
 		})
 	}
 	return out
