@@ -53,13 +53,13 @@
   </div>
 
   <script>
-    // Set locale for Flutter
-    Object.defineProperty(navigator, 'language', {
-      get: function() { return 'en-US'; }
-    });
-    Object.defineProperty(navigator, 'languages', {
-      get: function() { return ['en-US', 'en']; }
-    });
+    // Pre-load Noto Sans SC font for CanvasKit before Flutter initializes
+    // This ensures CanvasKit can render CJK characters without gstatic fallback
+    window._flutterFontFamilies = window._flutterFontFamilies || {};
+    fetch('assets/fonts/NotoSansSC-Regular.ttf')
+      .then(r => r.arrayBuffer())
+      .then(buf => { window._flutterFontFamilies['NotoSansSC'] = buf; })
+      .catch(() => {});
 
     // Hide loading when Flutter is ready
     window.addEventListener('flutter-first-frame', function() {
@@ -72,46 +72,9 @@
       const loading = document.getElementById('loading');
       if (loading) loading.style.display = 'none';
     }, 15000);
-
-    // Intercept the loader to inject our config
-    (function() {
-      var originalSetter = null;
-      var realLoadFn = null;
-      var intercepted = false;
-
-      // Define _flutter with getter/setter
-      Object.defineProperty(window, '_flutter', {
-        configurable: true,
-        get: function() {
-          return window.__flutter_real;
-        },
-        set: function(val) {
-          window.__flutter_real = val;
-
-          // Only intercept once
-          if (intercepted) return;
-
-          if (val && val.loader && val.loader.load) {
-            intercepted = true;
-
-            // Capture the real load function
-            realLoadFn = val.loader.load.bind(val.loader);
-
-            // Replace with our interceptor
-            val.loader.load = function(options) {
-              // Inject config
-              options = options || {};
-              options.config = options.config || {};
-              options.config.canvasKitBaseUrl = "/canvaskit/";
-
-              // Call real loader
-              return realLoadFn(options);
-            };
-          }
-        }
-      });
-    })();
   </script>
+
+  <!-- Standard Flutter bootstrap: let flutter_bootstrap.js handle everything -->
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

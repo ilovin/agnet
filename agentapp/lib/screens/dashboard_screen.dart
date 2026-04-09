@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -6,6 +7,7 @@ import '../models/node_model.dart';
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
+import '../providers/health_provider.dart';
 
 class SessionCandidate {
   final int? pid;
@@ -99,10 +101,45 @@ class DashboardScreen extends ConsumerStatefulWidget {
 }
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
+  Timer? _refreshTimer;
+
   @override
   void initState() {
     super.initState();
     _setupEventListener();
+    _startAutoRefresh();
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    // Refresh every 3 seconds
+    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshAllNodes();
+    });
+    // Initial refresh
+    Future.delayed(const Duration(milliseconds: 100), _refreshAllNodes);
+  }
+
+  Future<void> _refreshAllNodes() async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+
+    try {
+      final result = await client.call('node.list', {});
+      final nodes = (result is List ? result : (result['nodes'] as List?) ?? []);
+
+      for (final n in nodes) {
+        final nodeId = (n as Map<String, dynamic>)['id'] as String;
+        await _refreshNodeAgents(nodeId);
+      }
+    } catch (e) {
+      debugPrint('Auto refresh error: $e');
+    }
   }
 
   void _setupEventListener() {
@@ -139,29 +176,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     final nodeState = ref.watch(nodesProvider);
-    final client = ref.watch(connectionProvider);
     final nodes = nodeState.nodeList;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('仪表盘'),
         actions: [
-          // Reconnection status indicator
-          if (client != null)
-            StreamBuilder<bool>(
-              stream: client.onConnectionChanged,
-              initialData: client.isConnected,
-              builder: (_, snap) {
-                final connected = snap.data ?? false;
-                return Padding(
-                  padding: const EdgeInsets.only(right: 12),
-                  child: Icon(
-                    connected ? Icons.wifi : Icons.wifi_off,
-                    color: connected ? Colors.green : Colors.red,
-                  ),
-                );
-              },
-            ),
+          // Health status indicator
+          const _HealthIndicator(),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
@@ -179,12 +201,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 }
 
-class NodeCard extends ConsumerWidget {
+class NodeCard extends ConsumerStatefulWidget {
   final NodeModel node;
   const NodeCard({super.key, required this.node});
 
+  @override
+  ConsumerState<NodeCard> createState() => _NodeCardState();
+}
+
+class _NodeCardState extends ConsumerState<NodeCard> {
+
   Color get _statusColor {
-    switch (node.status) {
+    switch (widget.node.status) {
       case NodeStatus.connected:
         return Colors.green;
       case NodeStatus.connecting:
@@ -198,7 +226,7 @@ class NodeCard extends ConsumerWidget {
   }
 
   String get _statusLabel {
-    switch (node.status) {
+    switch (widget.node.status) {
       case NodeStatus.connected:
         return '已连接';
       case NodeStatus.connecting:
@@ -213,9 +241,9 @@ class NodeCard extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final agents = ref.watch(nodesProvider).agentsFor(node.id);
-    final nodeDisplay = (node.host.isNotEmpty && node.host != 'localhost' && node.host != '127.0.0.1') ? node.host : node.name;
+  Widget build(BuildContext context) {
+    final agents = ref.watch(nodesProvider).agentsFor(widget.node.id);
+    final nodeDisplay = (widget.node.host.isNotEmpty && widget.node.host != 'localhost' && widget.node.host != '127.0.0.1') ? widget.node.host : widget.node.name;
 
     int statusPriority(AgentStatus s) {
       switch (s) {
@@ -261,11 +289,16 @@ class NodeCard extends ConsumerWidget {
           ListTile(
             leading: Icon(Icons.computer, color: _statusColor),
             title: Text(nodeDisplay, style: const TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('${node.host}  ·  $_statusLabel'),
+            subtitle: Text('${widget.node.host}  ·  $_statusLabel'),
             trailing: Icon(Icons.circle, color: _statusColor, size: 12),
           ),
           if (visibleAgents.isNotEmpty) const Divider(height: 1),
-          ...visibleAgents.map((a) => AgentRow(agent: a, nodeId: node.id)),
+          ...visibleAgents.map((a) => AgentRow(agent: a, nodeId: widget.node.id)),
+          if (visibleAgents.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('暂无活跃会话', style: TextStyle(color: Colors.grey)),
+            ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Wrap(
@@ -293,9 +326,9 @@ class NodeCard extends ConsumerWidget {
   Future<void> _refreshAgents(WidgetRef ref) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
-    final result = await client.call('agent.list', {'nodeId': node.id});
+    final result = await client.call('agent.list', {'nodeId': widget.node.id});
     final agents = (result is List ? result : (result['agents'] as List?) ?? []);
-    ref.read(nodesProvider.notifier).loadAgents(node.id, agents);
+    ref.read(nodesProvider.notifier).loadAgents(widget.node.id, agents);
   }
 
   void _showCreateAgentDialog(BuildContext context, WidgetRef ref) {
@@ -309,7 +342,7 @@ class NodeCard extends ConsumerWidget {
       context: context,
       builder: (_) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
-          title: Text('在 ${(node.host.isNotEmpty && node.host != 'localhost' && node.host != '127.0.0.1') ? node.host : node.name} 上新建 Agent'),
+          title: Text('在 ${(widget.node.host.isNotEmpty && widget.node.host != 'localhost' && widget.node.host != '127.0.0.1') ? widget.node.host : widget.node.name} 上新建 Agent'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -362,7 +395,7 @@ class NodeCard extends ConsumerWidget {
                 if (client == null) return;
 
                 final params = <String, dynamic>{
-                  'nodeId': node.id,
+                  'nodeId': widget.node.id,
                   'name': nameCtrl.text.trim(),
                   'workDir': cwdCtrl.text.trim(),
                   'provider': provider,
@@ -521,7 +554,7 @@ class NodeCard extends ConsumerWidget {
     Future<void> applyCatalog(Map<String, dynamic> map, StateSetter setState) async {
       final fetchedManaged = normalizeManaged(((map['managed'] as List?) ?? const [])
           .whereType<Map>()
-          .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': node.id}))
+          .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': widget.node.id}))
           .toList());
       final fetchedSessions = await visibleSessions(parseSessionCandidates(map), fetchedManaged);
 
@@ -534,12 +567,12 @@ class NodeCard extends ConsumerWidget {
 
     Future<void> fetchCatalog(StateSetter setState, BuildContext ctx, {bool runAutoAttach = false}) async {
       try {
-        final result = await client.call('session.catalog', {'nodeId': node.id});
+        final result = await client.call('session.catalog', {'nodeId': widget.node.id});
         final map = result is Map ? Map<String, dynamic>.from(result) : <String, dynamic>{};
 
         final fetchedManaged = normalizeManaged(((map['managed'] as List?) ?? const [])
             .whereType<Map>()
-            .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': node.id}))
+            .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': widget.node.id}))
             .toList());
 
         final fetchedSessions = await visibleSessions(parseSessionCandidates(map), fetchedManaged);
@@ -560,7 +593,7 @@ class NodeCard extends ConsumerWidget {
             }
           }
 
-          final refreshResult = await client.call('session.catalog', {'nodeId': node.id});
+          final refreshResult = await client.call('session.catalog', {'nodeId': widget.node.id});
           final refreshMap = refreshResult is Map ? Map<String, dynamic>.from(refreshResult) : <String, dynamic>{};
 
           if (!ctx.mounted) return;
@@ -582,11 +615,11 @@ class NodeCard extends ConsumerWidget {
     }
 
     try {
-      final result = await client.call('session.catalog', {'nodeId': node.id});
+      final result = await client.call('session.catalog', {'nodeId': widget.node.id});
       final map = result is Map ? Map<String, dynamic>.from(result) : <String, dynamic>{};
       managedAgents = normalizeManaged(((map['managed'] as List?) ?? const [])
           .whereType<Map>()
-          .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': node.id}))
+          .map((e) => AgentModel.fromJson({...Map<String, dynamic>.from(e), 'nodeId': widget.node.id}))
           .toList());
       sessions = await visibleSessions(parseSessionCandidates(map), managedAgents);
       opencodeFiles = const [];
@@ -607,7 +640,7 @@ class NodeCard extends ConsumerWidget {
             });
           }
           return AlertDialog(
-            title: Text('${(node.host.isNotEmpty && node.host != 'localhost' && node.host != '127.0.0.1') ? node.host : node.name} 会话管理'),
+            title: Text('${(widget.node.host.isNotEmpty && widget.node.host != 'localhost' && widget.node.host != '127.0.0.1') ? widget.node.host : widget.node.name} 会话管理'),
             content: SizedBox(
               width: double.maxFinite,
               child: (managedAgents.isEmpty && sessions.isEmpty && opencodeFiles.isEmpty)
@@ -646,7 +679,7 @@ class NodeCard extends ConsumerWidget {
                                 trailing: const Text('进入'),
                                 onTap: () {
                                   Navigator.pop(ctx);
-                                  context.push('/agent/${node.id}/${a.id}');
+                                  context.push('/agent/${widget.node.id}/${a.id}');
                                 },
                               );
                             }),
@@ -760,7 +793,7 @@ class NodeCard extends ConsumerWidget {
     if (client == null) return 'not connected';
 
     final params = <String, dynamic>{
-      'nodeId': node.id,
+      'nodeId': widget.node.id,
       'provider': candidate.provider,
       'name': '${candidate.provider}-attached',
     };
@@ -796,7 +829,7 @@ class NodeCard extends ConsumerWidget {
     if (client == null) return 'not connected';
     try {
       await client.call('session.create', {
-        'nodeId': node.id,
+        'nodeId': widget.node.id,
         'provider': 'opencode',
         'sessionId': sessionId,
         'name': 'opencode-$sessionId',
@@ -862,6 +895,52 @@ class AgentRow extends ConsumerWidget {
             )
           : null,
       onTap: () => context.push('/agent/$nodeId/${agent.id}'),
+    );
+  }
+}
+
+class _HealthIndicator extends ConsumerWidget {
+  const _HealthIndicator();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final health = ref.watch(healthProvider);
+
+    final status = health?.status ?? HealthStatus.unknown;
+    final color = switch (status) {
+      HealthStatus.healthy => Colors.green,
+      HealthStatus.degraded => Colors.orange,
+      HealthStatus.down => Colors.red,
+      HealthStatus.unknown => Colors.grey,
+    };
+
+    final label = switch (status) {
+      HealthStatus.healthy => 'Healthy',
+      HealthStatus.degraded => 'Degraded',
+      HealthStatus.down => 'Down',
+      HealthStatus.unknown => 'Checking...',
+    };
+
+    final nodeDetails = <String>[];
+    if (health?.nodes.isNotEmpty ?? false) {
+      for (final entry in health!.nodes.entries) {
+        final n = entry.value;
+        final latencyStr = n.latencyMs > 0 ? '${n.latencyMs}ms' : '';
+        final errStr = n.error != null ? ' (${n.error})' : '';
+        nodeDetails.add('${entry.key}: ${n.status}$latencyStr$errStr');
+      }
+    }
+
+    final tooltip = nodeDetails.isNotEmpty
+        ? '$label\n${nodeDetails.join('\n')}'
+        : label;
+
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: Tooltip(
+        message: tooltip,
+        child: Icon(Icons.circle, color: color, size: 14),
+      ),
     );
   }
 }

@@ -1,13 +1,26 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'screens/connections_screen.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/agent_detail_screen.dart';
 import 'screens/settings_screen.dart';
+import 'providers/connection_provider.dart';
 
 final _router = GoRouter(
   initialLocation: '/connections',
+  redirect: (context, state) {
+    // If navigating to dashboard/agent/settings without a connection, go to connections
+    // This handles the case where the browser reloads at /#/dashboard
+    final container = ProviderScope.containerOf(context);
+    final client = container.read(connectionProvider);
+    final needsConnection = client == null || !client.isConnected;
+    if (needsConnection && state.matchedLocation != '/connections') {
+      return '/connections';
+    }
+    return null;
+  },
   routes: [
     GoRoute(
       path: '/',
@@ -45,6 +58,7 @@ class AgentApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
+        fontFamily: 'Noto Sans SC',
       ),
       routerConfig: _router,
     );

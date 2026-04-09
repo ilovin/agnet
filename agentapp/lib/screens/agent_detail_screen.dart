@@ -97,13 +97,25 @@ String stripTerminalDrawing(String s) {
 }
 
 /// Chat message model for display
-/// Each message is displayed separately (like PC terminal)
 class ChatMessage {
   final String role;
   final String text;
   final int seq;
   final bool isRaw;
   final bool isPermissionPrompt;
+
+  /// true if this is a tool call (e.g. [Bash: git status])
+  bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
+
+  /// true if this looks like thinking/reasoning content
+  bool get isThinking => role == 'assistant' && !isToolCall && !isRaw && _thinkingPattern.hasMatch(text);
+
+  static final _toolCallPattern = RegExp(r'^\[[\w]+:');
+  static final _thinkingPattern = RegExp(
+    r'(让我|需要|用户|我应该|我来|首先|接下来|基于|根据|分析|检查|查看|'
+    r'I need|I should|Let me|The user|Based on|Looking at|'
+    r'我来分析|我来检查|我来查看|看起来|这说明)',
+  );
 
   ChatMessage({
     required this.role,
@@ -139,6 +151,9 @@ String processTerminalOutput(String rawText) {
 
   // Remove terminal drawing characters (box drawing, blocks, etc.)
   processed = stripTerminalDrawing(processed);
+
+  // Replace tabs with spaces (Claude tool output often contains \t)
+  processed = processed.replaceAll('\t', '  ');
 
   return processed;
 }
@@ -245,23 +260,25 @@ bool isNoiseOnlyText(String s) {
 
 /// Converts raw events to display messages.
 /// Handles both structured stream-json events and legacy PTY raw output.
+/// Merges consecutive assistant text_delta fragments into complete messages.
 List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final messages = <ChatMessage>[];
 
-  // Buffer for merging consecutive raw assistant chunks
-  final rawBuf = StringBuffer();
-  int rawBufSeq = 0;
+  // Buffer for merging consecutive assistant chunks (both raw and text_delta)
+  final mergeBuf = StringBuffer();
+  int mergeBufSeq = 0;
+  bool mergeBufRaw = false;
 
-  void flushRawBuf() {
-    if (rawBuf.isEmpty) return;
-    final merged = rawBuf.toString().trim();
-    rawBuf.clear();
+  void flushMergeBuf() {
+    if (mergeBuf.isEmpty) return;
+    final merged = mergeBuf.toString().trim();
+    mergeBuf.clear();
     if (!isNoiseOnlyText(merged)) {
       messages.add(ChatMessage(
         role: 'assistant',
         text: merged,
-        seq: rawBufSeq,
-        isRaw: true,
+        seq: mergeBufSeq,
+        isRaw: mergeBufRaw,
       ));
     }
   }
@@ -286,9 +303,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       continue; // Don't add to message list, handled by overlay
     }
 
-    // User messages: flush any pending raw buffer first
+    // User messages: flush any pending buffer first
     if (role == 'user') {
-      flushRawBuf();
+      flushMergeBuf();
       if (!isNoiseOnlyText(cleaned)) {
         messages.add(ChatMessage(
           role: role,
@@ -300,25 +317,33 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       continue;
     }
 
-    // Raw assistant output: buffer and merge
-    if (raw) {
+    // Assistant messages: skip noise
+    if (isNoiseOnlyText(cleaned) && cleaned.isEmpty) continue;
+
+    // Determine if this is a fragment that should be merged
+    // text_delta and raw events are fragments; other non-raw events are complete messages
+    final isFragment = raw || kind == 'text_delta';
+
+    if (isFragment) {
       if (isNoiseOnlyText(cleaned)) continue;
       if (cleaned.isNotEmpty) {
-        if (rawBuf.isEmpty) rawBufSeq = seq;
-        if (rawBuf.isNotEmpty) rawBuf.write('\n');
-        rawBuf.write(cleaned);
-        // Flush when we see sentence-ending content or significant newlines
+        if (mergeBuf.isEmpty) {
+          mergeBufSeq = seq;
+          mergeBufRaw = raw;
+        }
+        mergeBuf.write(cleaned);
+        // Flush when we see sentence-ending content or significant length
         if (cleaned.contains('？') || cleaned.contains('。') || cleaned.contains('！') ||
             cleaned.endsWith('?') || cleaned.endsWith('.') || cleaned.endsWith('!') ||
-            cleaned.length > 100) {
-          flushRawBuf();
+            cleaned.endsWith('\n') || mergeBuf.length > 200) {
+          flushMergeBuf();
         }
       }
       continue;
     }
 
-    // Structured message from watcher/stream-json (not raw)
-    flushRawBuf();
+    // Non-fragment assistant message (complete message from stream-json)
+    flushMergeBuf();
     if (isNoiseOnlyText(cleaned)) continue;
     messages.add(ChatMessage(
       role: role,
@@ -328,8 +353,8 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     ));
   }
 
-  // Flush any remaining raw buffer
-  flushRawBuf();
+  // Flush any remaining buffer
+  flushMergeBuf();
 
   return messages;
 }
@@ -402,6 +427,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
+        'limit': 200, // Only load recent events for initial display
       });
       final raw = result is Map ? result : <String, dynamic>{};
       final events = (raw['events'] as List?) ?? [];
@@ -957,6 +983,111 @@ class _ControlBar extends StatelessWidget {
   }
 }
 
+class _CollapsibleBubble extends StatefulWidget {
+  final String header;
+  final String content;
+  final IconData icon;
+  final Color color;
+
+  const _CollapsibleBubble({
+    required this.header,
+    required this.content,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  State<_CollapsibleBubble> createState() => _CollapsibleBubbleState();
+}
+
+class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          CircleAvatar(
+            radius: 12,
+            backgroundColor: scheme.surfaceContainerHighest,
+            child: Icon(widget.icon, size: 14, color: widget.color),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              borderRadius: BorderRadius.circular(8),
+              child: AnimatedCrossFade(
+                firstChild: _buildCollapsed(scheme),
+                secondChild: _buildExpanded(scheme),
+                crossFadeState: _expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 200),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCollapsed(ColorScheme scheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.chevron_right, size: 16, color: widget.color),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              widget.header,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExpanded(ColorScheme scheme) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.expand_more, size: 16, color: widget.color),
+              const SizedBox(width: 6),
+              Text(widget.header, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant, fontWeight: FontWeight.w500)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SelectableText(
+            widget.content,
+            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant, height: 1.4),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final Future<void> Function()? onResolvePermissionPrompt;
@@ -1022,6 +1153,28 @@ class _MessageBubble extends StatelessWidget {
     final isUser = message.role == 'user';
     final isRaw = message.isRaw;
     final scheme = Theme.of(context).colorScheme;
+
+    // Collapsible thinking block
+    if (message.isThinking) {
+      final preview = message.text.replaceAll('\n', ' ');
+      return _CollapsibleBubble(
+        header: '思考过程...',
+        content: message.text,
+        icon: Icons.psychology,
+        color: Colors.orange.shade700,
+      );
+    }
+
+    // Collapsible tool call
+    if (message.isToolCall) {
+      final toolName = message.text.substring(1, message.text.indexOf(':'));
+      return _CollapsibleBubble(
+        header: '工具调用: $toolName',
+        content: message.text,
+        icon: Icons.build,
+        color: scheme.primary,
+      );
+    }
 
     // Raw ANSI output has different styling (dimmed, smaller)
     final bgColor = isUser
