@@ -1509,19 +1509,20 @@ class _MessageBubble extends StatelessWidget {
 
     // Collapsible thinking block
     if (message.isThinking) {
-      // 从内容第一行提取 topic（前20字符）
-      String thinkingHeader = '思考过程';
+      // 提取内容预览（60字符），直接放在标题中
+      String contentPreview = '';
       final firstLine = message.text
           .split('\n')
           .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '');
       if (firstLine.isNotEmpty) {
-        final topic = firstLine.trim();
-        thinkingHeader = '思考：${topic.length > 20 ? topic.substring(0, 20) : topic}';
+        final trimmed = firstLine.trim();
+        contentPreview = trimmed.length > 60 ? trimmed.substring(0, 60) : trimmed;
       }
+      final header = contentPreview.isNotEmpty ? '💭 $contentPreview' : '💭 思考过程';
       return _CollapsibleBubble(
-        header: thinkingHeader,
+        header: header,
         content: message.text,
-        collapsedPreview: buildCollapsedPreview(message.text, maxChars: 90),
+        collapsedPreview: '', // header 已包含预览，不需要重复
         icon: Icons.psychology,
         color: Colors.orange.shade700,
       );
@@ -1543,16 +1544,20 @@ class _MessageBubble extends StatelessWidget {
     // Collapsible tool call
     if (message.isToolCall) {
       final toolName = message.text.substring(1, message.text.indexOf(':'));
-      // 尝试从 message 中提取 toolSummary
-      String? toolSummary;
-      final summaryMatch = RegExp(r'\[toolSummary:([^\]]+)\]').firstMatch(message.text);
-      if (summaryMatch != null) {
-        toolSummary = summaryMatch.group(1);
+      // 提取参数作为标题的一部分
+      String params = '';
+      final paramMatch = RegExp(r':\s*(.+?)(?:\]|$)').firstMatch(message.text);
+      if (paramMatch != null) {
+        params = paramMatch.group(1)?.trim() ?? '';
+        if (params.length > 50) {
+          params = params.substring(0, 50) + '...';
+        }
       }
+      final header = params.isNotEmpty ? '🔧 $toolName: $params' : '🔧 $toolName';
       return _CollapsibleBubble(
-        header: '工具调用: $toolName',
+        header: header,
         content: message.text,
-        collapsedPreview: buildCollapsedPreview(toolSummary ?? message.text, maxChars: 90),
+        collapsedPreview: '', // header 已包含参数预览
         icon: Icons.build,
         color: scheme.primary,
       );
