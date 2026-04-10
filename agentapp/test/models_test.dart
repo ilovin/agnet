@@ -28,7 +28,17 @@ void main() {
     });
 
     test('copyWith changes only specified fields', () {
-      final n = NodeModel(id: 'n1', name: 'r1', host: '10.0.0.1', status: NodeStatus.disconnected);
+      final n = NodeModel(
+        id: 'n1',
+        name: 'r1',
+        host: '10.0.0.1',
+        status: NodeStatus.disconnected,
+        location: const NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: '10.0.0.1',
+        ),
+      );
       final n2 = n.copyWith(status: NodeStatus.connected);
       expect(n2.id, equals('n1'));
       expect(n2.status, equals(NodeStatus.connected));

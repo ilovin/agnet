@@ -59,3 +59,25 @@ func (n *Node) SetProxy(p *proxy.Proxy) {
 	defer n.mu.Unlock()
 	n.proxy = p
 }
+
+// IsLocal returns true if the node is on localhost.
+func (n *Node) IsLocal() bool {
+	switch n.Host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
+}
+
+// DisplayLocation returns a human-readable location string.
+// For local nodes: "localhost"
+// For remote nodes: "sshAlias (host)" or just "host"
+func (n *Node) DisplayLocation() string {
+	if n.IsLocal() {
+		return "localhost"
+	}
+	if n.SSHAlias != "" {
+		return n.SSHAlias + " (" + n.Host + ")"
+	}
+	return n.Host
+}

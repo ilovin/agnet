@@ -296,12 +296,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
   @override
   Widget build(BuildContext context) {
     final agents = ref.watch(nodesProvider).agentsFor(widget.node.id);
-    final nodeDisplay =
-        (widget.node.host.isNotEmpty &&
-            widget.node.host != 'localhost' &&
-            widget.node.host != '127.0.0.1')
-        ? widget.node.host
-        : widget.node.name;
+    final nodeDisplay = widget.node.isLocal ? widget.node.name : widget.node.name;
+
+    // Choose icon based on local/remote status
+    final nodeIcon = widget.node.isLocal ? Icons.computer : Icons.cloud;
 
     int statusPriority(AgentStatus s) {
       switch (s) {
@@ -345,12 +343,12 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           ListTile(
-            leading: Icon(Icons.computer, color: _statusColor),
+            leading: Icon(nodeIcon, color: _statusColor),
             title: Text(
               nodeDisplay,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            subtitle: Text('${widget.node.host}  ·  $_statusLabel'),
+            subtitle: Text('${widget.node.location.displayLocation}  ·  $_statusLabel'),
             trailing: Icon(Icons.circle, color: _statusColor, size: 12),
           ),
           if (visibleAgents.isNotEmpty) const Divider(height: 1),

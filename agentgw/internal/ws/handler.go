@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/phone-talk/agentgw/internal/node"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 )
 
@@ -75,16 +76,34 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 
 func (h *handler) nodeList(req RPCRequest) RPCResponse {
 	nodes := h.server.manager.List()
+	type nodeLocation struct {
+		Type            string `json:"type"`
+		Host            string `json:"host"`
+		DisplayLocation string `json:"displayLocation"`
+	}
 	type nodeInfo struct {
-		ID     string `json:"id"`
-		Name   string `json:"name"`
-		Host   string `json:"host"`
-		Status string `json:"status"`
+		ID       string       `json:"id"`
+		Name     string       `json:"name"`
+		Host     string       `json:"host"`
+		Status   string       `json:"status"`
+		Location nodeLocation `json:"location"`
 	}
 	result := make([]nodeInfo, 0, len(nodes))
 	for _, n := range nodes {
+		locType := "remote"
+		if n.IsLocal() {
+			locType = "local"
+		}
 		result = append(result, nodeInfo{
-			ID: n.ID, Name: n.Name, Host: n.Host, Status: string(n.GetStatus()),
+			ID:     n.ID,
+			Name:   n.Name,
+			Host:   n.Host,
+			Status: string(n.GetStatus()),
+			Location: nodeLocation{
+				Type:            locType,
+				Host:            n.Host,
+				DisplayLocation: n.DisplayLocation(),
+			},
 		})
 	}
 	return okResp(req.ID, result)
@@ -340,7 +359,91 @@ func (h *handler) proxyToNode(req RPCRequest) RPCResponse {
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error())
 	}
+
+	// Inject nodeLocation for agent.list and session.catalog responses
+	if req.Method == "agent.list" || req.Method == "session.catalog" {
+		result = injectNodeLocation(result, n)
+	}
+
 	return okResp(req.ID, result)
+}
+
+// injectNodeLocation adds node location info to agent/session responses.
+// For agent.list: injects into each agent object.
+// For session.catalog: injects into managed and attachable arrays.
+func injectNodeLocation(result any, n *node.Node) any {
+	resMap, ok := result.(map[string]any)
+	if !ok {
+		return result
+	}
+
+	nodeLoc := map[string]any{
+		"nodeId":      n.ID,
+		"displayName": n.Name,
+		"host":        n.Host,
+	}
+
+	// Create a copy to avoid mutating the original
+	newResult := make(map[string]any, len(resMap))
+	for k, v := range resMap {
+		newResult[k] = v
+	}
+
+	// Inject into agents array if present
+	if agents, ok := resMap["agents"].([]any); ok {
+		newAgents := make([]any, len(agents))
+		for i, a := range agents {
+			if agentMap, ok := a.(map[string]any); ok {
+				newAgent := make(map[string]any, len(agentMap)+1)
+				for k, v := range agentMap {
+					newAgent[k] = v
+				}
+				newAgent["nodeLocation"] = nodeLoc
+				newAgents[i] = newAgent
+			} else {
+				newAgents[i] = a
+			}
+		}
+		newResult["agents"] = newAgents
+	}
+
+	// Inject into managed array if present
+	if managed, ok := resMap["managed"].([]any); ok {
+		newManaged := make([]any, len(managed))
+		for i, m := range managed {
+			if mMap, ok := m.(map[string]any); ok {
+				newM := make(map[string]any, len(mMap)+1)
+				for k, v := range mMap {
+					newM[k] = v
+				}
+				newM["nodeLocation"] = nodeLoc
+				newManaged[i] = newM
+			} else {
+				newManaged[i] = m
+			}
+		}
+		newResult["managed"] = newManaged
+	}
+
+	// Inject into attachable array if present
+	if attachable, ok := resMap["attachable"].([]any); ok {
+		newAttachable := make([]any, len(attachable))
+		for i, a := range attachable {
+			if aMap, ok := a.(map[string]any); ok {
+				newA := make(map[string]any, len(aMap)+1)
+				for k, v := range aMap {
+					newA[k] = v
+				}
+				newA["nodeLocation"] = nodeLoc
+				newAttachable[i] = newA
+			} else {
+				newAttachable[i] = a
+			}
+		}
+		newResult["attachable"] = newAttachable
+	}
+
+	return newResult
 }
 
 func (h *handler) systemHealth(req RPCRequest) RPCResponse {

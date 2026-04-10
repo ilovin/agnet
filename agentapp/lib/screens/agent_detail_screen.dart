@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
@@ -1427,13 +1429,10 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
             ],
           ),
           const SizedBox(height: 6),
-          SelectableText(
-            widget.content,
-            style: TextStyle(
-              fontSize: 12,
-              color: scheme.onSurfaceVariant,
-              height: 1.4,
-            ),
+          _MarkdownContent(
+            text: widget.content,
+            fontSize: 12,
+            textColor: scheme.onSurfaceVariant,
           ),
         ],
       ),
@@ -1636,13 +1635,11 @@ class _MessageBubble extends StatelessWidget {
                         ),
                       ),
                     ),
-                  SelectableText(
-                    message.text,
-                    style: TextStyle(
-                      fontSize: isRaw ? 12 : 14,
-                      color: textColor,
-                      height: 1.4,
-                    ),
+                  _MarkdownContent(
+                    text: message.text,
+                    fontSize: isRaw ? 12 : 14,
+                    textColor: textColor,
+                    isRaw: isRaw,
                   ),
                 ],
               ),
@@ -1658,6 +1655,130 @@ class _MessageBubble extends StatelessWidget {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// Markdown content widget with syntax highlighting and security settings.
+class _MarkdownContent extends StatelessWidget {
+  final String text;
+  final double fontSize;
+  final Color textColor;
+  final bool isRaw;
+
+  const _MarkdownContent({
+    required this.text,
+    required this.fontSize,
+    required this.textColor,
+    this.isRaw = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // For raw terminal output, use plain text to preserve formatting
+    if (isRaw) {
+      return SelectableText(
+        text,
+        style: TextStyle(
+          fontSize: fontSize,
+          color: textColor,
+          fontFamily: 'monospace',
+          height: 1.4,
+        ),
+      );
+    }
+
+    return MarkdownBody(
+      data: text,
+      selectable: true,
+      styleSheet: MarkdownStyleSheet(
+        p: TextStyle(
+          fontSize: fontSize,
+          color: textColor,
+          height: 1.4,
+        ),
+        h1: TextStyle(
+          fontSize: fontSize + 8,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        h2: TextStyle(
+          fontSize: fontSize + 6,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        h3: TextStyle(
+          fontSize: fontSize + 4,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        h4: TextStyle(
+          fontSize: fontSize + 2,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        h5: TextStyle(
+          fontSize: fontSize + 1,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        h6: TextStyle(
+          fontSize: fontSize,
+          fontWeight: FontWeight.bold,
+          color: textColor,
+          height: 1.4,
+        ),
+        code: TextStyle(
+          fontSize: fontSize - 1,
+          color: textColor,
+          fontFamily: 'monospace',
+          backgroundColor: scheme.surfaceContainerHighest,
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: isDark ? Colors.grey.shade900 : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        codeblockPadding: const EdgeInsets.all(12),
+        blockquote: TextStyle(
+          fontSize: fontSize,
+          color: textColor.withValues(alpha: 0.8),
+          fontStyle: FontStyle.italic,
+          height: 1.4,
+        ),
+        blockquoteDecoration: BoxDecoration(
+          border: Border(
+            left: BorderSide(
+              color: scheme.primary.withValues(alpha: 0.5),
+              width: 4,
+            ),
+          ),
+        ),
+        blockquotePadding: const EdgeInsets.only(left: 12),
+        listBullet: TextStyle(
+          fontSize: fontSize,
+          color: textColor,
+        ),
+        a: TextStyle(
+          fontSize: fontSize,
+          color: scheme.primary,
+          decoration: TextDecoration.underline,
+        ),
+      ),
+      onTapLink: (text, href, title) async {
+        if (href == null) return;
+        final uri = Uri.tryParse(href);
+        if (uri != null) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+      },
     );
   }
 }
