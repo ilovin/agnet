@@ -23,6 +23,9 @@ const (
 	StatusCrashed  Status = "crashed"
 )
 
+// StatusChangeCallback is called when an agent's status changes.
+type StatusChangeCallback func(agentID string, oldStatus, newStatus Status)
+
 // Agent represents a single managed AI agent process.
 type Agent struct {
 	ID       string
@@ -47,6 +50,16 @@ type Agent struct {
 	attachReadOnly       bool
 	attachReadOnlyReason string
 	tmuxTarget           string
+
+	// Status change callback (set by Manager)
+	onStatusChange StatusChangeCallback
+}
+
+// SetOnStatusChange registers a callback for status changes.
+func (a *Agent) SetOnStatusChange(cb StatusChangeCallback) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onStatusChange = cb
 }
 
 // InitSeq sets the buffer's sequence counter so subsequent appends continue from lastSeq+1.
@@ -76,8 +89,13 @@ func (a *Agent) Status() Status {
 
 func (a *Agent) setStatus(s Status) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	oldStatus := a.status
 	a.status = s
+	onChange := a.onStatusChange
+	a.mu.Unlock()
+	if oldStatus != s && onChange != nil {
+		onChange(a.ID, oldStatus, s)
+	}
 }
 
 // Buffer returns the EventBuffer for this agent (typed as interface{} to avoid import cycle in tests).

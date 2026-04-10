@@ -552,6 +552,20 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 	}
 	ag := newAgent(id, name, provider, workDir, cmd, args)
 
+	// Wire status change → broadcast event
+	ag.SetOnStatusChange(func(agentID string, oldStatus, newStatus Status) {
+		m.mu.RLock()
+		cb := m.onOutput
+		m.mu.RUnlock()
+		if cb != nil {
+			cb(agentID, map[string]any{
+				"agentId":   agentID,
+				"status":    string(newStatus),
+				"oldStatus": string(oldStatus),
+			})
+		}
+	})
+
 	m.mu.Lock()
 	m.agents[id] = ag
 	m.mu.Unlock()
