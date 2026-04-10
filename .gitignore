@@ -1,1 +1,7 @@
 .worktrees/
+
+# Session planning files (user-managed, not for commit)
+/task_plan.md
+/findings.md
+/progress.md
+/test_plan.md
