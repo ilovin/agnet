@@ -752,6 +752,9 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 			"text": e.Text,
 			"raw":  false, // Structured content from JSONL
 		}
+		if e.ToolSummary != "" {
+			data["toolSummary"] = e.ToolSummary
+		}
 		if e.StatusChange != nil {
 			data["statusChange"] = string(*e.StatusChange)
 			if *e.StatusChange == watcher.StatusWorking {
@@ -1110,6 +1113,9 @@ func (m *Manager) StartWatcherForAgent(id string) error {
 			"text": e.Text,
 			"raw":  false,
 		}
+		if e.ToolSummary != "" {
+			data["toolSummary"] = e.ToolSummary
+		}
 		if e.StatusChange != nil {
 			data["statusChange"] = string(*e.StatusChange)
 			if *e.StatusChange == watcher.StatusWorking {
@@ -1187,13 +1193,28 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
 	}
 
+	// projectNameFromDir extracts the last path segment as a project name.
+	projectNameFromDir := func(dir string) string {
+		dir = strings.TrimRight(dir, "/")
+		if dir == "" {
+			return ""
+		}
+		return filepath.Base(dir)
+	}
+
 	// Reuse existing managed attached agent for same provider/PID
 	m.mu.RLock()
 	for _, existing := range m.agents {
 		if existing.Provider != info.Provider {
 			continue
 		}
-		if existing.Name == fmt.Sprintf("%s-attached-%d", info.Provider, info.PID) {
+		existingProjectName := projectNameFromDir(info.WorkDir)
+		existingFriendlyName := ""
+		if existingProjectName != "" {
+			existingFriendlyName = fmt.Sprintf("%s (%s)", existingProjectName, info.Provider)
+		}
+		legacyName := fmt.Sprintf("%s-attached-%d", info.Provider, info.PID)
+		if existing.Name == legacyName || (existingFriendlyName != "" && existing.Name == existingFriendlyName) {
 			m.mu.RUnlock()
 			// Refresh attach metadata in case tmux/TTY availability changed.
 			applyAttachMetadata(existing)
@@ -1210,6 +1231,9 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 						"role": e.Role,
 						"text": e.Text,
 						"raw":  false,
+					}
+					if e.ToolSummary != "" {
+						data["toolSummary"] = e.ToolSummary
 					}
 					if e.StatusChange != nil {
 						data["statusChange"] = string(*e.StatusChange)
@@ -1241,7 +1265,13 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 
 	// Create a managed agent that watches the existing session
 	// WITHOUT killing or restarting the original process
-	name := fmt.Sprintf("%s-attached-%d", info.Provider, info.PID)
+	projectName := projectNameFromDir(info.WorkDir)
+	var name string
+	if projectName != "" {
+		name = fmt.Sprintf("%s (%s)", projectName, info.Provider)
+	} else {
+		name = fmt.Sprintf("%s-attached-%d", info.Provider, info.PID)
+	}
 	id := newUUID()
 
 	// Create agent with existing session info

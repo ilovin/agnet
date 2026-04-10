@@ -89,6 +89,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		Name           string `json:"name"`
 		Provider       string `json:"provider"`
 		WorkDir        string `json:"workDir"`
+		ProjectName    string `json:"projectName,omitempty"`
 		Status         string `json:"status"`
 		HasHistory     bool   `json:"hasHistory"`
 		AttachMode     string `json:"attachMode,omitempty"`
@@ -98,11 +99,16 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
 		lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
+		projectName := ""
+		if ag.WorkDir != "" {
+			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
+		}
 		result = append(result, agentInfo{
 			ID:             ag.ID,
 			Name:           ag.Name,
 			Provider:       ag.Provider,
 			WorkDir:        ag.WorkDir,
+			ProjectName:    projectName,
 			Status:         string(ag.Status()),
 			HasHistory:     lastSeq > 0,
 			AttachMode:     ag.AttachMode(),
@@ -290,11 +296,12 @@ func filterLiveClaudeFileSessions(attachableProcesses, claudeFiles []any) []any 
 
 func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	type managedAgent struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Provider string `json:"provider"`
-		WorkDir  string `json:"workDir"`
-		Status   string `json:"status"`
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Provider    string `json:"provider"`
+		WorkDir     string `json:"workDir"`
+		ProjectName string `json:"projectName,omitempty"`
+		Status      string `json:"status"`
 	}
 	statusPriority := func(status string) int {
 		switch status {
@@ -315,9 +322,13 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	managedAgents := h.server.manager.List()
 	managedByKey := make(map[string]managedAgent)
 	for _, ag := range managedAgents {
+		projectName := ""
+		if ag.WorkDir != "" {
+			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
+		}
 		candidate := managedAgent{
 			ID: ag.ID, Name: ag.Name, Provider: ag.Provider,
-			WorkDir: ag.WorkDir, Status: string(ag.Status()),
+			WorkDir: ag.WorkDir, ProjectName: projectName, Status: string(ag.Status()),
 		}
 		if candidate.Status == "stopped" || candidate.Status == "crashed" {
 			continue
@@ -985,6 +996,7 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 		PID            int      `json:"pid"`
 		Provider       string   `json:"provider"`
 		WorkDir        string   `json:"workDir"`
+		ProjectName    string   `json:"projectName,omitempty"`
 		Args           []string `json:"args"`
 		Session        string   `json:"session,omitempty"`
 		SessionID      string   `json:"sessionId,omitempty"`
@@ -997,10 +1009,15 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 
 	result := make([]processInfo, 0, len(processes))
 	for _, p := range processes {
+		projectName := ""
+		if p.WorkDir != "" {
+			projectName = filepath.Base(strings.TrimRight(p.WorkDir, "/"))
+		}
 		result = append(result, processInfo{
 			PID:            p.PID,
 			Provider:       p.Provider,
 			WorkDir:        p.WorkDir,
+			ProjectName:    projectName,
 			Args:           p.Args,
 			Session:        p.Session,
 			SessionID:      p.SessionID,

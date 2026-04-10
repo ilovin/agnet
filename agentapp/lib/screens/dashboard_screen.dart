@@ -18,6 +18,7 @@ class SessionCandidate {
   final String attachMode;
   final bool isReadOnly;
   final String readOnlyReason;
+  final String? projectName;
 
   const SessionCandidate({
     required this.pid,
@@ -28,6 +29,7 @@ class SessionCandidate {
     this.attachMode = '',
     this.isReadOnly = false,
     this.readOnlyReason = '',
+    this.projectName,
   });
 
   factory SessionCandidate.fromJson(Map<String, dynamic> json) =>
@@ -43,6 +45,7 @@ class SessionCandidate {
         attachMode: json['attachMode'] as String? ?? '',
         isReadOnly: json['readOnly'] as bool? ?? false,
         readOnlyReason: json['readOnlyReason'] as String? ?? '',
+        projectName: json['projectName'] as String?,
       );
 
   static String? _sessionIdFromPath(String? path) {
@@ -905,7 +908,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                 if (s.sessionId != null &&
                                     s.sessionId!.isNotEmpty)
                                   s.sessionId!,
-                                if (s.workDir.isNotEmpty) s.workDir,
+                                if (s.pid != null && s.pid! > 0)
+                                  'PID ${s.pid}',
                                 if (s.terminal != null &&
                                     s.terminal!.isNotEmpty)
                                   s.terminal!,
@@ -919,10 +923,12 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                               final secondary = secondaryParts.join(' · ');
                               final badgeColor = sessionStateColor(s);
                               final actionLabel = sessionActionLabel(s);
-                              final titleText =
-                                  (s.pid != null && s.pid! > 0)
-                                  ? '${s.provider}  PID ${s.pid ?? 0}'
-                                  : '${s.provider}  ${s.sessionId ?? '历史会话'}';
+                              // 优先使用 projectName，fallback 到 provider + PID/sessionId
+                              final titleText = s.projectName != null && s.projectName!.isNotEmpty
+                                  ? '${s.projectName} (${s.provider})'
+                                  : (s.pid != null && s.pid! > 0)
+                                      ? '${s.provider}  PID ${s.pid ?? 0}'
+                                      : '${s.provider}  ${s.sessionId ?? '历史会话'}';
 
                               return ListTile(
                                 dense: true,
@@ -1147,13 +1153,26 @@ class AgentRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // 优先使用 projectName 作为标题，fallback 到 name
+    final displayTitle = agent.projectName != null && agent.projectName!.isNotEmpty
+        ? '${agent.projectName} (${agent.provider})'
+        : agent.name;
+    // 副标题显示 PID/sessionId 等信息
+    final subtitleParts = <String>[];
+    if (agent.name.isNotEmpty && agent.projectName != null && agent.projectName!.isNotEmpty) {
+      subtitleParts.add(agent.name);
+    }
+    subtitleParts.add(agent.provider);
+    subtitleParts.add(_statusLabel);
+    final subtitleText = subtitleParts.join(' · ');
+
     return ListTile(
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 24),
       leading: Icon(Icons.smart_toy, color: _statusColor, size: 20),
-      title: Text(agent.name),
+      title: Text(displayTitle),
       subtitle: Text(
-        '${agent.provider} · $_statusLabel',
+        subtitleText,
         style: TextStyle(color: _statusColor, fontSize: 12),
       ),
       trailing: agent.status == AgentStatus.working

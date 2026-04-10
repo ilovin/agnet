@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,6 +23,7 @@ const (
 type ConversationEvent struct {
 	Role         string       // "user" or "assistant"
 	Text         string       // combined text content
+	ToolSummary  string       // human-readable tool call summary (e.g. "Bash: go test ./...")
 	StatusChange *AgentStatus // non-nil when this line changes agent status
 }
 
@@ -114,6 +117,52 @@ type claudeLine struct {
 	} `json:"message"`
 }
 
+// buildToolSummary generates a human-readable summary for a tool_use block.
+func buildToolSummary(name string, input map[string]interface{}) string {
+	switch name {
+	case "Glob":
+		pattern, _ := input["pattern"].(string)
+		path, _ := input["path"].(string)
+		if path != "" {
+			return fmt.Sprintf("Glob %s in %s", pattern, path)
+		}
+		return fmt.Sprintf("Glob %s", pattern)
+	case "Grep":
+		pattern, _ := input["pattern"].(string)
+		glob, _ := input["glob"].(string)
+		if glob != "" {
+			return fmt.Sprintf("Grep /%s/ %s", pattern, glob)
+		}
+		return fmt.Sprintf("Grep /%s/", pattern)
+	case "Read":
+		filePath, _ := input["file_path"].(string)
+		base := filepath.Base(filePath)
+		offset, hasOffset := input["offset"]
+		limit, hasLimit := input["limit"]
+		if hasOffset || hasLimit {
+			offsetStr := fmt.Sprintf("%v", offset)
+			limitStr := fmt.Sprintf("%v", limit)
+			return fmt.Sprintf("Read %s:%s-%s", base, offsetStr, limitStr)
+		}
+		return fmt.Sprintf("Read %s", base)
+	case "Bash":
+		cmd, _ := input["command"].(string)
+		cmd = strings.TrimSpace(cmd)
+		if len(cmd) > 60 {
+			cmd = cmd[:60]
+		}
+		return cmd
+	case "Edit":
+		filePath, _ := input["file_path"].(string)
+		return fmt.Sprintf("Edit %s", filepath.Base(filePath))
+	case "Write":
+		filePath, _ := input["file_path"].(string)
+		return fmt.Sprintf("Write %s", filepath.Base(filePath))
+	default:
+		return ""
+	}
+}
+
 func parseLine(data []byte) (ConversationEvent, bool) {
 	var line claudeLine
 	if err := json.Unmarshal(data, &line); err != nil {
@@ -147,15 +196,23 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 				case "tool_use":
 					hasToolUse = true
 					if name, ok := block["name"].(string); ok {
-						if input, ok := block["input"].(map[string]interface{}); ok {
+						input, _ := block["input"].(map[string]interface{})
+						if input == nil {
+							input = map[string]interface{}{}
+						}
+						summary := buildToolSummary(name, input)
+						if summary != "" {
+							ev.Text += fmt.Sprintf("[%s: %s]", name, summary)
+							if ev.ToolSummary == "" {
+								ev.ToolSummary = summary
+							}
+						} else {
 							cmd, _ := input["command"].(string)
 							if cmd != "" {
 								ev.Text += fmt.Sprintf("[%s: %s]", name, cmd)
 							} else {
 								ev.Text += fmt.Sprintf("[%s]", name)
 							}
-						} else {
-							ev.Text += fmt.Sprintf("[%s]", name)
 						}
 					}
 				}

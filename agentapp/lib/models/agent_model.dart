@@ -26,6 +26,7 @@ class AgentModel {
   final bool isReadOnly;
   final String readOnlyReason;
   final String attachMode;
+  final String? projectName;
 
   const AgentModel({
     required this.id,
@@ -38,6 +39,7 @@ class AgentModel {
     this.isReadOnly = false,
     this.readOnlyReason = '',
     this.attachMode = '',
+    this.projectName,
   });
 
   factory AgentModel.fromJson(Map<String, dynamic> json) => AgentModel(
@@ -51,6 +53,7 @@ class AgentModel {
         isReadOnly: json['readOnly'] as bool? ?? false,
         readOnlyReason: json['readOnlyReason'] as String? ?? '',
         attachMode: json['attachMode'] as String? ?? '',
+        projectName: json['projectName'] as String?,
       );
 
   AgentModel copyWith({
@@ -64,6 +67,7 @@ class AgentModel {
     bool? isReadOnly,
     String? readOnlyReason,
     String? attachMode,
+    String? projectName,
   }) =>
       AgentModel(
         id: id ?? this.id,
@@ -76,5 +80,6 @@ class AgentModel {
         isReadOnly: isReadOnly ?? this.isReadOnly,
         readOnlyReason: readOnlyReason ?? this.readOnlyReason,
         attachMode: attachMode ?? this.attachMode,
+        projectName: projectName ?? this.projectName,
       );
 }

@@ -1509,8 +1509,17 @@ class _MessageBubble extends StatelessWidget {
 
     // Collapsible thinking block
     if (message.isThinking) {
+      // 从内容第一行提取 topic（前20字符）
+      String thinkingHeader = '思考过程';
+      final firstLine = message.text
+          .split('\n')
+          .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '');
+      if (firstLine.isNotEmpty) {
+        final topic = firstLine.trim();
+        thinkingHeader = '思考：${topic.length > 20 ? topic.substring(0, 20) : topic}';
+      }
       return _CollapsibleBubble(
-        header: '思考过程',
+        header: thinkingHeader,
         content: message.text,
         collapsedPreview: buildCollapsedPreview(message.text, maxChars: 90),
         icon: Icons.psychology,
@@ -1534,10 +1543,16 @@ class _MessageBubble extends StatelessWidget {
     // Collapsible tool call
     if (message.isToolCall) {
       final toolName = message.text.substring(1, message.text.indexOf(':'));
+      // 尝试从 message 中提取 toolSummary
+      String? toolSummary;
+      final summaryMatch = RegExp(r'\[toolSummary:([^\]]+)\]').firstMatch(message.text);
+      if (summaryMatch != null) {
+        toolSummary = summaryMatch.group(1);
+      }
       return _CollapsibleBubble(
         header: '工具调用: $toolName',
         content: message.text,
-        collapsedPreview: buildCollapsedPreview(message.text, maxChars: 90),
+        collapsedPreview: buildCollapsedPreview(toolSummary ?? message.text, maxChars: 90),
         icon: Icons.build,
         color: scheme.primary,
       );
