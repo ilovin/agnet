@@ -31,14 +31,19 @@ type Prober struct {
 // NewProber creates a new prober with default settings.
 func NewProber() *Prober {
 	return &Prober{
-		timeout:    10 * time.Second,
+		timeout:    5 * time.Second,
 		agentdPort: 7373,
 	}
 }
 
-// Discover scans all SSH hosts and returns those with agentd running.
-// It probes hosts concurrently with a worker pool.
+// Discover scans SSH hosts and returns those with agentd running.
+// It probes hosts concurrently with a worker pool and limits total scan time.
 func (p *Prober) Discover(hosts []nodecfg.SSHHost) []Result {
+	// Limit to max 20 hosts to scan
+	if len(hosts) > 20 {
+		hosts = hosts[:20]
+	}
+
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent probes
 

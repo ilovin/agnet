@@ -466,9 +466,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     }
 
     // Show active agents + stopped agents that have conversation history
+    // Also show stopped agents with attachMode (reattachable terminal sessions)
     final bySignature = <String, AgentModel>{};
     for (final a in agents) {
-      if (a.status == AgentStatus.stopped && !a.hasHistory) continue;
+      if (a.status == AgentStatus.stopped && !a.hasHistory && a.attachMode.isEmpty) continue;
       if (a.status == AgentStatus.crashed && !a.hasHistory) continue;
       final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}|${a.id.toLowerCase()}';
       final existing = bySignature[key];
@@ -673,7 +674,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       final byName = <String, AgentModel>{};
       for (final a in input) {
         // Hide stopped/crashed agents unless they have conversation history
-        if ((a.status == AgentStatus.stopped || a.status == AgentStatus.crashed) && !a.hasHistory) {
+        // Also show stopped agents with attachMode (reattachable terminal sessions)
+        final isStoppedWithoutHistory = a.status == AgentStatus.stopped && !a.hasHistory && a.attachMode.isEmpty;
+        final isCrashedWithoutHistory = a.status == AgentStatus.crashed && !a.hasHistory;
+        if (isStoppedWithoutHistory || isCrashedWithoutHistory) {
           continue;
         }
         final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}|${a.id.toLowerCase()}';
@@ -697,6 +701,13 @@ class _NodeCardState extends ConsumerState<NodeCard> {
 
     String sigFromManaged(AgentModel a) {
       final lower = a.provider.toLowerCase();
+
+      // Priority 1: sessionId (most reliable for matching)
+      if (a.sessionId != null && a.sessionId!.isNotEmpty) {
+        return '$lower|${a.sessionId!.toLowerCase()}';
+      }
+
+      // Priority 2: PID from attached agent name
       final nameLower = a.name.toLowerCase();
       final attachedPrefix = '$lower-attached-';
       if (nameLower.startsWith(attachedPrefix)) {
@@ -705,9 +716,12 @@ class _NodeCardState extends ConsumerState<NodeCard> {
           return '$lower|pid:$pid';
         }
       }
+
+      // Priority 3: sessionId in name (for opencode)
       if (lower == 'opencode' && nameLower.contains('ses_')) {
         return '$lower|$nameLower';
       }
+
       return '$lower|${a.id.toLowerCase()}';
     }
 
@@ -722,9 +736,12 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       return '$lower|${s.workDir.toLowerCase()}';
     }
 
+    // Check if a session candidate matches a managed agent
+    // Uses sessionId as primary key, PID as fallback
     bool managedContains(SessionCandidate s, List<AgentModel> managed) {
+      final candidateSig = sigFromCandidate(s);
       final sigs = managed.map(sigFromManaged).toSet();
-      return sigs.contains(sigFromCandidate(s));
+      return sigs.contains(candidateSig);
     }
 
     String statusText(AgentStatus status) {

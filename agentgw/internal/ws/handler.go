@@ -195,7 +195,7 @@ func (h *handler) nodeDiscover(req RPCRequest) RPCResponse {
 	results := prober.Discover(toProbe)
 
 	// Collect found nodes
-	var found []map[string]any
+	found := make([]map[string]any, 0)
 	for _, r := range results {
 		if r.Found {
 			found = append(found, map[string]any{

@@ -302,6 +302,7 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		WorkDir     string `json:"workDir"`
 		ProjectName string `json:"projectName,omitempty"`
 		Status      string `json:"status"`
+		SessionID   string `json:"sessionId,omitempty"`
 	}
 	statusPriority := func(status string) int {
 		switch status {
@@ -326,12 +327,24 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		if ag.WorkDir != "" {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
+		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 		candidate := managedAgent{
 			ID: ag.ID, Name: ag.Name, Provider: ag.Provider,
 			WorkDir: ag.WorkDir, ProjectName: projectName, Status: string(ag.Status()),
+			SessionID: resumeID,
 		}
-		if candidate.Status == "stopped" || candidate.Status == "crashed" {
+		// Skip crashed agents unless they have conversation history
+		if candidate.Status == "crashed" {
 			continue
+		}
+		// For stopped agents, only show if they have resume session ID (attached agents)
+		// This allows re-attaching to terminal sessions after agentd restart
+		if candidate.Status == "stopped" {
+			if resumeID == "" {
+				continue
+			}
+			// Mark as attachable for UI
+			candidate.Status = "idle"
 		}
 		key := strings.ToLower(candidate.Provider + "|" + candidate.Name)
 		existing, ok := managedByKey[key]
