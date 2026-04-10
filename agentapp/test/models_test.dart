@@ -46,6 +46,20 @@ void main() {
       });
       expect(a.status, equals(AgentStatus.working));
       expect(a.nodeId, equals('n1'));
+      expect(a.isReadOnly, isFalse);
+    });
+
+    test('fromJson parses readOnly flag', () {
+      final a = AgentModel.fromJson({
+        'id': 'a2',
+        'name': 'claude-attached-123',
+        'status': 'idle',
+        'workDir': '/home/user/proj',
+        'nodeId': 'n1',
+        'readOnly': true,
+      });
+
+      expect(a.isReadOnly, isTrue);
     });
   });
 
@@ -66,6 +80,28 @@ void main() {
       expect(c.terminal, equals('ttys001'));
     });
 
+    test('fromJson parses attach metadata', () {
+      final c = SessionCandidate.fromJson({
+        'pid': 123,
+        'provider': 'Claude',
+        'workDir': '/tmp/work',
+        'session': 'ses_abc',
+        'terminal': 'ttys001',
+        'attachMode': 'tmux',
+        'readOnly': true,
+        'readOnlyReason': 'no safe input route found',
+      });
+
+      expect(c.pid, equals(123));
+      expect(c.provider, equals('claude'));
+      expect(c.workDir, equals('/tmp/work'));
+      expect(c.sessionId, equals('ses_abc'));
+      expect(c.terminal, equals('ttys001'));
+      expect(c.attachMode, equals('tmux'));
+      expect(c.isReadOnly, isTrue);
+      expect(c.readOnlyReason, equals('no safe input route found'));
+    });
+
     test('fromJson derives sessionId from sessionFile path', () {
       final c = SessionCandidate.fromJson({
         'provider': 'opencode',
@@ -74,6 +110,53 @@ void main() {
       });
 
       expect(c.sessionId, equals('ses_file123'));
+    });
+  });
+
+  group('auto-attach session selection', () {
+    test('prefers writable tmux session over newer read-only session', () {
+      final candidate = pickPreferredAutoAttachCandidate([
+        SessionCandidate.fromJson({
+          'pid': 300,
+          'provider': 'claude',
+          'workDir': '/tmp/readonly',
+          'attachMode': 'watcher',
+          'readOnly': true,
+        }),
+        SessionCandidate.fromJson({
+          'pid': 200,
+          'provider': 'claude',
+          'workDir': '/tmp/writable',
+          'attachMode': 'tmux',
+          'readOnly': false,
+        }),
+      ]);
+
+      expect(candidate, isNotNull);
+      expect(candidate!.pid, equals(200));
+      expect(candidate.attachMode, equals('tmux'));
+      expect(candidate.isReadOnly, isFalse);
+    });
+
+    test('skips auto-attach when no writable tmux session exists', () {
+      final candidate = pickPreferredAutoAttachCandidate([
+        SessionCandidate.fromJson({
+          'pid': 300,
+          'provider': 'claude',
+          'workDir': '/tmp/readonly',
+          'attachMode': 'watcher',
+          'readOnly': true,
+        }),
+        SessionCandidate.fromJson({
+          'pid': 200,
+          'provider': 'claude',
+          'workDir': '/tmp/non-tmux',
+          'attachMode': 'pty',
+          'readOnly': false,
+        }),
+      ]);
+
+      expect(candidate, isNull);
     });
   });
 

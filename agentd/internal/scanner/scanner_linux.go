@@ -5,6 +5,7 @@ package scanner
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ func (s *Scanner) scanLinux() ([]ProcessInfo, error) {
 		}
 	}
 
-	return found, nil
+	return finalizeProcessScan(found), nil
 }
 
 // scanProcess checks if a process is a Claude or OpenCode agent.
@@ -78,23 +79,31 @@ func (s *Scanner) scanProcess(pid int) (ProcessInfo, bool) {
 		return ProcessInfo{}, false // skip agentd's children
 	}
 
+	// Get controlling terminal
+	terminal := s.getTerminal(pid)
+	tmuxTarget, tmuxSession := s.detectLinuxTmuxFromTTY(terminal)
+
 	// Detect tmux/screen session
-	session := s.detectTmuxSession(pid)
+	session := tmuxSession
+	if session == "" {
+		session = s.detectTmuxSession(pid)
+	}
 	if session == "" {
 		session = s.detectScreenSession(pid)
 	}
 
-	// Get controlling terminal
-	terminal := s.getTerminal(pid)
-
 	return ProcessInfo{
-		PID:      pid,
-		Cmd:      cmd,
-		Args:     parts[1:],
-		WorkDir:  workDir,
-		Provider: provider,
-		Session:  session,
-		Terminal: terminal,
+		PID:         pid,
+		PPID:        ppid,
+		Cmd:         cmd,
+		Args:        parts[1:],
+		WorkDir:     workDir,
+		Provider:    provider,
+		Session:     session,
+		Terminal:    terminal,
+		TmuxTarget:  tmuxTarget,
+		SessionID:   "",
+		SessionFile: "",
 	}, true
 }
 
@@ -209,7 +218,22 @@ func (s *Scanner) getTerminal(pid int) string {
 	if err != nil {
 		return ""
 	}
-	return tty
+	return normalizeTTY(tty)
+}
+
+func (s *Scanner) detectLinuxTmuxFromTTY(terminal string) (target string, session string) {
+	wantTTY := normalizeTTY(terminal)
+	if wantTTY == "" {
+		return "", ""
+	}
+
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", ""
+	}
+
+	return resolveTmuxTargetFromPaneList(string(out), wantTTY)
 }
 
 // stub for Darwin compatibility - never called on Linux

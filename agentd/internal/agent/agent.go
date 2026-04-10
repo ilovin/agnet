@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,15 +32,26 @@ type Agent struct {
 	Cmd      string   // original command used to spawn this agent
 	Args     []string // original args used to spawn this agent
 
-	mu                       sync.RWMutex
-	status                   Status
-	process                  *agentpty.Process
-	buf                      *eventbuf.EventBuffer
-	w                        *watcher.ClaudeWatcher
-	permissionPromptActive    bool
-	permissionPromptResolved  bool      // once resolved, suppress re-detection
-	permissionResolvedAt      time.Time // when the prompt was resolved
-	permissionManager        *PermissionManager // manages permission requests
+	mu                      sync.RWMutex
+	status                  Status
+	process                 *agentpty.Process
+	buf                     *eventbuf.EventBuffer
+	w                       *watcher.ClaudeWatcher
+	permissionPromptActive  bool
+	permissionPromptResolved bool      // once resolved, suppress re-detection
+	permissionResolvedAt     time.Time // when the prompt was resolved
+	permissionManager       *PermissionManager // manages permission requests
+
+	// Attached-session input routing metadata.
+	attachMode           string
+	attachReadOnly       bool
+	attachReadOnlyReason string
+	tmuxTarget           string
+}
+
+// InitSeq sets the buffer's sequence counter so subsequent appends continue from lastSeq+1.
+func (a *Agent) InitSeq(lastSeq uint64) {
+	a.buf.InitSeq(lastSeq)
 }
 
 func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {
@@ -92,6 +105,45 @@ func (a *Agent) setWatcher(w *watcher.ClaudeWatcher) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.w = w
+}
+
+func (a *Agent) Watcher() *watcher.ClaudeWatcher {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.w
+}
+
+func (a *Agent) IsReadOnly() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.attachReadOnly
+}
+
+func (a *Agent) SetAttachInputRoute(mode string, readOnly bool, reason string, tmuxTarget string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.attachMode = mode
+	a.attachReadOnly = readOnly
+	a.attachReadOnlyReason = reason
+	a.tmuxTarget = tmuxTarget
+}
+
+func (a *Agent) AttachMode() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.attachMode
+}
+
+func (a *Agent) AttachReadOnly() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.attachReadOnly
+}
+
+func (a *Agent) AttachReadOnlyReason() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.attachReadOnlyReason
 }
 
 func (a *Agent) setPermissionPromptActive(active bool) {
@@ -161,14 +213,126 @@ func (a *Agent) WriteInput(text string) error {
 	a.mu.RLock()
 	p := a.process
 	w := a.w
+	attachMode := a.attachMode
+	attachReadOnly := a.attachReadOnly
+	attachReadOnlyReason := a.attachReadOnlyReason
+	tmuxTarget := a.tmuxTarget
 	a.mu.RUnlock()
-	if p == nil {
-		// Check if this is an attached agent (has watcher but no process)
-		if w != nil {
-			return fmt.Errorf("attached agents are read-only; use the original terminal to interact")
-		}
-		return fmt.Errorf("agent process not running")
+
+	if p != nil {
+		_, err := p.Write([]byte(text))
+		return err
 	}
-	_, err := p.Write([]byte(text))
-	return err
+
+	if attachMode == "tmux" && tmuxTarget != "" {
+		if attachReadOnly {
+			if attachReadOnlyReason != "" {
+				return fmt.Errorf("attached agent is read-only: %s", attachReadOnlyReason)
+			}
+			return fmt.Errorf("attached agent is read-only")
+		}
+		return sendTmuxInput(tmuxTarget, text)
+	}
+
+	if w != nil {
+		if attachReadOnlyReason != "" {
+			return fmt.Errorf("attached agent is read-only: %s", attachReadOnlyReason)
+		}
+		return fmt.Errorf("attached agents are read-only; use the original terminal to interact")
+	}
+
+	return fmt.Errorf("agent process not running")
+}
+
+func sendTmuxInput(target string, text string) error {
+	remaining := text
+	for len(remaining) > 0 {
+		switch {
+		case strings.HasPrefix(remaining, "\x1b[A"):
+			if err := sendTmuxKey(target, "Up"); err != nil {
+				return err
+			}
+			remaining = remaining[3:]
+		case strings.HasPrefix(remaining, "\x1b[B"):
+			if err := sendTmuxKey(target, "Down"); err != nil {
+				return err
+			}
+			remaining = remaining[3:]
+		case strings.HasPrefix(remaining, "\x1b[C"):
+			if err := sendTmuxKey(target, "Right"); err != nil {
+				return err
+			}
+			remaining = remaining[3:]
+		case strings.HasPrefix(remaining, "\x1b[D"):
+			if err := sendTmuxKey(target, "Left"); err != nil {
+				return err
+			}
+			remaining = remaining[3:]
+		case strings.HasPrefix(remaining, "\r"):
+			if err := sendTmuxKey(target, "Enter"); err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		case strings.HasPrefix(remaining, "\n"):
+			if err := sendTmuxKey(target, "Enter"); err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		case strings.HasPrefix(remaining, "\t"):
+			if err := sendTmuxKey(target, "Tab"); err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		case strings.HasPrefix(remaining, "\x7f"):
+			if err := sendTmuxKey(target, "BSpace"); err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		case strings.HasPrefix(remaining, "\x1b"):
+			if err := sendTmuxKey(target, "Escape"); err != nil {
+				return err
+			}
+			remaining = remaining[1:]
+		default:
+			next := len(remaining)
+			for i := 0; i < len(remaining); i++ {
+				if remaining[i] < 0x20 || remaining[i] == 0x7f || remaining[i] == 0x1b {
+					next = i
+					break
+				}
+			}
+			chunk := remaining[:next]
+			if chunk != "" {
+				if err := sendTmuxLiteral(target, chunk); err != nil {
+					return err
+				}
+			}
+			remaining = remaining[next:]
+		}
+	}
+	return nil
+}
+
+func sendTmuxLiteral(target string, text string) error {
+	cmd := exec.Command("tmux", "send-keys", "-t", target, "-l", text)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return fmt.Errorf("tmux send-keys failed: %w", err)
+		}
+		return fmt.Errorf("tmux send-keys failed: %s", msg)
+	}
+	return nil
+}
+
+func sendTmuxKey(target string, key string) error {
+	cmd := exec.Command("tmux", "send-keys", "-t", target, key)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return fmt.Errorf("tmux send-keys failed: %w", err)
+		}
+		return fmt.Errorf("tmux send-keys failed: %s", msg)
+	}
+	return nil
 }

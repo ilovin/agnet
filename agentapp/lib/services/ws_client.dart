@@ -7,11 +7,11 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 /// A single JSON-RPC message received from the server.
 /// Can be a response (has id + result/error) or a push event (has method, no id).
 class WsMessage {
-  final dynamic id;        // null for events
-  final String? method;   // set for push events
-  final dynamic result;   // set for successful responses
-  final dynamic error;    // set for error responses
-  final dynamic params;   // set for push events
+  final dynamic id; // null for events
+  final String? method; // set for push events
+  final dynamic result; // set for successful responses
+  final dynamic error; // set for error responses
+  final dynamic params; // set for push events
 
   const WsMessage({this.id, this.method, this.result, this.error, this.params});
 }
@@ -57,14 +57,17 @@ class WsClient {
   WsClient({required this.url, required this.token});
 
   /// Connect and start listening. Reconnects automatically on disconnect.
-  Future<void> connect() async {
+  Future<void> connect({Duration timeout = const Duration(seconds: 8)}) async {
     if (_disposed) return;
     try {
-      final uri = Uri.parse(url).replace(
-        queryParameters: {'token': token},
-      );
+      final uri = Uri.parse(url).replace(queryParameters: {'token': token});
       _channel = WebSocketChannel.connect(uri);
-      await _channel!.ready;
+      await _channel!.ready.timeout(
+        timeout,
+        onTimeout: () {
+          throw TimeoutException('WebSocket handshake timeout');
+        },
+      );
       _connected = true;
       _connectedCtrl.add(true);
       _backoff.reset();
@@ -75,8 +78,9 @@ class WsClient {
         onDone: _scheduleReconnect,
         cancelOnError: true,
       );
-    } catch (_) {
+    } catch (e) {
       _scheduleReconnect();
+      rethrow;
     }
   }
 
@@ -127,17 +131,23 @@ class WsClient {
   void onEvent(EventCallback cb) => _eventListeners.add(cb);
 
   /// Send a JSON-RPC request and return the result (or throw on error).
-  Future<dynamic> call(String method, Map<String, dynamic> params,
-      {Duration timeout = const Duration(seconds: 10)}) {
+  Future<dynamic> call(
+    String method,
+    Map<String, dynamic> params, {
+    Duration timeout = const Duration(seconds: 10),
+  }) {
     final id = _nextId++;
     final completer = Completer<dynamic>();
     _pending[id] = completer;
     final raw = jsonEncode(buildRequest(id, method, params));
     _channel?.sink.add(raw);
-    return completer.future.timeout(timeout, onTimeout: () {
-      _pending.remove(id);
-      throw TimeoutException('RPC timeout: $method');
-    });
+    return completer.future.timeout(
+      timeout,
+      onTimeout: () {
+        _pending.remove(id);
+        throw TimeoutException('RPC timeout: $method');
+      },
+    );
   }
 
   /// Fire-and-forget send.
@@ -157,12 +167,11 @@ class WsClient {
   // ── Static helpers (testable without network) ────────────────────────────
 
   /// Build a JSON-RPC 2.0 request map.
-  static Map<String, dynamic> buildRequest(int id, String method, Map<String, dynamic> params) => {
-        'jsonrpc': '2.0',
-        'id': id,
-        'method': method,
-        'params': params,
-      };
+  static Map<String, dynamic> buildRequest(
+    int id,
+    String method,
+    Map<String, dynamic> params,
+  ) => {'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params};
 
   /// Parse a raw JSON string into a [WsMessage].
   static WsMessage parseMessage(String raw) {

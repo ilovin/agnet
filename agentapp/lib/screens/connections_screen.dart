@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'dashboard_screen.dart';
 import '../models/connection_config.dart';
 import '../providers/connection_provider.dart';
 import '../providers/nodes_provider.dart';
@@ -17,24 +20,35 @@ class ConnectionsScreen extends ConsumerStatefulWidget {
 class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
   List<ConnectionConfig> _saved = [];
   bool _autoConnected = false;
+  bool _connecting = false;
+  String? _connectingUrl;
+  String? _connectStatus;
+  bool _connectStatusIsError = false;
+  Timer? _autoConnectTimer;
 
   @override
   void initState() {
     super.initState();
     _loadSaved();
     // Auto-connect to default gateway after a short delay
-    Future.delayed(const Duration(milliseconds: 500), () {
+    _autoConnectTimer = Timer(const Duration(milliseconds: 500), () {
       if (mounted && !_autoConnected) {
         _autoConnectDefault();
       }
     });
   }
 
+  @override
+  void dispose() {
+    _autoConnectTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _autoConnectDefault() async {
     _autoConnected = true;
-    // Default connection: localhost gateway with demo token
+    // Default connection: current gateway over Tailscale
     const defaultCfg = ConnectionConfig(
-      url: 'ws://localhost:8080/ws',
+      url: 'ws://100.126.146.22:8080/ws',
       token: 'testtoken123',
     );
     await _connect(defaultCfg);
@@ -53,8 +67,14 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
         title: const Text('删除连接'),
         content: const Text('确定要删除这个连接吗？'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
         ],
       ),
     );
@@ -92,36 +112,110 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
   }
 
   Future<void> _connect(ConnectionConfig cfg) async {
-    await ref.read(connectionProvider.notifier).connect(cfg);
-    // Load initial data
-    final client = ref.read(connectionProvider);
-    if (client != null) {
-      try {
-        final result = await client.call('node.list', {});
-        final nodes = (result is List ? result : (result['nodes'] as List?) ?? []);
-        ref.read(nodesProvider.notifier).loadNodes(nodes);
-        // Subscribe to events
-        client.onEvent((event) {
-          ref.read(nodesProvider.notifier).handleEvent(event);
-          ref.read(conversationProvider.notifier).handleEvent(event);
-        });
-        // Load agents for each node
-        for (final n in nodes) {
-          final nodeId = (n as Map<String, dynamic>)['id'] as String;
-          try {
-            final ar = await client.call('agent.list', {'nodeId': nodeId});
-            final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
-            ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
-          } catch (_) {}
-        }
-        // Auto-check and attach latest sessions for each node
-        for (final n in nodes) {
-          final nodeId = (n as Map<String, dynamic>)['id'] as String;
-          await _autoAttachLatestSessions(nodeId);
-        }
-      } catch (_) {}
+    if (_connecting) return;
+    if (mounted) {
+      setState(() {
+        _connecting = true;
+        _connectingUrl = cfg.url;
+        _connectStatus = '连接中…';
+        _connectStatusIsError = false;
+      });
     }
-    if (mounted) context.go('/dashboard');
+
+    try {
+      await ref.read(connectionProvider.notifier).connect(cfg);
+
+      // Load initial data
+      final client = ref.read(connectionProvider);
+      if (client == null) {
+        throw Exception('连接未建立');
+      }
+
+      final result = await client.call('node.list', {});
+      final nodes = (result is List
+          ? result
+          : (result['nodes'] as List?) ?? []);
+      ref.read(nodesProvider.notifier).loadNodes(nodes);
+
+      // Subscribe to events
+      client.onEvent((event) {
+        ref.read(nodesProvider.notifier).handleEvent(event);
+        ref.read(conversationProvider.notifier).handleEvent(event);
+      });
+
+      // Load agents for each node
+      for (final n in nodes) {
+        final nodeId = (n as Map<String, dynamic>)['id'] as String;
+        try {
+          final ar = await client.call('agent.list', {'nodeId': nodeId});
+          final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
+          ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
+        } catch (_) {}
+      }
+
+      // Auto-check and attach latest sessions for each node
+      for (final n in nodes) {
+        final nodeId = (n as Map<String, dynamic>)['id'] as String;
+        await _autoAttachLatestSessions(nodeId);
+      }
+
+      if (mounted) {
+        setState(() {
+          _connecting = false;
+          _connectingUrl = null;
+          _connectStatus = '连接成功';
+          _connectStatusIsError = false;
+        });
+        context.go('/dashboard');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
+        _connectingUrl = null;
+        _connectStatus = _friendlyConnectError(e, cfg);
+        _connectStatusIsError = true;
+      });
+    }
+  }
+
+  String _friendlyConnectError(Object error, ConnectionConfig cfg) {
+    final raw = error.toString();
+    final lower = raw.toLowerCase();
+
+    if (lower.contains('401') ||
+        lower.contains('unauthorized') ||
+        lower.contains('forbidden') ||
+        lower.contains('403')) {
+      return '连接失败：Token 验证不通过（401/403）。请检查 token 是否正确。';
+    }
+
+    if (lower.contains('failed host lookup') ||
+        lower.contains('nodename nor servname provided') ||
+        lower.contains('no route to host') ||
+        lower.contains('network is unreachable')) {
+      return '连接失败：主机不可达（类似 ping 不通）。请检查 Tailscale 是否在线、IP 是否正确。';
+    }
+
+    if (lower.contains('connection refused') ||
+        lower.contains('actively refused') ||
+        lower.contains('connection reset')) {
+      return '连接失败：端口未开放或服务未启动。请检查 8080 端口监听和 agentgw/agentd 进程。';
+    }
+
+    if ((lower.contains('websocket') && lower.contains('404')) ||
+        lower.contains('404 not found') ||
+        lower.contains('not upgraded to websocket')) {
+      return '连接失败：WebSocket 路径错误。请确认 URL 以 /ws 结尾。';
+    }
+
+    if (error is TimeoutException ||
+        lower.contains('handshake timeout') ||
+        lower.contains('timed out')) {
+      return '连接失败：连接超时。通常是网络不通或端口无响应，请先检查连通性和端口。';
+    }
+
+    return '连接失败：$raw';
   }
 
   Future<void> _autoAttachLatestSessions(String nodeId) async {
@@ -130,45 +224,25 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
 
     try {
       final result = await client.call('session.catalog', {'nodeId': nodeId});
-      final map = result is Map ? Map<String, dynamic>.from(result) : <String, dynamic>{};
+      final sessions = parseSessionCandidates(result);
+      final candidate = pickPreferredAutoAttachCandidate(sessions);
+      if (candidate == null) return;
 
-      final attachable = (map['attachable'] as List?) ?? [];
-      if (attachable.isEmpty) return;
+      final provider = candidate.provider;
+      final pid = candidate.pid ?? 0;
+      if (pid <= 0) return;
 
-      // Find sessions with both pid and sessionId (latest/active sessions)
-      final candidates = attachable.where((s) {
-        if (s is! Map) return false;
-        final pid = s['pid'] as int?;
-        final sessionId = s['session'] as String? ?? s['sessionId'] as String?;
-        return pid != null && pid > 0 && sessionId != null && sessionId.isNotEmpty;
-      }).toList();
+      debugPrint('Auto-attaching writable session: $provider PID $pid');
 
-      if (candidates.isEmpty) return;
-
-      // Sort by PID (latest first, assuming higher PID = more recent)
-      candidates.sort((a, b) {
-        final pidA = (a as Map)['pid'] as int? ?? 0;
-        final pidB = (b as Map)['pid'] as int? ?? 0;
-        return pidB.compareTo(pidA);
-      });
-
-      // Auto-attach the first (latest) session
-      final latest = candidates.first as Map<String, dynamic>;
-      final provider = (latest['provider'] as String? ?? 'claude').toLowerCase();
-      final pid = latest['pid'] as int;
-      final sessionId = latest['session'] as String? ?? latest['sessionId'] as String?;
-      final workDir = latest['workDir'] as String? ?? '';
-
-      debugPrint('Auto-attaching latest session: $provider PID $pid, sessionId: $sessionId');
-
-      await client.call('session.attach', {
+      final params = <String, dynamic>{
         'nodeId': nodeId,
         'provider': provider,
         'pid': pid,
-        'sessionId': sessionId,
-        'workDir': workDir,
+        'workDir': candidate.workDir,
         'name': '$provider-attached-$pid',
-      });
+      };
+
+      await client.call('session.attach', params);
 
       // Refresh agents list
       final ar = await client.call('agent.list', {'nodeId': nodeId});
@@ -187,89 +261,156 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
       appBar: AppBar(
         title: const Text('Agent Manager'),
         actions: [
-          Consumer(builder: (context, ref, _) {
-            final health = ref.watch(healthProvider);
-            final status = health?.status ?? HealthStatus.unknown;
-            final color = switch (status) {
-              HealthStatus.healthy => Colors.green,
-              HealthStatus.degraded => Colors.orange,
-              HealthStatus.down => Colors.red,
-              HealthStatus.unknown => Colors.grey,
-            };
-            return Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Icon(Icons.circle, color: color, size: 14),
-            );
-          }),
+          Consumer(
+            builder: (context, ref, _) {
+              final health = ref.watch(healthProvider);
+              final status = health?.status ?? HealthStatus.unknown;
+              final color = switch (status) {
+                HealthStatus.healthy => Colors.green,
+                HealthStatus.degraded => Colors.orange,
+                HealthStatus.down => Colors.red,
+                HealthStatus.unknown => Colors.grey,
+              };
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Icon(Icons.circle, color: color, size: 14),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
           ),
         ],
       ),
-      body: _saved.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.cable, size: 64, color: Colors.grey),
-                  const SizedBox(height: 16),
-                  const Text('无连接', style: TextStyle(fontSize: 18, color: Colors.grey)),
-                  const SizedBox(height: 8),
-                  ElevatedButton.icon(
-                    onPressed: _showAddSheet,
-                    icon: const Icon(Icons.add),
-                    label: const Text('添加连接'),
-                  ),
-                ],
-              ),
-            )
-          : Column(
-              children: [
-                Expanded(
-                  child: ListView.builder(
-                    itemCount: _saved.length,
-                    itemBuilder: (_, i) {
-                      final cfg = _saved[i];
-                      return ListTile(
-                        leading: const Icon(Icons.hub),
-                        title: Text(cfg.url),
-                        subtitle: Text(cfg.token.substring(0, cfg.token.length > 8 ? 8 : cfg.token.length) + '...'),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, size: 20),
-                              onPressed: () => _showEditSheet(cfg, i),
-                              tooltip: '编辑',
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.delete, size: 20, color: Colors.red),
-                              onPressed: () => _deleteConnection(i),
-                              tooltip: '删除',
-                            ),
-                            const Icon(Icons.chevron_right),
-                          ],
-                        ),
-                        onTap: () => _connect(cfg),
-                      );
-                    },
-                  ),
+      body: Column(
+        children: [
+          if (_connectStatus != null)
+            MaterialBanner(
+              backgroundColor: _connectStatusIsError
+                  ? Theme.of(context).colorScheme.errorContainer
+                  : Theme.of(context).colorScheme.primaryContainer,
+              content: Text(
+                _connectStatus!,
+                style: TextStyle(
+                  color: _connectStatusIsError
+                      ? Theme.of(context).colorScheme.onErrorContainer
+                      : Theme.of(context).colorScheme.onPrimaryContainer,
                 ),
-                const Divider(height: 1),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: ElevatedButton.icon(
-                    onPressed: _showAddSheet,
-                    icon: const Icon(Icons.add),
-                    label: const Text('新建连接'),
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 48),
+              ),
+              leading: _connecting
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      _connectStatusIsError
+                          ? Icons.error_outline
+                          : Icons.check_circle_outline,
                     ),
-                  ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _connectStatus = null;
+                      _connectStatusIsError = false;
+                    });
+                  },
+                  child: const Text('关闭'),
                 ),
               ],
             ),
+          Expanded(
+            child: _saved.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.cable, size: 64, color: Colors.grey),
+                        const SizedBox(height: 16),
+                        const Text(
+                          '无连接',
+                          style: TextStyle(fontSize: 18, color: Colors.grey),
+                        ),
+                        const SizedBox(height: 8),
+                        ElevatedButton.icon(
+                          onPressed: _showAddSheet,
+                          icon: const Icon(Icons.add),
+                          label: const Text('添加连接'),
+                        ),
+                      ],
+                    ),
+                  )
+                : Column(
+                    children: [
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: _saved.length,
+                          itemBuilder: (_, i) {
+                            final cfg = _saved[i];
+                            final isThisConnecting =
+                                _connecting && _connectingUrl == cfg.url;
+                            return ListTile(
+                              leading: isThisConnecting
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.hub),
+                              title: Text(cfg.url),
+                              subtitle: Text(
+                                '${cfg.token.substring(0, cfg.token.length > 8 ? 8 : cfg.token.length)}...',
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit, size: 20),
+                                    onPressed: _connecting
+                                        ? null
+                                        : () => _showEditSheet(cfg, i),
+                                    tooltip: '编辑',
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.delete,
+                                      size: 20,
+                                      color: Colors.red,
+                                    ),
+                                    onPressed: _connecting
+                                        ? null
+                                        : () => _deleteConnection(i),
+                                    tooltip: '删除',
+                                  ),
+                                  const Icon(Icons.chevron_right),
+                                ],
+                              ),
+                              onTap: _connecting ? null : () => _connect(cfg),
+                            );
+                          },
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: ElevatedButton.icon(
+                          onPressed: _connecting ? null : _showAddSheet,
+                          icon: const Icon(Icons.add),
+                          label: const Text('新建连接'),
+                          style: ElevatedButton.styleFrom(
+                            minimumSize: const Size(double.infinity, 48),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _showAddSheet,
         child: const Icon(Icons.add),
@@ -337,7 +478,10 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('添加连接', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text(
+            '添加连接',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
           TextField(
             controller: _urlCtrl,
@@ -365,7 +509,11 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
           FilledButton(
             onPressed: _loading ? null : _submit,
             child: _loading
-                ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                 : const Text('连接'),
           ),
         ],
@@ -434,7 +582,10 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('编辑连接', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Text(
+            '编辑连接',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
           const SizedBox(height: 16),
           TextField(
             controller: _urlCtrl,
@@ -462,7 +613,11 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
           FilledButton(
             onPressed: _loading ? null : _submit,
             child: _loading
-                ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                ? const SizedBox(
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
                 : const Text('保存'),
           ),
         ],

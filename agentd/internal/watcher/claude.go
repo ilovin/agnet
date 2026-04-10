@@ -70,11 +70,22 @@ func (w *ClaudeWatcher) poll() error {
 	}
 	defer f.Close()
 
+	// Detect file truncation (e.g. from context compaction):
+	// if the file is now smaller than our saved offset, reset to 0.
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if fi.Size() < w.offset {
+		w.offset = 0
+	}
+
 	if _, err := f.Seek(w.offset, io.SeekStart); err != nil {
 		return err
 	}
 
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line size
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if ev, ok := parseLine(line); ok {

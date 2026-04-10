@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentgw/internal/node"
@@ -25,17 +26,19 @@ func (c *client) writeJSON(v any) error {
 }
 
 type Server struct {
-	manager *node.Manager
-	token   string
-	mu      sync.RWMutex
-	clients map[*websocket.Conn]*client
+	manager   *node.Manager
+	token     string
+	mu        sync.RWMutex
+	clients   map[*websocket.Conn]*client
+	startTime time.Time
 }
 
 func New(mgr *node.Manager, token string) *Server {
 	return &Server{
-		manager: mgr,
-		token:   token,
-		clients: make(map[*websocket.Conn]*client),
+		manager:   mgr,
+		token:     token,
+		clients:   make(map[*websocket.Conn]*client),
+		startTime: time.Now(),
 	}
 }
 

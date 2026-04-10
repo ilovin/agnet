@@ -62,3 +62,11 @@ func (eb *EventBuffer) LastSeq() uint64 {
 	defer eb.mu.Unlock()
 	return eb.seq
 }
+
+// InitSeq sets the internal sequence counter to lastSeq.
+// Use this after loading persisted state so new appends continue from lastSeq+1.
+func (eb *EventBuffer) InitSeq(lastSeq uint64) {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+	eb.seq = lastSeq
+}

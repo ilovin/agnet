@@ -1,12 +1,14 @@
 package agent_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/eventbuf"
+	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
 )
 
@@ -73,6 +75,28 @@ func TestStopAgent(t *testing.T) {
 	ag := m.Get(id)
 	if ag.Status() != agent.StatusStopped {
 		t.Errorf("expected Stopped, got %v", ag.Status())
+	}
+}
+
+func TestAttachedAgentIsReadOnly(t *testing.T) {
+	m := newTestManager(t)
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	if !ag.IsReadOnly() {
+		t.Fatal("expected attached agent to be read-only")
 	}
 }
 

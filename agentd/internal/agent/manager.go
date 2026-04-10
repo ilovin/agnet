@@ -32,19 +32,27 @@ func newUUID() string {
 
 // Manager creates, tracks, and controls Agent instances.
 type Manager struct {
-	mu       sync.RWMutex
-	agents   map[string]*Agent
-	store    *store.Store
-	dataDir  string
-	onOutput func(agentID string, data map[string]any) // broadcast hook
+	mu             sync.RWMutex
+	agents         map[string]*Agent
+	store          *store.Store
+	dataDir        string
+	onOutput       func(agentID string, data map[string]any) // broadcast hook
+	sessionParents map[string]string                         // childAgentID -> parentAgentID for session continuity
+	scanExisting   func() ([]scanner.ProcessInfo, error)
 }
 
 func NewManager(s *store.Store, dataDir string) *Manager {
-	return &Manager{
-		agents:  make(map[string]*Agent),
-		store:   s,
-		dataDir: dataDir,
+	m := &Manager{
+		agents:         make(map[string]*Agent),
+		store:          s,
+		dataDir:        dataDir,
+		sessionParents: make(map[string]string),
 	}
+	m.scanExisting = func() ([]scanner.ProcessInfo, error) {
+		s := scanner.New()
+		return s.Scan()
+	}
+	return m
 }
 
 // LoadFromStore loads persisted agents from the store into memory.
@@ -79,6 +87,10 @@ func (m *Manager) LoadFromStore() error {
 		}
 		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
 		ag.setStatus(StatusStopped)
+		// Initialize buffer seq from persisted events so new appends continue after existing data
+		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
+			ag.InitSeq(lastSeq)
+		}
 		m.agents[r.ID] = ag
 	}
 	return nil
@@ -287,7 +299,7 @@ func (m *Manager) tryParseStreamJSON(text string) *streamJSONEvent {
 
 	// Validate it's a known stream-json event type
 	switch ev.Type {
-	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request", "stream_event":
+	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request", "stream_event", "system":
 		return &ev
 	default:
 		return nil
@@ -298,11 +310,19 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 	var data map[string]any
 
 	switch ev.Type {
-	case "init":
-		// Initialize session info
-		if ev.SessionID != "" {
-			if err := m.store.UpdateResumeSessionID(agentID, ev.SessionID); err != nil {
-				log.Printf("update session id from stream-json for %s: %v", agentID, err)
+	case "init", "system":
+		// Initialize session info from init event or system event with subtype=init
+		if ev.Raw != nil {
+			if subtype, ok := ev.Raw["subtype"].(string); ok && (subtype == "init" || ev.Type == "init") {
+				if sessionID, ok := ev.Raw["session_id"].(string); ok && sessionID != "" {
+					log.Printf("[StreamJSON] Init event received for agent %s, SessionID=%s", agentID, sessionID)
+					// Use m.UpdateResumeSessionID (not m.store.UpdateResumeSessionID) to also update parent
+					if err := m.UpdateResumeSessionID(agentID, sessionID); err != nil {
+						log.Printf("[StreamJSON] Failed to update session id for %s: %v", agentID, err)
+					} else {
+						log.Printf("[StreamJSON] Saved session ID %s for agent %s", sessionID, agentID)
+					}
+				}
 			}
 		}
 		return
@@ -379,6 +399,7 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			}
 		}
 		ag.setStatus(StatusIdle)
+		data = nil
 		return
 
 	case "stream_event":
@@ -391,14 +412,18 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			return
 		}
 		eventType, _ := eventData["type"].(string)
-		
+
 		switch eventType {
 		case "message_start":
 			ag.setStatus(StatusWorking)
 		case "content_block_delta":
 			if delta, ok := eventData["delta"].(map[string]any); ok {
-				// Extract text_delta (actual response)
-				if text, ok := delta["text"].(string); ok && text != "" {
+				// Claude stream-json variants may emit either {"text": ...} or {"text_delta": ...}
+				text, _ := delta["text"].(string)
+				if text == "" {
+					text, _ = delta["text_delta"].(string)
+				}
+				if text != "" {
 					data = map[string]any{
 						"role": "assistant",
 						"text": text,
@@ -414,11 +439,13 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 					if cb != nil {
 						cb(agentID, data)
 					}
+					data = nil
 				}
 			}
 		case "message_stop":
 			ag.setStatus(StatusIdle)
 		}
+					data = nil
 
 	case "control_request":
 		// Handle permission requests from Claude
@@ -568,7 +595,12 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 // readPipeOutputAndWait reads stream-json output from pipe and waits for process exit.
 // Used for Claude -p mode where the process exits after each response.
 func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.Process) {
-	defer ag.setStatus(StatusStopped)
+	defer func() {
+		if ag.Process() == p {
+			ag.setProcess(nil)
+			ag.setStatus(StatusStopped)
+		}
+	}()
 	log.Printf("[Pipe] Started reading output for agent %s", agentID)
 
 	buf := make([]byte, 4096)
@@ -599,6 +631,7 @@ func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.P
 
 				// Try to parse as stream-json event
 				if ev := m.tryParseStreamJSON(line); ev != nil {
+					log.Printf("[StreamJSON] Parsed event type=%s for agent %s", ev.Type, agentID)
 					m.handleStreamJSONEvent(agentID, ag, ev)
 					// Also accumulate text content for full response
 					if ev.Type == "assistant" && ev.Content != nil {
@@ -620,6 +653,11 @@ func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.P
 				} else {
 					// Not valid JSON, treat as plain text output
 					if len(line) > 0 {
+						preview := line
+						if len(preview) > 80 {
+							preview = preview[:80]
+						}
+						log.Printf("[StreamJSON] Failed to parse line: %s...", preview)
 						fullText.WriteString(line)
 						fullText.WriteString("\n")
 					}
@@ -808,6 +846,52 @@ func (m *Manager) findSessionFile(pid int, workDir string) string {
 	return latest
 }
 
+func (m *Manager) RestartInPlace(id, provider, cmd string, args []string) error {
+	ag := m.Get(id)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found", id)
+	}
+
+	ag.kill()
+	ag.setProcess(nil)
+	ag.setWatcher(nil)
+	ag.setStatus(StatusStarting)
+
+	ag.mu.Lock()
+	ag.Provider = provider
+	ag.Cmd = cmd
+	ag.Args = append([]string{}, args...)
+	workDir := ag.WorkDir
+	ag.mu.Unlock()
+
+	var (
+		p   *agentpty.Process
+		err error
+	)
+	if provider == "claude" {
+		p, err = agentpty.SpawnPipes(cmd, args, workDir, nil)
+	} else {
+		p, err = agentpty.Spawn(cmd, args, workDir, nil)
+	}
+	if err != nil {
+		ag.setStatus(StatusCrashed)
+		return fmt.Errorf("spawn: %w", err)
+	}
+
+	ag.setProcess(p)
+	ag.setStatus(StatusIdle)
+
+	if provider != "claude" {
+		go m.startSessionWatcher(id, ag, p.Pid(), workDir)
+		go m.readPTYForPermissionPrompts(id, ag, provider, p)
+	} else {
+		log.Printf("[Restart] Starting Claude in -p mode, agent %s, pid %d", id, p.Pid())
+		go m.readPipeOutputAndWait(id, ag, p)
+	}
+
+	return nil
+}
+
 // CreateWithWatcher spawns an agent and starts a ClaudeWatcher on sessionFile.
 func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, workDir, sessionFile string) (string, error) {
 	id, err := m.Create(name, provider, cmd, args, workDir)
@@ -853,6 +937,12 @@ func (m *Manager) List() []*Agent {
 	return out
 }
 
+func (m *Manager) SetScanExisting(fn func() ([]scanner.ProcessInfo, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scanExisting = fn
+}
+
 // Get returns an agent by ID or nil.
 func (m *Manager) Get(id string) *Agent {
 	m.mu.RLock()
@@ -862,6 +952,40 @@ func (m *Manager) Get(id string) *Agent {
 
 func (m *Manager) LoadPersistedEventsSince(agentID string, afterSeq uint64, limit int) ([]eventbuf.Event, error) {
 	records, err := m.store.ListConversationEventsSince(agentID, afterSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]eventbuf.Event, 0, len(records))
+	for _, r := range records {
+		data := map[string]any{
+			"role": r.Role,
+			"text": r.Text,
+			"raw":  r.Raw,
+		}
+		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
+	}
+	return events, nil
+}
+
+func (m *Manager) LoadPersistedEventsBefore(agentID string, beforeSeq uint64, limit int) ([]eventbuf.Event, error) {
+	records, err := m.store.ListConversationEventsBefore(agentID, beforeSeq, limit)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]eventbuf.Event, 0, len(records))
+	for _, r := range records {
+		data := map[string]any{
+			"role": r.Role,
+			"text": r.Text,
+			"raw":  r.Raw,
+		}
+		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
+	}
+	return events, nil
+}
+
+func (m *Manager) LoadPersistedEventsLatest(agentID string, limit int) ([]eventbuf.Event, error) {
+	records, err := m.store.ListConversationEventsLatest(agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -892,6 +1016,124 @@ func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 	if err := m.store.UpdateResumeSessionID(id, sessionID); err != nil {
 		return err
 	}
+
+	// Also update the parent agent if this is a child agent (for session continuity)
+	m.mu.RLock()
+	parentID, hasParent := m.sessionParents[id]
+	parentCount := len(m.sessionParents)
+	m.mu.RUnlock()
+	log.Printf("[Session] Checking parent for agent %s: hasParent=%v, parentID=%s, mapSize=%d", id, hasParent, parentID, parentCount)
+	if hasParent && parentID != "" {
+		if err := m.store.UpdateResumeSessionID(parentID, sessionID); err != nil {
+			log.Printf("[Session] Failed to update parent agent %s session ID: %v", parentID, err)
+		} else {
+			log.Printf("[Session] Also saved session ID %s to parent agent %s", sessionID, parentID)
+		}
+	}
+
+	return nil
+}
+
+// SetSessionParent sets the parent agent ID for session tracking.
+// When a child agent extracts a session ID, it will also be saved to the parent.
+func (m *Manager) SetSessionParent(childID, parentID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionParents[childID] = parentID
+	log.Printf("[Session] Set parent of agent %s to %s", childID, parentID)
+}
+
+// GetResumeSessionID retrieves the stored resume session ID for an agent.
+func (m *Manager) GetResumeSessionID(id string) (string, error) {
+	records, err := m.store.ListAgents()
+	if err != nil {
+		return "", err
+	}
+	for _, r := range records {
+		if r.ID == id {
+			return r.ResumeSessionID, nil
+		}
+	}
+	return "", nil
+}
+
+// StartWatcherForAgent locates the session file for an agent (using its stored
+// ResumeSessionID) and starts a ClaudeWatcher. If the agent already has a
+// running watcher it is stopped first. The agent status is set to idle.
+func (m *Manager) StartWatcherForAgent(id string) error {
+	ag := m.Get(id)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found", id)
+	}
+
+	sessionID, _ := m.GetResumeSessionID(id)
+	if sessionID == "" {
+		return fmt.Errorf("agent %q has no stored session ID", id)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+
+	// Search all project directories for the session file
+	projectsBase := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(projectsBase)
+	if err != nil {
+		return fmt.Errorf("read projects dir: %w", err)
+	}
+
+	var sessionFile string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(projectsBase, entry.Name(), sessionID+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			sessionFile = candidate
+			break
+		}
+	}
+	if sessionFile == "" {
+		return fmt.Errorf("session file not found for session %s", sessionID)
+	}
+
+	// Stop existing watcher if any
+	if old := ag.Watcher(); old != nil {
+		old.Stop()
+	}
+
+	// Start new watcher
+	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
+		data := map[string]any{
+			"role": e.Role,
+			"text": e.Text,
+			"raw":  false,
+		}
+		if e.StatusChange != nil {
+			data["statusChange"] = string(*e.StatusChange)
+			if *e.StatusChange == watcher.StatusWorking {
+				ag.setStatus(StatusWorking)
+			} else {
+				ag.setStatus(StatusIdle)
+			}
+		}
+		m.appendAndPersistEvent(id, ag, data)
+
+		m.mu.RLock()
+		cb := m.onOutput
+		m.mu.RUnlock()
+		if cb != nil {
+			cb(id, data)
+		}
+	})
+
+	if err := w.Start(); err != nil {
+		return fmt.Errorf("watcher start: %w", err)
+	}
+	ag.setWatcher(w)
+	ag.setStatus(StatusIdle)
+	log.Printf("[Watcher] Started watcher for loaded agent %s on %s", id, sessionFile)
 	return nil
 }
 
@@ -919,6 +1161,9 @@ func (m *Manager) Remove(id string) error {
 
 // ScanExisting discovers running Claude/OpenCode processes on the system.
 func (m *Manager) ScanExisting() ([]scanner.ProcessInfo, error) {
+	if m.scanExisting != nil {
+		return m.scanExisting()
+	}
 	s := scanner.New()
 	return s.Scan()
 }
@@ -938,7 +1183,11 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	parts := strings.Split(sessionFile, "/")
 	sessionID := strings.TrimSuffix(parts[len(parts)-1], ".jsonl")
 
-	// Reuse existing managed attached agent for same provider/session
+	applyAttachMetadata := func(ag *Agent) {
+		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
+	}
+
+	// Reuse existing managed attached agent for same provider/PID
 	m.mu.RLock()
 	for _, existing := range m.agents {
 		if existing.Provider != info.Provider {
@@ -946,6 +1195,45 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 		if existing.Name == fmt.Sprintf("%s-attached-%d", info.Provider, info.PID) {
 			m.mu.RUnlock()
+			// Refresh attach metadata in case tmux/TTY availability changed.
+			applyAttachMetadata(existing)
+			// Re-attach: restart watcher and update status
+			existing.setStatus(StatusIdle)
+			if existing.Watcher() != nil {
+				existing.Watcher().Stop()
+				existing.setWatcher(nil)
+			}
+			sessionFile := info.FindSessionFile()
+			if sessionFile != "" {
+				w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
+					data := map[string]any{
+						"role": e.Role,
+						"text": e.Text,
+						"raw":  false,
+					}
+					if e.StatusChange != nil {
+						data["statusChange"] = string(*e.StatusChange)
+						if *e.StatusChange == watcher.StatusWorking {
+							existing.setStatus(StatusWorking)
+						} else {
+							existing.setStatus(StatusIdle)
+						}
+					}
+					m.appendAndPersistEvent(existing.ID, existing, data)
+					m.mu.RLock()
+					cb := m.onOutput
+					m.mu.RUnlock()
+					if cb != nil {
+						cb(existing.ID, data)
+					}
+				})
+				if err := w.Start(); err != nil {
+					log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
+				} else {
+					existing.setWatcher(w)
+					log.Printf("[ReAttach] Restarted watcher for agent %s on %s", existing.ID, sessionFile)
+				}
+			}
 			return existing, nil
 		}
 	}
@@ -959,6 +1247,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	// Create agent with existing session info
 	ag := newAgent(id, name, info.Provider, info.WorkDir, info.Cmd, info.Args)
 	ag.setStatus(StatusIdle)
+	applyAttachMetadata(ag)
 
 	m.mu.Lock()
 	m.agents[id] = ag

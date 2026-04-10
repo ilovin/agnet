@@ -183,6 +183,93 @@ func (s *Store) ListConversationEventsSince(agentID string, afterSeq uint64, lim
 	return out, rows.Err()
 }
 
+func (s *Store) ListConversationEventsBefore(agentID string, beforeSeq uint64, limit int) ([]ConversationEventRecord, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(
+		`SELECT agent_id, seq, data_json, created_at
+		 FROM conversation_events
+		 WHERE agent_id=? AND seq<?
+		 ORDER BY seq DESC
+		 LIMIT ?`,
+		agentID,
+		beforeSeq,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation events before: %w", err)
+	}
+	defer rows.Close()
+
+	tmp := make([]ConversationEventRecord, 0)
+	for rows.Next() {
+		var r ConversationEventRecord
+		var dataJSON string
+		if err := rows.Scan(&r.AgentID, &r.Seq, &dataJSON, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		_ = json.Unmarshal([]byte(dataJSON), &data)
+		r.Role, _ = data["role"].(string)
+		r.Text, _ = data["text"].(string)
+		r.Raw, _ = data["raw"].(bool)
+		tmp = append(tmp, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ConversationEventRecord, 0, len(tmp))
+	for i := len(tmp) - 1; i >= 0; i-- {
+		out = append(out, tmp[i])
+	}
+	return out, nil
+}
+
+func (s *Store) ListConversationEventsLatest(agentID string, limit int) ([]ConversationEventRecord, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(
+		`SELECT agent_id, seq, data_json, created_at
+		 FROM conversation_events
+		 WHERE agent_id=?
+		 ORDER BY seq DESC
+		 LIMIT ?`,
+		agentID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list latest conversation events: %w", err)
+	}
+	defer rows.Close()
+
+	tmp := make([]ConversationEventRecord, 0)
+	for rows.Next() {
+		var r ConversationEventRecord
+		var dataJSON string
+		if err := rows.Scan(&r.AgentID, &r.Seq, &dataJSON, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		var data map[string]any
+		_ = json.Unmarshal([]byte(dataJSON), &data)
+		r.Role, _ = data["role"].(string)
+		r.Text, _ = data["text"].(string)
+		r.Raw, _ = data["raw"].(bool)
+		tmp = append(tmp, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]ConversationEventRecord, 0, len(tmp))
+	for i := len(tmp) - 1; i >= 0; i-- {
+		out = append(out, tmp[i])
+	}
+	return out, nil
+}
+
 func (s *Store) LastConversationSeq(agentID string) (uint64, error) {
 	var last sql.NullInt64
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM conversation_events WHERE agent_id=?`, agentID).Scan(&last); err != nil {

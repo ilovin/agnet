@@ -73,7 +73,8 @@ class NodesNotifier extends StateNotifier<NodeState> {
 
   void _handleAgentStatus(Map<String, dynamic> params) {
     final nodeId = params['nodeId'] as String? ?? '';
-    final agentId = params['agentId'] as String;
+    final agentId = params['agentId'] as String?;
+    if (nodeId.isEmpty || agentId == null || agentId.isEmpty) return;
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
     if (idx == -1) return;

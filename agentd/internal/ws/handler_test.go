@@ -10,7 +10,16 @@ func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
 	if cmd != "claude" {
 		t.Fatalf("cmd = %q, want claude", cmd)
 	}
-	want := []string{"--permission-mode", "bypassPermissions", "--resume", "abc123", "--model", "claude-sonnet-4-6"}
+	// Claude now uses -p mode with stream-json output format for structured events
+	want := []string{
+		"-p",
+		"--permission-mode", "bypassPermissions",
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+		"--resume", "abc123",
+		"--model", "claude-sonnet-4-6",
+	}
 	if len(args) != len(want) {
 		t.Fatalf("args len = %d, want %d (%v)", len(args), len(want), args)
 	}

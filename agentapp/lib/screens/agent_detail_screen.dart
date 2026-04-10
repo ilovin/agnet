@@ -102,19 +102,30 @@ class ChatMessage {
   final String text;
   final int seq;
   final bool isRaw;
+  final String kind;
   final bool isPermissionPrompt;
 
   /// true if this is a tool call (e.g. [Bash: git status])
   bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
 
-  /// true if this looks like thinking/reasoning content
-  bool get isThinking => role == 'assistant' && !isToolCall && !isRaw && _thinkingPattern.hasMatch(text);
+  /// true if this is explicit thinking/reasoning content.
+  ///
+  /// Do not infer thinking from natural language keywords (e.g. "根据", "Let me")
+  /// because normal assistant replies often contain these phrases.
+  bool get isThinking {
+    if (role != 'assistant' || isToolCall || isRaw) return false;
+    if (_thinkingKinds.contains(kind)) return true;
+    return _explicitThinkingPrefix.hasMatch(text);
+  }
+
+  /// true if this message is a grouped assistant activity block.
+  bool get isActivityBlock => role == 'assistant' && kind == 'activity_block';
 
   static final _toolCallPattern = RegExp(r'^\[[\w]+:');
-  static final _thinkingPattern = RegExp(
-    r'(让我|需要|用户|我应该|我来|首先|接下来|基于|根据|分析|检查|查看|'
-    r'I need|I should|Let me|The user|Based on|Looking at|'
-    r'我来分析|我来检查|我来查看|看起来|这说明)',
+  static const _thinkingKinds = {'thinking', 'thinking_delta', 'reasoning'};
+  static final _explicitThinkingPrefix = RegExp(
+    r'^(thinking:|思考过程[:：]|\[thinking\])',
+    caseSensitive: false,
   );
 
   ChatMessage({
@@ -122,8 +133,29 @@ class ChatMessage {
     required this.text,
     required this.seq,
     this.isRaw = false,
+    this.kind = '',
     this.isPermissionPrompt = false,
   });
+}
+
+bool _isToolActivityEvent({
+  required String role,
+  required String kind,
+  required String text,
+  required bool raw,
+}) {
+  if (role != 'assistant' || raw) return false;
+  if (kind == 'tool_use' || kind == 'tool_result') return true;
+  if (text.startsWith('[Using tool:')) return true;
+  return ChatMessage._toolCallPattern.hasMatch(text);
+}
+
+String buildCollapsedPreview(String text, {int maxChars = 80}) {
+  final singleLine = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (singleLine.isEmpty) return '';
+  if (singleLine.length <= maxChars) return singleLine;
+  final truncated = singleLine.substring(0, maxChars).trimRight();
+  return '$truncated…';
 }
 
 /// Processes raw PTY output text to extract meaningful content.
@@ -174,10 +206,14 @@ bool isPermissionPromptText(String s) {
 
   // Match the permission selection UI patterns
   // Fragmented text like "bypasspermissionson", "asspermissionson", etc.
-  if (normalized.contains('bypass') && normalized.contains('permission')) return true;
-  if (normalized.contains('permission') && normalized.contains('shift+tab')) return true;
-  if (normalized.contains('bypass') && normalized.contains('shift+tab')) return true;
-  if (normalized.contains('shift+tab') && normalized.contains('cycle')) return true;
+  if (normalized.contains('bypass') && normalized.contains('permission'))
+    return true;
+  if (normalized.contains('permission') && normalized.contains('shift+tab'))
+    return true;
+  if (normalized.contains('bypass') && normalized.contains('shift+tab'))
+    return true;
+  if (normalized.contains('shift+tab') && normalized.contains('cycle'))
+    return true;
 
   // Legacy patterns for complete text
   if (s.contains('⏵⏵') && s.toLowerCase().contains('bypass')) return true;
@@ -216,7 +252,8 @@ String _extractPermissionPromptMessage(String rawText) {
       );
 
   // If still garbled, return a standard message
-  if (cleaned.length < 10 || cleaned.replaceAll(RegExp(r'[^a-zA-Z]'), '').length < 5) {
+  if (cleaned.length < 10 ||
+      cleaned.replaceAll(RegExp(r'[^a-zA-Z]'), '').length < 5) {
     return 'Claude 需要权限确认';
   }
 
@@ -252,15 +289,31 @@ bool isNoiseOnlyText(String s) {
   // These are TUI spinner frames - not real content
   if (RegExp(r'^[✢✳✶✻✽·⏺⠂⠐⠁⠄⠆⠃⠇⠏\s]+$').hasMatch(normalized)) return true;
   // Only spinner word variants
-  if (RegExp(r'^(Sautéing|Doing|Working)[\s…]*$').hasMatch(normalized)) return true;
+  if (RegExp(r'^(Sautéing|Doing|Working)[\s…]*$').hasMatch(normalized))
+    return true;
   // Box drawing only (after stripping ANSI)
   if (RegExp(r'^[─│╭╰╮╯\s]+$').hasMatch(normalized)) return true;
   return false;
 }
 
+Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
+  final map = Map<String, dynamic>.from(rawEvent);
+  return {
+    'seq': map['seq'] ?? 0,
+    'role': map['role'] ?? 'assistant',
+    'text': map['text'] ?? '',
+    'raw': map['raw'] ?? false,
+    'kind': map['kind'] ?? '',
+    'awaitingPermission': map['awaitingPermission'] ?? false,
+    if (map.containsKey('permissionRequest'))
+      'permissionRequest': map['permissionRequest'],
+  };
+}
+
 /// Converts raw events to display messages.
 /// Handles both structured stream-json events and legacy PTY raw output.
 /// Merges consecutive assistant text_delta fragments into complete messages.
+/// Collapses consecutive tool/read activity into a stable block.
 List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final messages = <ChatMessage>[];
 
@@ -268,18 +321,43 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final mergeBuf = StringBuffer();
   int mergeBufSeq = 0;
   bool mergeBufRaw = false;
+  String mergeBufKind = '';
+
+  // Buffer for grouping consecutive tool activities into a single stable block
+  final activityBuf = StringBuffer();
+  int activitySeq = 0;
 
   void flushMergeBuf() {
     if (mergeBuf.isEmpty) return;
     final merged = mergeBuf.toString().trim();
     mergeBuf.clear();
     if (!isNoiseOnlyText(merged)) {
-      messages.add(ChatMessage(
-        role: 'assistant',
-        text: merged,
-        seq: mergeBufSeq,
-        isRaw: mergeBufRaw,
-      ));
+      messages.add(
+        ChatMessage(
+          role: 'assistant',
+          text: merged,
+          seq: mergeBufSeq,
+          isRaw: mergeBufRaw,
+          kind: mergeBufKind,
+        ),
+      );
+    }
+    mergeBufKind = '';
+  }
+
+  void flushActivityBuf() {
+    if (activityBuf.isEmpty) return;
+    final activityText = activityBuf.toString().trim();
+    activityBuf.clear();
+    if (activityText.isNotEmpty) {
+      messages.add(
+        ChatMessage(
+          role: 'assistant',
+          text: activityText,
+          seq: activitySeq,
+          kind: 'activity_block',
+        ),
+      );
     }
   }
 
@@ -306,15 +384,42 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // User messages: flush any pending buffer first
     if (role == 'user') {
       flushMergeBuf();
+      flushActivityBuf();
       if (!isNoiseOnlyText(cleaned)) {
-        messages.add(ChatMessage(
-          role: role,
-          text: cleaned,
-          seq: seq,
-          isRaw: raw,
-        ));
+        messages.add(
+          ChatMessage(
+            role: role,
+            text: cleaned,
+            seq: seq,
+            isRaw: raw,
+            kind: kind,
+          ),
+        );
       }
       continue;
+    }
+
+    // Group consecutive tool/read/use activity events into one block.
+    if (_isToolActivityEvent(role: role, kind: kind, text: cleaned, raw: raw)) {
+      flushMergeBuf();
+      if (!isNoiseOnlyText(cleaned) && cleaned.isNotEmpty) {
+        if (activityBuf.isEmpty) {
+          activitySeq = seq;
+          activityBuf.write(cleaned);
+        } else {
+          final existing = activityBuf.toString();
+          if (!existing.endsWith(cleaned)) {
+            activityBuf.write('\n');
+            activityBuf.write(cleaned);
+          }
+        }
+      }
+      continue;
+    }
+
+    // Assistant text_delta should not be mixed with activity block.
+    if (kind == 'text_delta') {
+      flushActivityBuf();
     }
 
     // Assistant messages: skip noise
@@ -325,17 +430,23 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     final isFragment = raw || kind == 'text_delta';
 
     if (isFragment) {
-      if (isNoiseOnlyText(cleaned)) continue;
+      if (raw && isNoiseOnlyText(cleaned)) continue;
       if (cleaned.isNotEmpty) {
         if (mergeBuf.isEmpty) {
           mergeBufSeq = seq;
           mergeBufRaw = raw;
+          mergeBufKind = kind;
         }
         mergeBuf.write(cleaned);
         // Flush when we see sentence-ending content or significant length
-        if (cleaned.contains('？') || cleaned.contains('。') || cleaned.contains('！') ||
-            cleaned.endsWith('?') || cleaned.endsWith('.') || cleaned.endsWith('!') ||
-            cleaned.endsWith('\n') || mergeBuf.length > 200) {
+        if (cleaned.contains('？') ||
+            cleaned.contains('。') ||
+            cleaned.contains('！') ||
+            cleaned.endsWith('?') ||
+            cleaned.endsWith('.') ||
+            cleaned.endsWith('!') ||
+            cleaned.endsWith('\n') ||
+            mergeBuf.length > 200) {
           flushMergeBuf();
         }
       }
@@ -344,17 +455,22 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
 
     // Non-fragment assistant message (complete message from stream-json)
     flushMergeBuf();
+    flushActivityBuf();
     if (isNoiseOnlyText(cleaned)) continue;
-    messages.add(ChatMessage(
-      role: role,
-      text: cleaned,
-      seq: seq,
-      isRaw: false,
-    ));
+    messages.add(
+      ChatMessage(
+        role: role,
+        text: cleaned,
+        seq: seq,
+        isRaw: false,
+        kind: kind,
+      ),
+    );
   }
 
-  // Flush any remaining buffer
+  // Flush any remaining buffers
   flushMergeBuf();
+  flushActivityBuf();
 
   return messages;
 }
@@ -363,7 +479,11 @@ class AgentDetailScreen extends ConsumerStatefulWidget {
   final String nodeId;
   final String agentId;
 
-  const AgentDetailScreen({super.key, required this.nodeId, required this.agentId});
+  const AgentDetailScreen({
+    super.key,
+    required this.nodeId,
+    required this.agentId,
+  });
 
   @override
   ConsumerState<AgentDetailScreen> createState() => _AgentDetailScreenState();
@@ -374,6 +494,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   final _scrollCtrl = ScrollController();
   bool _loading = false;
   bool _initialLoading = true;
+  bool _loadingOlder = false;
+  bool _hasMoreHistory = true;
   bool _rawMode = false;
   bool _stopping = false;
   bool _stickToBottom = true;
@@ -383,7 +505,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   // Raw events from EventBuffer
   List<Map<String, dynamic>> _rawEvents = [];
   int _lastSeq = 0;
+  int _oldestSeq = 0;
   Timer? _pollTimer;
+  bool _pollingNewEvents = false;
 
   // Permission handling mode (mobile-friendly option)
   // true = auto-resolve (default for mobile), false = manual confirmation
@@ -395,7 +519,10 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     _scrollCtrl.addListener(_handleScroll);
     _loadHistory();
     // Poll every 1s for new events
-    _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollNewEvents());
+    _pollTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _pollNewEvents(),
+    );
   }
 
   @override
@@ -427,25 +554,27 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
-        'limit': 200, // Only load recent events for initial display
+        'limit': 200,
       });
       final raw = result is Map ? result : <String, dynamic>{};
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
+      final firstSeqFromResp = (raw['firstSeq'] as num?)?.toInt() ?? 0;
       if (mounted) {
         setState(() {
-          // API returns flattened events: {seq, role, text, raw}
-          _rawEvents = events.map((e) {
-            final map = Map<String, dynamic>.from(e as Map);
-            // Ensure all fields are present
-            return {
-              'seq': map['seq'] ?? 0,
-              'role': map['role'] ?? 'assistant',
-              'text': map['text'] ?? '',
-              'raw': map['raw'] ?? false,
-            };
-          }).toList();
+          _rawEvents = events
+              .map((e) => normalizeHistoryEvent(e as Map))
+              .toList();
           _lastSeq = lastSeq;
+          if (_rawEvents.isNotEmpty) {
+            _oldestSeq = firstSeqFromResp > 0
+                ? firstSeqFromResp
+                : ((_rawEvents.first['seq'] as num?)?.toInt() ?? 0);
+            _hasMoreHistory = _oldestSeq > 1;
+          } else {
+            _oldestSeq = 0;
+            _hasMoreHistory = false;
+          }
           _initialLoading = false;
           _lastError = null;
         });
@@ -462,10 +591,75 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
   }
 
-  Future<void> _pollNewEvents() async {
-    if (_initialLoading) return;
+  Future<void> _loadOlderHistory() async {
+    if (_loadingOlder || !_hasMoreHistory || _oldestSeq <= 1) return;
     final client = ref.read(connectionProvider);
     if (client == null) return;
+
+    final prevOffset = _scrollCtrl.hasClients ? _scrollCtrl.offset : 0.0;
+    final prevMax = _scrollCtrl.hasClients
+        ? _scrollCtrl.position.maxScrollExtent
+        : 0.0;
+
+    setState(() {
+      _loadingOlder = true;
+    });
+
+    try {
+      final result = await client.call('conversation.history', {
+        'nodeId': widget.nodeId,
+        'agentId': widget.agentId,
+        'before': _oldestSeq,
+        'limit': 200,
+      });
+      final raw = result is Map ? result : <String, dynamic>{};
+      final events = (raw['events'] as List?) ?? [];
+      if (!mounted) return;
+
+      if (events.isEmpty) {
+        setState(() {
+          _hasMoreHistory = false;
+          _loadingOlder = false;
+        });
+        return;
+      }
+
+      final older = events.map((e) => normalizeHistoryEvent(e as Map)).toList();
+
+      setState(() {
+        _rawEvents = [...older, ..._rawEvents];
+        _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? _oldestSeq);
+        _hasMoreHistory = _oldestSeq > 1 && older.length >= 200;
+        _loadingOlder = false;
+      });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollCtrl.hasClients) return;
+        final newMax = _scrollCtrl.position.maxScrollExtent;
+        final delta = newMax - prevMax;
+        final target = (prevOffset + delta).clamp(
+          _scrollCtrl.position.minScrollExtent,
+          _scrollCtrl.position.maxScrollExtent,
+        );
+        _scrollCtrl.jumpTo(target);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingOlder = false;
+        _lastError = '加载更多历史失败，请重试';
+      });
+    }
+  }
+
+  Future<void> _pollNewEvents() async {
+    if (_initialLoading || _pollingNewEvents) return;
+    _pollingNewEvents = true;
+    final client = ref.read(connectionProvider);
+    if (client == null) {
+      _pollingNewEvents = false;
+      return;
+    }
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -479,21 +673,35 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       if (!mounted) return;
 
       if (events.isNotEmpty) {
-        setState(() {
-          // API returns flattened events: {seq, role, text, raw}
-          _rawEvents.addAll(events.map((e) {
-            final map = Map<String, dynamic>.from(e as Map);
-            return {
-              'seq': map['seq'] ?? 0,
-              'role': map['role'] ?? 'assistant',
-              'text': map['text'] ?? '',
-              'raw': map['raw'] ?? false,
-            };
-          }));
-          _lastSeq = lastSeq;
-          _lastError = null;
-        });
-        _scrollToBottom();
+        // Deduplicate by seq before appending
+        final existingSeqs = _rawEvents
+            .map((e) => (e['seq'] as num?)?.toInt() ?? 0)
+            .toSet();
+        final newEvents = events
+            .map((e) => normalizeHistoryEvent(e as Map))
+            .where(
+              (e) => !existingSeqs.contains((e['seq'] as num?)?.toInt() ?? 0),
+            )
+            .toList();
+        if (newEvents.isNotEmpty) {
+          setState(() {
+            _rawEvents.addAll(newEvents);
+            _lastSeq = lastSeq;
+            if (_oldestSeq == 0 && _rawEvents.isNotEmpty) {
+              _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? 0);
+              _hasMoreHistory = _oldestSeq > 1;
+            }
+            _lastError = null;
+          });
+          _scrollToBottom();
+        } else {
+          // All events were duplicates, just update seq
+          if (lastSeq > _lastSeq) {
+            setState(() {
+              _lastSeq = lastSeq;
+            });
+          }
+        }
       } else if (lastSeq > _lastSeq) {
         setState(() {
           _lastSeq = lastSeq;
@@ -532,10 +740,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       setState(() {
         _lastError = '拉取新消息失败，稍后重试';
       });
+    } finally {
+      _pollingNewEvents = false;
     }
   }
 
-  Future<void> _sendPermissionResponse(String requestId, String behavior) async {
+  Future<void> _sendPermissionResponse(
+    String requestId,
+    String behavior,
+  ) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
     try {
@@ -580,9 +793,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       });
       return;
     }
-    if (agent.status == AgentStatus.stopped || agent.status == AgentStatus.crashed) {
+    // Allow sending even when stopped — conversation.send will auto-restart Claude -p agents
+    if (agent.isReadOnly) {
       setState(() {
-        _lastError = '会话未运行，请先启动';
+        _lastError = '当前会话为只读附加会话，请回到原 Claude 终端继续输入';
+      });
+      return;
+    }
+    if (agent.status == AgentStatus.crashed) {
+      setState(() {
+        _lastError = '会话崩溃，请先重启';
       });
       return;
     }
@@ -593,12 +813,33 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _lastError = null;
     });
     try {
-      await client.call('conversation.send', {
+      final result = await client.call('conversation.send', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
         'message': text,
         'raw': _rawMode,
       });
+
+      final map = result is Map
+          ? Map<String, dynamic>.from(result)
+          : <String, dynamic>{};
+      final newId = map['id'] as String?;
+
+      if (newId != null && newId.isNotEmpty && newId != widget.agentId) {
+        final listResult = await client.call('agent.list', {
+          'nodeId': widget.nodeId,
+        });
+        final agents = (listResult is List
+            ? listResult
+            : (listResult['agents'] as List?) ?? []);
+        ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
+        if (mounted) {
+          setState(() => _loading = false);
+          context.go('/agent/${widget.nodeId}/$newId');
+        }
+        return;
+      }
+
       await _pollNewEvents();
       await _pollBurstAfterSend();
     } catch (e) {
@@ -679,8 +920,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
       });
-      final listResult = await client.call('agent.list', {'nodeId': widget.nodeId});
-      final agents = (listResult is List ? listResult : (listResult['agents'] as List?) ?? []);
+      final listResult = await client.call('agent.list', {
+        'nodeId': widget.nodeId,
+      });
+      final agents = (listResult is List
+          ? listResult
+          : (listResult['agents'] as List?) ?? []);
       ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
     } catch (e) {
       debugPrint('control $action error: $e');
@@ -709,14 +954,23 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'model': model,
       });
 
-      final map = result is Map ? Map<String, dynamic>.from(result) : <String, dynamic>{};
+      final map = result is Map
+          ? Map<String, dynamic>.from(result)
+          : <String, dynamic>{};
       final newId = map['id'] as String?;
 
-      final listResult = await client.call('agent.list', {'nodeId': widget.nodeId});
-      final agents = (listResult is List ? listResult : (listResult['agents'] as List?) ?? []);
+      final listResult = await client.call('agent.list', {
+        'nodeId': widget.nodeId,
+      });
+      final agents = (listResult is List
+          ? listResult
+          : (listResult['agents'] as List?) ?? []);
       ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
 
-      if (newId != null && newId.isNotEmpty && mounted && newId != widget.agentId) {
+      if (newId != null &&
+          newId.isNotEmpty &&
+          mounted &&
+          newId != widget.agentId) {
         context.go('/agent/${widget.nodeId}/$newId');
       }
     } catch (e) {
@@ -744,17 +998,24 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     final messages = convertEventsToMessages(_rawEvents);
     final showPermissionOverlay = hasPendingPermissionPrompt(_rawEvents);
+    final provider = agent?.provider ?? '';
 
     return Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(agent?.name ?? widget.agentId, style: const TextStyle(fontSize: 16)),
+            Text(
+              agent?.name ?? widget.agentId,
+              style: const TextStyle(fontSize: 16),
+            ),
             if (agent != null)
               Text(
                 '${agent.provider} · ${_statusLabel(agent.status)}',
-                style: TextStyle(fontSize: 12, color: _statusColor(agent.status)),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _statusColor(agent.status),
+                ),
               ),
           ],
         ),
@@ -782,6 +1043,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               setState(() {
                 _rawEvents.clear();
                 _lastSeq = 0;
+                _oldestSeq = 0;
+                _hasMoreHistory = true;
                 _initialLoading = true;
               });
               _loadHistory();
@@ -808,7 +1071,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               backgroundColor: Theme.of(context).colorScheme.errorContainer,
               content: Text(
                 _lastError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onErrorContainer,
+                ),
               ),
               actions: [
                 TextButton(
@@ -856,27 +1121,60 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             child: _initialLoading
                 ? const Center(child: CircularProgressIndicator())
                 : messages.isEmpty
-                    ? const Center(child: Text('暂无对话', style: TextStyle(color: Colors.grey)))
-                    : ListView.builder(
-                        controller: _scrollCtrl,
-                        padding: const EdgeInsets.all(12),
-                        itemCount: messages.length,
-                        itemBuilder: (_, i) => _MessageBubble(
-                          message: messages[i],
-                          onResolvePermissionPrompt: messages[i].isPermissionPrompt ? _resolvePermissionPrompt : null,
-                        ),
-                      ),
+                ? const Center(
+                    child: Text('暂无对话', style: TextStyle(color: Colors.grey)),
+                  )
+                : NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification is ScrollUpdateNotification &&
+                          notification.metrics.pixels <=
+                              notification.metrics.minScrollExtent + 24) {
+                        _loadOlderHistory();
+                      }
+                      return false;
+                    },
+                    child: ListView.builder(
+                      controller: _scrollCtrl,
+                      padding: const EdgeInsets.all(12),
+                      itemCount: messages.length + (_loadingOlder ? 1 : 0),
+                      itemBuilder: (_, i) {
+                        if (_loadingOlder && i == 0) {
+                          return const Padding(
+                            padding: EdgeInsets.only(bottom: 8),
+                            child: Center(
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            ),
+                          );
+                        }
+                        final idx = i - (_loadingOlder ? 1 : 0);
+                        return _MessageBubble(
+                          message: messages[idx],
+                          onResolvePermissionPrompt:
+                              messages[idx].isPermissionPrompt
+                              ? _resolvePermissionPrompt
+                              : null,
+                        );
+                      },
+                    ),
+                  ),
           ),
           // Permission prompt overlay (above input bar)
           if (showPermissionOverlay)
-            _PermissionPromptOverlay(
-              onResolve: _resolvePermissionPrompt,
-            ),
+            _PermissionPromptOverlay(onResolve: _resolvePermissionPrompt),
           // Input bar
           _InputBar(
+            agent: agent,
             controller: _inputCtrl,
             loading: _loading,
             rawMode: _rawMode,
+            showTerminalControls: shouldShowTerminalControls(provider),
+            showRawToggle: shouldShowRawToggle(provider),
             onToggleRaw: (v) => setState(() => _rawMode = v),
             onSend: _sendMessage,
             onKey: _sendKey,
@@ -888,21 +1186,31 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   Color _statusColor(AgentStatus s) {
     switch (s) {
-      case AgentStatus.working: return Colors.blue;
-      case AgentStatus.idle: return Colors.green;
-      case AgentStatus.starting: return Colors.orange;
-      case AgentStatus.stopped: return Colors.grey;
-      case AgentStatus.crashed: return Colors.red;
+      case AgentStatus.working:
+        return Colors.blue;
+      case AgentStatus.idle:
+        return Colors.green;
+      case AgentStatus.starting:
+        return Colors.orange;
+      case AgentStatus.stopped:
+        return Colors.grey;
+      case AgentStatus.crashed:
+        return Colors.red;
     }
   }
 
   String _statusLabel(AgentStatus s) {
     switch (s) {
-      case AgentStatus.working: return 'Working';
-      case AgentStatus.idle: return 'Standby';
-      case AgentStatus.starting: return 'Starting…';
-      case AgentStatus.stopped: return 'Stopped';
-      case AgentStatus.crashed: return 'Crashed';
+      case AgentStatus.working:
+        return 'Working';
+      case AgentStatus.idle:
+        return 'Standby';
+      case AgentStatus.starting:
+        return 'Starting…';
+      case AgentStatus.stopped:
+        return 'Stopped';
+      case AgentStatus.crashed:
+        return 'Crashed';
     }
   }
 }
@@ -922,7 +1230,9 @@ class _ControlBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final stopped = agent.status == AgentStatus.stopped || agent.status == AgentStatus.crashed;
+    final stopped =
+        agent.status == AgentStatus.stopped ||
+        agent.status == AgentStatus.crashed;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -937,9 +1247,18 @@ class _ControlBar extends StatelessWidget {
               tooltip: '切换模型',
               onSelected: onSwitchModel,
               itemBuilder: (_) => const [
-                PopupMenuItem(value: 'claude-sonnet-4-6', child: Text('Sonnet 4.6')),
-                PopupMenuItem(value: 'claude-opus-4-6', child: Text('Opus 4.6')),
-                PopupMenuItem(value: 'claude-haiku-4-5-20251001', child: Text('Haiku 4.5')),
+                PopupMenuItem(
+                  value: 'claude-sonnet-4-6',
+                  child: Text('Sonnet 4.6'),
+                ),
+                PopupMenuItem(
+                  value: 'claude-opus-4-6',
+                  child: Text('Opus 4.6'),
+                ),
+                PopupMenuItem(
+                  value: 'claude-haiku-4-5-20251001',
+                  child: Text('Haiku 4.5'),
+                ),
               ],
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 8),
@@ -986,12 +1305,14 @@ class _ControlBar extends StatelessWidget {
 class _CollapsibleBubble extends StatefulWidget {
   final String header;
   final String content;
+  final String? collapsedPreview;
   final IconData icon;
   final Color color;
 
   const _CollapsibleBubble({
     required this.header,
     required this.content,
+    this.collapsedPreview,
     required this.icon,
     required this.color,
   });
@@ -1024,7 +1345,9 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
               child: AnimatedCrossFade(
                 firstChild: _buildCollapsed(scheme),
                 secondChild: _buildExpanded(scheme),
-                crossFadeState: _expanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+                crossFadeState: _expanded
+                    ? CrossFadeState.showSecond
+                    : CrossFadeState.showFirst,
                 duration: const Duration(milliseconds: 200),
               ),
             ),
@@ -1035,6 +1358,7 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
   }
 
   Widget _buildCollapsed(ColorScheme scheme) {
+    final preview = widget.collapsedPreview?.trim() ?? '';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -1043,15 +1367,33 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
         border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(Icons.chevron_right, size: 16, color: widget.color),
           const SizedBox(width: 6),
           Expanded(
-            child: Text(
-              widget.header,
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.header,
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (preview.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    preview,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
             ),
           ),
         ],
@@ -1074,13 +1416,24 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
             children: [
               Icon(Icons.expand_more, size: 16, color: widget.color),
               const SizedBox(width: 6),
-              Text(widget.header, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant, fontWeight: FontWeight.w500)),
+              Text(
+                widget.header,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 6),
           SelectableText(
             widget.content,
-            style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant, height: 1.4),
+            style: TextStyle(
+              fontSize: 12,
+              color: scheme.onSurfaceVariant,
+              height: 1.4,
+            ),
           ),
         ],
       ),
@@ -1156,12 +1509,25 @@ class _MessageBubble extends StatelessWidget {
 
     // Collapsible thinking block
     if (message.isThinking) {
-      final preview = message.text.replaceAll('\n', ' ');
       return _CollapsibleBubble(
-        header: '思考过程...',
+        header: '思考过程',
         content: message.text,
+        collapsedPreview: buildCollapsedPreview(message.text, maxChars: 90),
         icon: Icons.psychology,
         color: Colors.orange.shade700,
+      );
+    }
+
+    if (message.isActivityBlock) {
+      final firstLine = message.text
+          .split('\n')
+          .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '助手活动');
+      return _CollapsibleBubble(
+        header: '助手活动',
+        content: message.text,
+        collapsedPreview: buildCollapsedPreview(firstLine, maxChars: 90),
+        icon: Icons.build,
+        color: scheme.primary,
       );
     }
 
@@ -1171,6 +1537,7 @@ class _MessageBubble extends StatelessWidget {
       return _CollapsibleBubble(
         header: '工具调用: $toolName',
         content: message.text,
+        collapsedPreview: buildCollapsedPreview(message.text, maxChars: 90),
         icon: Icons.build,
         color: scheme.primary,
       );
@@ -1180,29 +1547,35 @@ class _MessageBubble extends StatelessWidget {
     final bgColor = isUser
         ? scheme.primaryContainer
         : isRaw
-            ? scheme.surfaceContainerLow
-            : scheme.surfaceContainerHighest;
+        ? scheme.surfaceContainerLow
+        : scheme.surfaceContainerHighest;
 
     final textColor = isUser
         ? scheme.onPrimaryContainer
         : isRaw
-            ? scheme.onSurfaceVariant.withValues(alpha: 0.7)
-            : scheme.onSurface;
+        ? scheme.onSurfaceVariant.withValues(alpha: 0.7)
+        : scheme.onSurface;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         children: [
           if (!isUser) ...[
             CircleAvatar(
               radius: isRaw ? 12 : 16,
-              backgroundColor: isRaw ? scheme.surfaceContainerHighest : scheme.primaryContainer,
+              backgroundColor: isRaw
+                  ? scheme.surfaceContainerHighest
+                  : scheme.primaryContainer,
               child: Icon(
                 isRaw ? Icons.terminal : Icons.smart_toy,
                 size: isRaw ? 14 : 18,
-                color: isRaw ? scheme.onSurfaceVariant : scheme.onPrimaryContainer,
+                color: isRaw
+                    ? scheme.onSurfaceVariant
+                    : scheme.onPrimaryContainer,
               ),
             ),
             const SizedBox(width: 8),
@@ -1274,12 +1647,14 @@ class _KeyButton extends StatelessWidget {
   final String displayLabel;
   final VoidCallback onTap;
   final bool isArrow;
+  final bool enabled;
 
   const _KeyButton({
     required this.label,
     required this.onTap,
     this.displayLabel = '',
     this.isArrow = false,
+    this.enabled = true,
   });
 
   @override
@@ -1290,29 +1665,34 @@ class _KeyButton extends StatelessWidget {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: onTap,
+        onTap: enabled ? onTap : null,
         borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: isArrow
-                ? (isDark ? Colors.blue.shade900.withValues(alpha: 0.3) : Colors.blue.shade50)
-                : (isDark ? Colors.grey.shade800 : Colors.grey.shade100),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(
+        child: Opacity(
+          opacity: enabled ? 1 : 0.45,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
               color: isArrow
-                  ? (isDark ? Colors.blue.shade700 : Colors.blue.shade300)
-                  : (isDark ? Colors.grey.shade700 : Colors.grey.shade300),
+                  ? (isDark
+                        ? Colors.blue.shade900.withValues(alpha: 0.3)
+                        : Colors.blue.shade50)
+                  : (isDark ? Colors.grey.shade800 : Colors.grey.shade100),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: isArrow
+                    ? (isDark ? Colors.blue.shade700 : Colors.blue.shade300)
+                    : (isDark ? Colors.grey.shade700 : Colors.grey.shade300),
+              ),
             ),
-          ),
-          child: Text(
-            display,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w500,
-              color: isArrow
-                  ? (isDark ? Colors.blue.shade300 : Colors.blue.shade700)
-                  : Theme.of(context).colorScheme.onSurface,
+            child: Text(
+              display,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                color: isArrow
+                    ? (isDark ? Colors.blue.shade300 : Colors.blue.shade700)
+                    : Theme.of(context).colorScheme.onSurface,
+              ),
             ),
           ),
         ),
@@ -1343,6 +1723,30 @@ String keyToDisplay(String key) {
     default:
       return key;
   }
+}
+
+bool shouldShowTerminalControls(String provider) {
+  return provider != 'claude';
+}
+
+bool shouldShowRawToggle(String provider) {
+  return shouldShowTerminalControls(provider);
+}
+
+bool isReadOnlyAgent(AgentModel? agent) {
+  return agent?.isReadOnly ?? false;
+}
+
+String readOnlyHintText(AgentModel? agent) {
+  if (!isReadOnlyAgent(agent)) return '输入消息…';
+  final reason = agent?.readOnlyReason.trim() ?? '';
+  if (reason.isNotEmpty) {
+    return '只读会话：$reason';
+  }
+  if (agent?.provider == 'claude') {
+    return '只读会话：请回到原 Claude 终端继续输入';
+  }
+  return '只读会话，无法在此发送消息';
 }
 
 /// Permission prompt overlay widget
@@ -1380,11 +1784,7 @@ class _PermissionPromptOverlay extends StatelessWidget {
               color: scheme.secondary.withOpacity(0.2),
               shape: BoxShape.circle,
             ),
-            child: Icon(
-              Icons.security,
-              size: 20,
-              color: scheme.secondary,
-            ),
+            child: Icon(Icons.security, size: 20, color: scheme.secondary),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -1424,17 +1824,23 @@ class _PermissionPromptOverlay extends StatelessWidget {
 }
 
 class _InputBar extends StatelessWidget {
+  final AgentModel? agent;
   final TextEditingController controller;
   final bool loading;
   final bool rawMode;
+  final bool showTerminalControls;
+  final bool showRawToggle;
   final ValueChanged<bool> onToggleRaw;
   final VoidCallback onSend;
   final Future<void> Function(String key) onKey;
 
   const _InputBar({
+    required this.agent,
     required this.controller,
     required this.loading,
     required this.rawMode,
+    required this.showTerminalControls,
+    required this.showRawToggle,
     required this.onToggleRaw,
     required this.onSend,
     required this.onKey,
@@ -1442,9 +1848,15 @@ class _InputBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isReadOnly = isReadOnlyAgent(agent);
+    final effectiveLoading = loading && !isReadOnly;
+    final readOnlyHint = readOnlyHintText(agent);
+
     return Container(
       padding: EdgeInsets.only(
-        left: 12, right: 12, top: 8,
+        left: 12,
+        right: 12,
+        top: 8,
         bottom: MediaQuery.of(context).padding.bottom + 8,
       ),
       decoration: BoxDecoration(
@@ -1454,59 +1866,150 @@ class _InputBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Row(
-            children: [
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                crossAxisAlignment: WrapCrossAlignment.center,
+          if (isReadOnly)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+              ),
+              child: Row(
                 children: [
-                  _KeyButton(label: 'up', displayLabel: '↑', isArrow: true, onTap: () => onKey('up')),
-                  _KeyButton(label: 'down', displayLabel: '↓', isArrow: true, onTap: () => onKey('down')),
-                  _KeyButton(label: 'left', displayLabel: '←', isArrow: true, onTap: () => onKey('left')),
-                  _KeyButton(label: 'right', displayLabel: '→', isArrow: true, onTap: () => onKey('right')),
-                  _KeyButton(label: 'enter', displayLabel: '⏎', onTap: () => onKey('enter')),
+                  Icon(
+                    Icons.visibility_off_outlined,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      readOnlyHint,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
                 ],
               ),
-              const Spacer(),
-              Row(
+            ),
+          if (showTerminalControls)
+            Row(
+              children: [
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    _KeyButton(
+                      label: 'up',
+                      displayLabel: '↑',
+                      isArrow: true,
+                      onTap: () => onKey('up'),
+                      enabled: !isReadOnly,
+                    ),
+                    _KeyButton(
+                      label: 'down',
+                      displayLabel: '↓',
+                      isArrow: true,
+                      onTap: () => onKey('down'),
+                      enabled: !isReadOnly,
+                    ),
+                    _KeyButton(
+                      label: 'left',
+                      displayLabel: '←',
+                      isArrow: true,
+                      onTap: () => onKey('left'),
+                      enabled: !isReadOnly,
+                    ),
+                    _KeyButton(
+                      label: 'right',
+                      displayLabel: '→',
+                      isArrow: true,
+                      onTap: () => onKey('right'),
+                      enabled: !isReadOnly,
+                    ),
+                    _KeyButton(
+                      label: 'enter',
+                      displayLabel: '⏎',
+                      onTap: () => onKey('enter'),
+                      enabled: !isReadOnly,
+                    ),
+                  ],
+                ),
+                if (showRawToggle) ...[
+                  const Spacer(),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('Raw', style: TextStyle(fontSize: 12)),
+                      Switch(
+                        value: rawMode,
+                        onChanged: isReadOnly ? null : onToggleRaw,
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            )
+          else if (showRawToggle)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text('Raw', style: TextStyle(fontSize: 12)),
-                  Switch(value: rawMode, onChanged: onToggleRaw),
+                  Switch(
+                    value: rawMode,
+                    onChanged: isReadOnly ? null : onToggleRaw,
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
           const SizedBox(height: 8),
           Row(
             children: [
               Expanded(
                 child: TextField(
                   controller: controller,
-                  decoration: const InputDecoration(
-                    hintText: '输入消息…',
-                    border: OutlineInputBorder(
+                  enabled: !isReadOnly && !loading,
+                  decoration: InputDecoration(
+                    hintText: readOnlyHint,
+                    border: const OutlineInputBorder(
                       borderRadius: BorderRadius.all(Radius.circular(24)),
                     ),
-                    contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
                     isDense: true,
                   ),
                   textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => onSend(),
+                  onSubmitted: isReadOnly ? null : (_) => onSend(),
                   maxLines: 4,
                   minLines: 1,
                 ),
               ),
               const SizedBox(width: 8),
-              loading
-                  ? const SizedBox(width: 40, height: 40, child: CircularProgressIndicator(strokeWidth: 2))
+              effectiveLoading
+                  ? const SizedBox(
+                      width: 40,
+                      height: 40,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : IconButton(
-                      onPressed: onSend,
+                      onPressed: isReadOnly ? null : onSend,
                       icon: const Icon(Icons.send),
                       style: IconButton.styleFrom(
                         backgroundColor: Theme.of(context).colorScheme.primary,
-                        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                        foregroundColor: Theme.of(
+                          context,
+                        ).colorScheme.onPrimary,
                       ),
                     ),
             ],

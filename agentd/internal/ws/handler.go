@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentd/internal/agent"
+	"github.com/phone-talk/agentd/internal/eventbuf"
 	"github.com/phone-talk/agentd/internal/scanner"
 )
 
@@ -84,17 +85,29 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 func (h *handler) agentList(req RPCRequest) RPCResponse {
 	agents := h.server.manager.List()
 	type agentInfo struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Provider string `json:"provider"`
-		WorkDir  string `json:"workDir"`
-		Status   string `json:"status"`
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		Provider       string `json:"provider"`
+		WorkDir        string `json:"workDir"`
+		Status         string `json:"status"`
+		HasHistory     bool   `json:"hasHistory"`
+		AttachMode     string `json:"attachMode,omitempty"`
+		ReadOnly       bool   `json:"readOnly"`
+		ReadOnlyReason string `json:"readOnlyReason,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
+		lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
 		result = append(result, agentInfo{
-			ID: ag.ID, Name: ag.Name, Provider: ag.Provider,
-			WorkDir: ag.WorkDir, Status: string(ag.Status()),
+			ID:             ag.ID,
+			Name:           ag.Name,
+			Provider:       ag.Provider,
+			WorkDir:        ag.WorkDir,
+			Status:         string(ag.Status()),
+			HasHistory:     lastSeq > 0,
+			AttachMode:     ag.AttachMode(),
+			ReadOnly:       ag.AttachReadOnly(),
+			ReadOnlyReason: ag.AttachReadOnlyReason(),
 		})
 	}
 	return okResp(req.ID, result)
@@ -216,6 +229,65 @@ func toAnySlice(v any) []any {
 	return out
 }
 
+func catalogSessionID(v any) string {
+	entry, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if sessionID, _ := entry["sessionId"].(string); sessionID != "" {
+		return sessionID
+	}
+	if sessionID, _ := entry["id"].(string); sessionID != "" {
+		return sessionID
+	}
+	sessionFile, _ := entry["sessionFile"].(string)
+	if sessionFile == "" {
+		return ""
+	}
+	base := filepath.Base(sessionFile)
+	if strings.HasSuffix(base, ".jsonl") {
+		return strings.TrimSuffix(base, ".jsonl")
+	}
+	if strings.HasSuffix(base, ".json") {
+		return strings.TrimSuffix(base, ".json")
+	}
+	return ""
+}
+
+func filterLiveClaudeFileSessions(attachableProcesses, claudeFiles []any) []any {
+	liveClaudeSessionIDs := make(map[string]struct{})
+	for _, raw := range attachableProcesses {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		provider, _ := entry["provider"].(string)
+		if !strings.EqualFold(provider, "claude") {
+			continue
+		}
+		sessionID := catalogSessionID(entry)
+		if sessionID == "" {
+			continue
+		}
+		liveClaudeSessionIDs[strings.ToLower(sessionID)] = struct{}{}
+	}
+	if len(liveClaudeSessionIDs) == 0 {
+		return claudeFiles
+	}
+
+	filtered := make([]any, 0, len(claudeFiles))
+	for _, raw := range claudeFiles {
+		sessionID := catalogSessionID(raw)
+		if sessionID != "" {
+			if _, ok := liveClaudeSessionIDs[strings.ToLower(sessionID)]; ok {
+				continue
+			}
+		}
+		filtered = append(filtered, raw)
+	}
+	return filtered
+}
+
 func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	type managedAgent struct {
 		ID       string `json:"id"`
@@ -282,7 +354,7 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 
 	attachableProcesses := toAnySlice(attachable["processes"])
 	files := toAnySlice(opencodeFiles["sessions"])
-	claude := toAnySlice(claudeFiles["sessions"])
+	claude := filterLiveClaudeFileSessions(attachableProcesses, toAnySlice(claudeFiles["sessions"]))
 
 	return okResp(req.ID, map[string]any{
 		"managed":       managed,
@@ -298,10 +370,24 @@ func (h *handler) sessionCreate(req RPCRequest) (RPCResponse, func()) {
 
 func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
 	// If agentId is provided for an already managed session, treat attach as
-	// selecting that managed agent (no new attach needed).
+	// selecting that managed agent. Restart the watcher if it isn't running.
 	agentID, _ := req.Params["agentId"].(string)
 	if agentID != "" {
 		if ag := h.server.manager.Get(agentID); ag != nil {
+			// If no watcher is running, try to start one
+			if ag.Watcher() == nil {
+				if err := h.server.manager.StartWatcherForAgent(agentID); err != nil {
+					log.Printf("[session.attach] failed to start watcher for %s: %v", agentID, err)
+				} else {
+					srv := h.server
+					conn := h.conn
+					return okResp(req.ID, map[string]any{"id": agentID}), func() {
+						srv.broadcast(event("agent.status_changed", map[string]any{
+							"agentId": agentID, "status": "idle",
+						}), conn)
+					}
+				}
+			}
 			return okResp(req.ID, map[string]any{"id": agentID}), nil
 		}
 	}
@@ -387,14 +473,11 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "agent not found")
 	}
 
-	isPipeMode := ag.Provider == "claude"
+	isPipeMode := ag.Provider == "claude" && ag.Process() != nil
 
-	// For Claude in -p mode, we need to restart with the message as argument
-	// because -p mode expects the prompt as a command line argument, not stdin
+	// For Claude in -p mode, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
-		// Restart with new message as argument (handles recording/broadcasting)
-		resp, _ := h.agentRestartWithMessage(req, ag, message)
-		return resp
+		return h.agentRestartWithMessage(req, ag, message)
 	}
 
 	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
@@ -430,7 +513,13 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	}
 
 	if err := ag.WriteInput(input); err != nil {
-		return errResp(req.ID, -32000, "write to agent: "+err.Error())
+		msg := err.Error()
+		if ag.AttachReadOnly() && ag.AttachReadOnlyReason() != "" {
+			msg = "write to agent: attached session is read-only: " + ag.AttachReadOnlyReason()
+		} else {
+			msg = "write to agent: " + msg
+		}
+		return errResp(req.ID, -32000, msg)
 	}
 
 	// Handle prompt that appears immediately after message send.
@@ -458,59 +547,53 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 // agentRestartWithMessage restarts a Claude agent with a new message written to stdin.
 // Used for -p mode where Claude exits after each response and reads prompt from stdin.
-func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string) (RPCResponse, error) {
-	// Stop the existing agent
-	_ = h.server.manager.Stop(ag.ID)
-
-	// Build new args (without message as argument - it goes to stdin)
-	provider, cmd, args := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, "", "")
-
-	// Create new agent (this starts the pipe reader and process)
-	newID, err := h.server.manager.Create(ag.Name, provider, cmd, args, ag.WorkDir)
-	if err != nil {
-		return errResp(req.ID, -32000, "restart with message: "+err.Error()), err
+func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string) RPCResponse {
+	// Get the stored resume session ID for conversation continuity
+	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+	if resumeSessionID != "" {
+		log.Printf("[Restart] Resuming session %s for agent %s", resumeSessionID, ag.ID)
 	}
 
-	// Write message to the new agent's stdin
-	// In -p mode, Claude reads from stdin, so we need to write the prompt there
-	newAg := h.server.manager.Get(newID)
-	if newAg != nil && newAg.Process() != nil {
-		// Write immediately - the process is ready to read
-		if err := newAg.WriteInput(message + "\n"); err != nil {
-			log.Printf("[Restart] Failed to write message to agent %s: %v", newID, err)
-		} else {
-			log.Printf("[Restart] Wrote message to agent %s stdin", newID)
-			// Close stdin to signal EOF - this tells Claude to process the input
-			if proc := newAg.Process(); proc != nil {
-				proc.CloseStdin()
-				log.Printf("[Restart] Closed stdin for agent %s", newID)
-			}
-		}
-	} else {
-		log.Printf("[Restart] Warning: new agent %s process not ready", newID)
+	// Build args with resume session ID for conversation continuity
+	provider, cmd, args := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
+
+	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args); err != nil {
+		return errResp(req.ID, -32000, "restart with message: "+err.Error())
 	}
 
-	// Broadcast user message
+	// Write message to the restarted agent's stdin
+	restarted := h.server.manager.Get(ag.ID)
+	if restarted == nil || restarted.Process() == nil {
+		return errResp(req.ID, -32000, "restart with message: agent process not ready")
+	}
+	if err := restarted.WriteInput(message + "\n"); err != nil {
+		return errResp(req.ID, -32000, "write to restarted agent: "+err.Error())
+	}
+	if proc := restarted.Process(); proc != nil {
+		proc.CloseStdin()
+	}
+
+	// Record user message first, then broadcast for deterministic history/view sync.
+	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+		"role": "user",
+		"text": message,
+		"raw":  false,
+	}); err != nil {
+		return errResp(req.ID, -32000, "record user message: "+err.Error())
+	}
+
 	h.server.broadcast(event("conversation.message", map[string]any{
-		"agentId": newID,
+		"agentId": ag.ID,
 		"role":    "user",
 		"text":    message,
 	}), nil)
 
-	// Record user message
-	h.server.manager.RecordConversationEvent(newID, map[string]any{
-		"role": "user",
-		"text": message,
-		"raw":  false,
-	})
-
-	// Broadcast status change
 	h.server.broadcast(event("agent.status_changed", map[string]any{
-		"agentId": newID,
+		"agentId": ag.ID,
 		"status":  "working",
 	}), nil)
 
-	return okResp(req.ID, map[string]any{"id": newID}), nil
+	return okResp(req.ID, map[string]any{"id": ag.ID})
 }
 
 func keyToBytes(key string) (string, bool) {
@@ -579,16 +662,50 @@ func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
 	if v, ok := req.Params["cursor"].(float64); ok {
 		afterSeq = uint64(v)
 	}
+	limit := 200
+	if v, ok := req.Params["limit"].(float64); ok {
+		if iv := int(v); iv > 0 {
+			limit = iv
+		}
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	var beforeSeq uint64
+	if v, ok := req.Params["before"].(float64); ok {
+		beforeSeq = uint64(v)
+	}
+
 	ag := h.server.manager.Get(agentID)
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found")
 	}
 
 	// Get conversation events
-	events := ag.EventBuf().Since(afterSeq)
-	if len(events) == 0 {
-		if persisted, err := h.server.manager.LoadPersistedEventsSince(agentID, afterSeq, 5000); err == nil {
+	var events []eventbuf.Event
+	if beforeSeq > 0 {
+		if persisted, err := h.server.manager.LoadPersistedEventsBefore(agentID, beforeSeq, limit); err == nil {
 			events = persisted
+		}
+	} else if afterSeq > 0 {
+		events = ag.EventBuf().Since(afterSeq)
+		if len(events) == 0 {
+			if persisted, err := h.server.manager.LoadPersistedEventsSince(agentID, afterSeq, limit); err == nil {
+				events = persisted
+			}
+		}
+	} else {
+		live := ag.EventBuf().Since(0)
+		if len(live) > 0 {
+			if len(live) > limit {
+				events = live[len(live)-limit:]
+			} else {
+				events = live
+			}
+		} else {
+			if persisted, err := h.server.manager.LoadPersistedEventsLatest(agentID, limit); err == nil {
+				events = persisted
+			}
 		}
 	}
 
@@ -619,7 +736,7 @@ func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
 	}
 
 	// Flatten events: {seq, data: {role, text}} -> {seq, role, text}
-	var flattened []map[string]any
+	flattened := make([]map[string]any, 0, len(events))
 	for _, e := range events {
 		flat := map[string]any{
 			"seq": e.Seq,
@@ -630,9 +747,15 @@ func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
 		flattened = append(flattened, flat)
 	}
 
+	var firstSeq uint64
+	if len(events) > 0 {
+		firstSeq = events[0].Seq
+	}
+
 	return okResp(req.ID, map[string]any{
 		"events":             flattened,
 		"lastSeq":            lastSeq,
+		"firstSeq":           firstSeq,
 		"permissionRequests": permissionRequests,
 	})
 }
@@ -680,8 +803,8 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 	var responseData map[string]any
 	if behavior == "allow" {
 		responseData = map[string]any{
-			"behavior":      "allow",
-			"updatedInput":  resp.UpdatedInput,
+			"behavior":           "allow",
+			"updatedInput":       resp.UpdatedInput,
 			"updatedPermissions": resp.UpdatedPermissions,
 		}
 	} else {
@@ -694,9 +817,9 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 	controlResp := map[string]any{
 		"type": "control_response",
 		"response": map[string]any{
-			"subtype":   "success",
+			"subtype":    "success",
 			"request_id": requestID,
-			"response":  responseData,
+			"response":   responseData,
 		},
 	}
 
@@ -859,25 +982,33 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 	}
 
 	type processInfo struct {
-		PID         int      `json:"pid"`
-		Provider    string   `json:"provider"`
-		WorkDir     string   `json:"workDir"`
-		Args        []string `json:"args"`
-		Session     string   `json:"session,omitempty"`
-		Terminal    string   `json:"terminal,omitempty"`
-		SessionFile string   `json:"sessionFile,omitempty"`
+		PID            int      `json:"pid"`
+		Provider       string   `json:"provider"`
+		WorkDir        string   `json:"workDir"`
+		Args           []string `json:"args"`
+		Session        string   `json:"session,omitempty"`
+		SessionID      string   `json:"sessionId,omitempty"`
+		Terminal       string   `json:"terminal,omitempty"`
+		SessionFile    string   `json:"sessionFile,omitempty"`
+		AttachMode     string   `json:"attachMode,omitempty"`
+		ReadOnly       bool     `json:"readOnly"`
+		ReadOnlyReason string   `json:"readOnlyReason,omitempty"`
 	}
 
 	result := make([]processInfo, 0, len(processes))
 	for _, p := range processes {
 		result = append(result, processInfo{
-			PID:         p.PID,
-			Provider:    p.Provider,
-			WorkDir:     p.WorkDir,
-			Args:        p.Args,
-			Session:     p.Session,
-			Terminal:    p.Terminal,
-			SessionFile: p.FindSessionFile(),
+			PID:            p.PID,
+			Provider:       p.Provider,
+			WorkDir:        p.WorkDir,
+			Args:           p.Args,
+			Session:        p.Session,
+			SessionID:      p.SessionID,
+			Terminal:       p.Terminal,
+			SessionFile:    p.FindSessionFile(),
+			AttachMode:     p.AttachMode(),
+			ReadOnly:       p.AttachReadOnly(),
+			ReadOnlyReason: p.AttachReadOnlyReason(),
 		})
 	}
 
@@ -922,10 +1053,13 @@ func (h *handler) agentAttach(req RPCRequest) (RPCResponse, func()) {
 	srv := h.server
 	conn := h.conn
 	return okResp(req.ID, map[string]any{
-			"id":       agent.ID,
-			"name":     agent.Name,
-			"provider": agent.Provider,
-			"status":   string(agent.Status()),
+			"id":             agent.ID,
+			"name":           agent.Name,
+			"provider":       agent.Provider,
+			"status":         string(agent.Status()),
+			"attachMode":     agent.AttachMode(),
+			"readOnly":       agent.AttachReadOnly(),
+			"readOnlyReason": agent.AttachReadOnlyReason(),
 		}), func() {
 			srv.broadcast(event("agent.status_changed", map[string]any{
 				"agentId": agent.ID,

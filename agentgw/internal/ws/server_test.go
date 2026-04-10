@@ -50,6 +50,13 @@ func newFakeAgentd(t *testing.T, result map[string]any) *httptest.Server {
 					"id":      req["id"],
 					"result":  fa.result,
 				})
+			case "agent.list":
+				agents, _ := fa.result["agents"].([]any)
+				_ = conn.WriteJSON(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req["id"],
+					"result":  map[string]any{"agents": agents},
+				})
 			case "session.catalog":
 				managed := []any{}
 				attachable := []any{}
@@ -380,5 +387,81 @@ func TestUnknownMethod(t *testing.T) {
 	resp := rpc(t, conn, "bogus.method", nil)
 	if resp["error"] == nil {
 		t.Error("expected error for unknown method")
+	}
+}
+
+func TestSystemHealth(t *testing.T) {
+	ts, mgr := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	// Test with no nodes — should be healthy
+	resp := rpc(t, conn, "system.health", nil)
+	if resp["error"] != nil {
+		t.Fatalf("system.health error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp["result"])
+	}
+	if result["status"] != "healthy" {
+		t.Errorf("expected healthy with no nodes, got %v", result["status"])
+	}
+	if result["uptime_seconds"] == nil {
+		t.Error("expected uptime_seconds")
+	}
+	if result["timestamp"] == nil {
+		t.Error("expected timestamp")
+	}
+
+	// Add a connected node with a fake agentd
+	connectedID, err := mgr.Add(nodecfg.NodeEntry{Name: "local-agentd", Host: "127.0.0.1", SSHPort: 22, AgentdPort: 7373, Token: "tok"})
+	if err != nil {
+		t.Fatalf("mgr.Add: %v", err)
+	}
+
+	agentd := newFakeAgentd(t, map[string]any{
+		"agents": []any{
+			map[string]any{"id": "a1", "provider": "claude"},
+		},
+	})
+	wsURL := "ws" + strings.TrimPrefix(agentd.URL, "http")
+	p, err := proxy.New(wsURL, "tok")
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	mgr.Get(connectedID).SetProxy(p)
+
+	// Use a higher RPC ID to avoid clash with previous call
+	req := map[string]any{"jsonrpc": "2.0", "id": 2, "method": "system.health", "params": nil}
+	conn.WriteJSON(req)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var resp2 map[string]any
+	if err := conn.ReadJSON(&resp2); err != nil {
+		t.Fatalf("ReadJSON: %v", err)
+	}
+
+	result2, ok := resp2["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp2["result"])
+	}
+	if result2["status"] != "healthy" {
+		t.Errorf("expected healthy, got %v", result2["status"])
+	}
+	nodes, ok := result2["nodes"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nodes map, got %T", result2["nodes"])
+	}
+	localNode, ok := nodes["local-agentd"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected local-agentd entry, got %T", nodes["local-agentd"])
+	}
+	if localNode["status"] != "connected" {
+		t.Errorf("expected connected, got %v", localNode["status"])
+	}
+	if localNode["agents"] != nil {
+		if agents, ok := localNode["agents"].(float64); !ok || int(agents) != 1 {
+			t.Errorf("expected 1 agent, got %v", localNode["agents"])
+		}
 	}
 }

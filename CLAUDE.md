@@ -52,6 +52,18 @@ flutter test test/models_test.dart -v  # run single test file
 flutter analyze                  # lint/static analysis
 ```
 
+## Development Workflow
+
+- Follow **test-driven development (TDD)** for all non-trivial changes.
+- After **every development step or code change**, run the relevant tests before continuing.
+- Minimum expectation per change:
+  - backend changes: targeted Go unit tests
+  - app changes: targeted Flutter tests
+  - cross-component/session changes: relevant integration tests
+- For session/chat pipeline work, use `agentgw/test_plan.md` as the executable test plan.
+- Final acceptance is gated by **real Chrome interaction in the existing tab**; do not treat a change as done until Chrome validation passes.
+- Any future debug scripts, screenshots, temporary captures, and generated debug artifacts must go under a fixed ignored directory: `agentapp/scripts/debug/` (or an equivalent component-local `scripts/debug/` directory). Do not leave debug PNGs, ad-hoc scripts, or runtime artifacts in the project root.
+
 ## Key Design Decisions
 
 - **agentd** is a single static binary with zero runtime dependencies — easy to SCP to remote machines

@@ -22,6 +22,10 @@ class AgentModel {
   final String nodeId;
   final String provider;
   final AgentStatus status;
+  final bool hasHistory;
+  final bool isReadOnly;
+  final String readOnlyReason;
+  final String attachMode;
 
   const AgentModel({
     required this.id,
@@ -30,6 +34,10 @@ class AgentModel {
     required this.nodeId,
     required this.provider,
     required this.status,
+    this.hasHistory = false,
+    this.isReadOnly = false,
+    this.readOnlyReason = '',
+    this.attachMode = '',
   });
 
   factory AgentModel.fromJson(Map<String, dynamic> json) => AgentModel(
@@ -39,6 +47,10 @@ class AgentModel {
         nodeId: json['nodeId'] as String? ?? '',
         provider: json['provider'] as String? ?? 'custom',
         status: _parseAgentStatus(json['status'] as String? ?? ''),
+        hasHistory: json['hasHistory'] as bool? ?? false,
+        isReadOnly: json['readOnly'] as bool? ?? false,
+        readOnlyReason: json['readOnlyReason'] as String? ?? '',
+        attachMode: json['attachMode'] as String? ?? '',
       );
 
   AgentModel copyWith({
@@ -48,6 +60,10 @@ class AgentModel {
     String? nodeId,
     String? provider,
     AgentStatus? status,
+    bool? hasHistory,
+    bool? isReadOnly,
+    String? readOnlyReason,
+    String? attachMode,
   }) =>
       AgentModel(
         id: id ?? this.id,
@@ -56,5 +72,9 @@ class AgentModel {
         nodeId: nodeId ?? this.nodeId,
         provider: provider ?? this.provider,
         status: status ?? this.status,
+        hasHistory: hasHistory ?? this.hasHistory,
+        isReadOnly: isReadOnly ?? this.isReadOnly,
+        readOnlyReason: readOnlyReason ?? this.readOnlyReason,
+        attachMode: attachMode ?? this.attachMode,
       );
 }

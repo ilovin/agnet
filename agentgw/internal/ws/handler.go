@@ -66,6 +66,8 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return dispatchResult{resp: h.sessionListAll(req)}
 	case "session.catalog_all":
 		return dispatchResult{resp: h.sessionCatalogAll(req)}
+	case "system.health":
+		return dispatchResult{resp: h.systemHealth(req)}
 	default:
 		return dispatchResult{resp: errResp(req.ID, -32601, "method not found: "+req.Method)}
 	}
@@ -339,4 +341,64 @@ func (h *handler) proxyToNode(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, err.Error())
 	}
 	return okResp(req.ID, result)
+}
+
+func (h *handler) systemHealth(req RPCRequest) RPCResponse {
+	nodes := h.server.manager.List()
+
+	type nodeHealth struct {
+		Status    string `json:"status"`
+		LatencyMs int64  `json:"latency_ms"`
+		Agents    int    `json:"agents"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	nodesHealth := make(map[string]nodeHealth, len(nodes))
+	healthyCount := 0
+	connectedCount := 0
+
+	for _, n := range nodes {
+		status := string(n.GetStatus())
+		nh := nodeHealth{Status: status}
+
+		p := n.GetProxy()
+		if p != nil {
+			connectedCount++
+			// Ping the node to measure latency and verify responsiveness
+			start := time.Now()
+			result, err := p.Call("agent.list", nil, 5*time.Second)
+			nh.LatencyMs = time.Since(start).Milliseconds()
+
+			if err != nil {
+				nh.Status = "unresponsive"
+				nh.Error = err.Error()
+			} else {
+				healthyCount++
+				nh.Status = "connected"
+				if m, ok := result.(map[string]any); ok {
+					if agents, ok := m["agents"].([]any); ok {
+						nh.Agents = len(agents)
+					}
+				}
+			}
+		}
+
+		nodesHealth[n.Name] = nh
+	}
+
+	overallStatus := "down"
+	if len(nodes) == 0 {
+		overallStatus = "healthy" // no nodes configured is ok
+	} else if healthyCount == len(nodes) {
+		overallStatus = "healthy"
+	} else if healthyCount > 0 || connectedCount > 0 {
+		overallStatus = "degraded"
+	}
+
+	return okResp(req.ID, map[string]any{
+		"status":         overallStatus,
+		"nodes":          nodesHealth,
+		"uptime_seconds": int64(time.Since(h.server.startTime).Seconds()),
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+	})
 }

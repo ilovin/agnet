@@ -28,7 +28,7 @@ func TestClaudeWatcherIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, err := mgr.CreateWithWatcher("watcher-agent", "echo", []string{"x"}, tmpDir, sessionFile)
+	id, err := mgr.CreateWithWatcher("watcher-agent", "custom", "echo", []string{"x"}, tmpDir, sessionFile)
 	if err != nil {
 		t.Fatalf("CreateWithWatcher: %v", err)
 	}

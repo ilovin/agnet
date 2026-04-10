@@ -60,6 +60,20 @@ func runServer() {
 	if err := mgr.LoadFromStore(); err != nil {
 		log.Printf("warning: failed to load agents from store: %v", err)
 	}
+
+	// Auto-attach to any Claude/OpenCode processes already running on this machine
+	procs, err := mgr.ScanExisting()
+	if err != nil {
+		log.Printf("warning: scan existing processes: %v", err)
+	}
+	for _, proc := range procs {
+		if ag, err := mgr.Attach(proc); err != nil {
+			log.Printf("warning: auto-attach pid %d: %v", proc.PID, err)
+		} else {
+			log.Printf("[AutoAttach] Attached to %s (pid %d) as agent %s", proc.Provider, proc.PID, ag.ID)
+		}
+	}
+
 	srv := ws.New(mgr, cfg.Token)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)

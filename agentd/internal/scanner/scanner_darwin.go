@@ -10,9 +10,9 @@ import (
 
 // scanDarwin scans for processes on macOS using ps and lsof commands.
 func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
-	// Get all processes with their command lines
-	// ps -eo pid,ppid,comm,args
-	cmd := exec.Command("ps", "-eo", "pid,ppid,comm,args")
+	// Get all processes with their command lines and controlling terminal.
+	// ps -eo pid,ppid,tty,comm,args
+	cmd := exec.Command("ps", "-eo", "pid,ppid,tty,comm,args")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -33,14 +33,14 @@ func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
 		}
 	}
 
-	return found, nil
+	return finalizeProcessScan(found), nil
 }
 
 // parseDarwinProcess parses a ps output line for Darwin.
 func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
-	// Parse: PID  PPID  COMM  ARGS...
+	// Parse: PID  PPID  TTY  COMM  ARGS...
 	fields := strings.Fields(line)
-	if len(fields) < 4 {
+	if len(fields) < 5 {
 		return ProcessInfo{}, false
 	}
 
@@ -50,9 +50,9 @@ func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
 	}
 
 	ppid, _ := strconv.Atoi(fields[1])
-
-	comm := fields[2]
-	args := fields[3:]
+	terminal := fields[2]
+	comm := fields[3]
+	args := fields[4:]
 
 	// Check if it's Claude or OpenCode
 	var provider string
@@ -82,17 +82,24 @@ func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
 		workDir = "/"
 	}
 
-	// Get terminal
-	terminal := s.getDarwinTerminal(pid)
+	if terminal == "??" {
+		terminal = ""
+	}
+	terminal = normalizeTTY(terminal)
+	tmuxTarget, tmuxSession := s.detectDarwinTmuxFromTTY(terminal)
 
 	return ProcessInfo{
-		PID:      pid,
-		Cmd:      comm,
-		Args:     args,
-		WorkDir:  workDir,
-		Provider: provider,
-		Session:  "", // tmux detection would need additional work on Darwin
-		Terminal: terminal,
+		PID:         pid,
+		PPID:        ppid,
+		Cmd:         comm,
+		Args:        args,
+		WorkDir:     workDir,
+		Provider:    provider,
+		Session:     tmuxSession,
+		Terminal:    terminal,
+		TmuxTarget:  tmuxTarget,
+		SessionID:   "",
+		SessionFile: "",
 	}, true
 }
 
@@ -138,7 +145,23 @@ func (s *Scanner) getDarwinTerminal(pid int) string {
 	return tty
 }
 
-// stub for Linux compatibility - never called on Darwin
+func (s *Scanner) detectDarwinTmuxFromTTY(terminal string) (target string, session string) {
+	wantTTY := normalizeTTY(terminal)
+	if wantTTY == "" {
+		return "", ""
+	}
+
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", ""
+	}
+
+	return resolveTmuxTargetFromPaneList(string(out), wantTTY)
+}
+
+// stub for Linux compatibility - never called on macOS
 func (s *Scanner) scanLinux() ([]ProcessInfo, error) {
 	return nil, nil
 }
+
