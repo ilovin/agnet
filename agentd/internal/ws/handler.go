@@ -346,7 +346,12 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 			// Mark as attachable for UI
 			candidate.Status = "idle"
 		}
-		key := strings.ToLower(candidate.Provider + "|" + candidate.Name)
+		// Use sessionId as primary key if available, otherwise fall back to ID
+		// This ensures multiple sessions in the same directory are all shown
+		key := strings.ToLower(candidate.Provider + "|" + candidate.SessionID)
+		if candidate.SessionID == "" {
+			key = strings.ToLower(candidate.Provider + "|" + candidate.ID)
+		}
 		existing, ok := managedByKey[key]
 		if !ok || statusPriority(candidate.Status) < statusPriority(existing.Status) {
 			managedByKey[key] = candidate
@@ -943,11 +948,25 @@ func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
 		ID          string    `json:"id"`
 		Name        string    `json:"name"`
 		WorkDir     string    `json:"workDir"`
+		ProjectName string    `json:"projectName,omitempty"`
 		SessionFile string    `json:"sessionFile"`
 		ModifiedAt  time.Time `json:"modifiedAt"`
 		Size        int64     `json:"size"`
 	}
 
+	// extractProjectName extracts a human-readable project name from directory name
+	// e.g., "-Users-fengming-xie-Downloads" -> "Downloads"
+
+	extractProjectName := func(dirName string) string {
+		// Remove leading dash
+		s := strings.TrimPrefix(dirName, "-")
+		// Split by "-" and take the last part
+		parts := strings.Split(s, "-")
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+		return dirName
+	}
 	projectsDir := filepath.Join(home, ".claude", "projects")
 	projectEntries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -980,6 +999,7 @@ func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
 				ID:          sessionID,
 				Name:        sessionID,
 				WorkDir:     project.Name(),
+				ProjectName: extractProjectName(project.Name()),
 				SessionFile: filepath.Join(projectPath, entry.Name()),
 				ModifiedAt:  info.ModTime(),
 				Size:        info.Size(),

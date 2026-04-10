@@ -549,18 +549,21 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 // wireStatusCallback sets up the status change callback for an agent.
 func (m *Manager) wireStatusCallback(ag *Agent) {
 	ag.SetOnStatusChange(func(agentID string, oldStatus, newStatus Status) {
-		m.mu.RLock()
-		cb := m.onOutput
-		m.mu.RUnlock()
-		if cb != nil {
-			cb(agentID, map[string]any{
-				"method": "agent.status_changed",
-				"params": map[string]any{
-					"agentId": agentID,
-					"status":  string(newStatus),
-				},
-			})
-		}
+		// Use a separate goroutine to avoid deadlock when called from within a lock
+		go func() {
+			m.mu.RLock()
+			cb := m.onOutput
+			m.mu.RUnlock()
+			if cb != nil {
+				cb(agentID, map[string]any{
+					"method": "agent.status_changed",
+					"params": map[string]any{
+						"agentId": agentID,
+						"status":  string(newStatus),
+					},
+				})
+			}
+		}()
 	})
 }
 
