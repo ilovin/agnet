@@ -86,6 +86,7 @@ func (m *Manager) LoadFromStore() error {
 			args = []string{"--dangerously-skip-permissions"}
 		}
 		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
+		m.wireStatusCallback(ag)
 		ag.setStatus(StatusStopped)
 		// Initialize buffer seq from persisted events so new appends continue after existing data
 		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
@@ -545,26 +546,31 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 }
 
 // Create spawns a new agent process using the given command/args.
-func (m *Manager) Create(name, provider, cmd string, args []string, workDir string) (string, error) {
-	id := newUUID()
-	if provider == "" {
-		provider = "custom"
-	}
-	ag := newAgent(id, name, provider, workDir, cmd, args)
-
-	// Wire status change → broadcast event
+// wireStatusCallback sets up the status change callback for an agent.
+func (m *Manager) wireStatusCallback(ag *Agent) {
 	ag.SetOnStatusChange(func(agentID string, oldStatus, newStatus Status) {
 		m.mu.RLock()
 		cb := m.onOutput
 		m.mu.RUnlock()
 		if cb != nil {
 			cb(agentID, map[string]any{
-				"agentId":   agentID,
-				"status":    string(newStatus),
-				"oldStatus": string(oldStatus),
+				"method": "agent.status_changed",
+				"params": map[string]any{
+					"agentId": agentID,
+					"status":  string(newStatus),
+				},
 			})
 		}
 	})
+}
+
+func (m *Manager) Create(name, provider, cmd string, args []string, workDir string) (string, error) {
+	id := newUUID()
+	if provider == "" {
+		provider = "custom"
+	}
+	ag := newAgent(id, name, provider, workDir, cmd, args)
+	m.wireStatusCallback(ag)
 
 	m.mu.Lock()
 	m.agents[id] = ag
@@ -1290,6 +1296,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 
 	// Create agent with existing session info
 	ag := newAgent(id, name, info.Provider, info.WorkDir, info.Cmd, info.Args)
+	m.wireStatusCallback(ag)
 	ag.setStatus(StatusIdle)
 	applyAttachMetadata(ag)
 

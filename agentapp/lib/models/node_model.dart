@@ -48,6 +48,7 @@ class NodeModel {
   final String host;
   final NodeStatus status;
   final NodeLocation location;
+  final int agentCount;
 
   const NodeModel({
     required this.id,
@@ -55,6 +56,7 @@ class NodeModel {
     required this.host,
     required this.status,
     required this.location,
+    this.agentCount = 0,
   });
 
   bool get isLocal => location.isLocal;
@@ -74,6 +76,7 @@ class NodeModel {
               host: host,
               displayLocation: _isLocalHost(host) ? 'localhost' : host,
             ),
+      agentCount: (json['agentCount'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -83,6 +86,7 @@ class NodeModel {
     String? host,
     NodeStatus? status,
     NodeLocation? location,
+    int? agentCount,
   }) =>
       NodeModel(
         id: id ?? this.id,
@@ -90,6 +94,7 @@ class NodeModel {
         host: host ?? this.host,
         status: status ?? this.status,
         location: location ?? this.location,
+        agentCount: agentCount ?? this.agentCount,
       );
 }
 

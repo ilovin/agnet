@@ -141,10 +141,9 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 	out := make([]ProcessInfo, 0, len(parents))
 	for _, proc := range parents {
 		if proc.Provider == "claude" {
+			// Try to find session info, but don't skip if not found
+			// Process may still be attachable even without session file
 			sessionID, sessionFile := findClaudeSessionInfo(proc.PID, proc.WorkDir)
-			if sessionID == "" {
-				continue
-			}
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		}

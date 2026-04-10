@@ -74,18 +74,22 @@ func TestFinalizeProcessScanAddsLiveClaudeSessionInfo(t *testing.T) {
 	}
 }
 
-func TestFinalizeProcessScanDropsClaudeWithoutLiveSessionMapping(t *testing.T) {
+func TestFinalizeProcessScanKeepsClaudeWithoutLiveSessionMapping(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	// Process without session mapping should still be visible (attachable but not resumable)
 	got := finalizeProcessScan([]ProcessInfo{{
 		PID:      999,
 		PPID:     1,
 		Provider: "claude",
 		WorkDir:  "/repo",
 	}})
-	if len(got) != 0 {
-		t.Fatalf("expected unmapped claude process to be dropped, got %#v", got)
+	if len(got) != 1 {
+		t.Fatalf("expected unmapped claude process to be kept, got %#v", got)
+	}
+	if got[0].SessionID != "" || got[0].SessionFile != "" {
+		t.Fatalf("expected empty session info for unmapped process, got sessionID=%q, sessionFile=%q", got[0].SessionID, got[0].SessionFile)
 	}
 }
 

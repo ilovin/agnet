@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/phone-talk/agentgw/internal/discover"
 	"github.com/phone-talk/agentgw/internal/node"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 )
@@ -51,6 +53,8 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 	switch req.Method {
 	case "node.list":
 		return dispatchResult{resp: h.nodeList(req)}
+	case "node.discover":
+		return dispatchResult{resp: h.nodeDiscover(req)}
 	case "node.add":
 		return h.nodeAdd(req)
 	case "node.remove":
@@ -74,39 +78,140 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 	}
 }
 
+// nodeWithAgentCount wraps a node with its agent count for sorting.
+type nodeWithAgentCount struct {
+	node  *node.Node
+	count int
+}
+
 func (h *handler) nodeList(req RPCRequest) RPCResponse {
 	nodes := h.server.manager.List()
+
+	// Sort nodes: those with agents come first, then by status
+	type nodeWithCount struct {
+		node      *node.Node
+		agentCount int
+	}
+	wrapped := make([]nodeWithCount, 0, len(nodes))
+	for _, n := range nodes {
+		count := 0
+		if p := n.GetProxy(); p != nil {
+			if result, err := p.Call("agent.list", nil, 5*time.Second); err == nil {
+				if m, ok := result.(map[string]any); ok {
+					if agents, ok := m["agents"].([]any); ok {
+						count = len(agents)
+					}
+				} else if agents, ok := result.([]any); ok {
+					count = len(agents)
+				}
+			}
+		}
+		wrapped = append(wrapped, nodeWithCount{node: n, agentCount: count})
+	}
+
+	// Sort: nodes with agents first, then by status priority
+	sort.Slice(wrapped, func(i, j int) bool {
+		if wrapped[i].agentCount != wrapped[j].agentCount {
+			return wrapped[i].agentCount > wrapped[j].agentCount
+		}
+		// Status priority: connected > connecting > error > disconnected
+		priority := map[string]int{
+			"connected":    0,
+			"connecting":   1,
+			"deploying":    2,
+			"error":        3,
+			"disconnected": 4,
+		}
+		pi := priority[string(wrapped[i].node.GetStatus())]
+		pj := priority[string(wrapped[j].node.GetStatus())]
+		if pi != pj {
+			return pi < pj
+		}
+		return wrapped[i].node.Name < wrapped[j].node.Name
+	})
+
 	type nodeLocation struct {
 		Type            string `json:"type"`
 		Host            string `json:"host"`
 		DisplayLocation string `json:"displayLocation"`
 	}
 	type nodeInfo struct {
-		ID       string       `json:"id"`
-		Name     string       `json:"name"`
-		Host     string       `json:"host"`
-		Status   string       `json:"status"`
-		Location nodeLocation `json:"location"`
+		ID         string       `json:"id"`
+		Name       string       `json:"name"`
+		Host       string       `json:"host"`
+		Status     string       `json:"status"`
+		Location   nodeLocation `json:"location"`
+		AgentCount int          `json:"agentCount"`
 	}
-	result := make([]nodeInfo, 0, len(nodes))
-	for _, n := range nodes {
+	result := make([]nodeInfo, 0, len(wrapped))
+	for _, w := range wrapped {
 		locType := "remote"
-		if n.IsLocal() {
+		if w.node.IsLocal() {
 			locType = "local"
 		}
 		result = append(result, nodeInfo{
-			ID:     n.ID,
-			Name:   n.Name,
-			Host:   n.Host,
-			Status: string(n.GetStatus()),
+			ID:         w.node.ID,
+			Name:       w.node.Name,
+			Host:       w.node.Host,
+			Status:     string(w.node.GetStatus()),
+			AgentCount: w.agentCount,
 			Location: nodeLocation{
 				Type:            locType,
-				Host:            n.Host,
-				DisplayLocation: n.DisplayLocation(),
+				Host:            w.node.Host,
+				DisplayLocation: w.node.DisplayLocation(),
 			},
 		})
 	}
 	return okResp(req.ID, result)
+}
+
+// nodeDiscover scans SSH config and discovers nodes with agentd running.
+func (h *handler) nodeDiscover(req RPCRequest) RPCResponse {
+	// Parse SSH config
+	sshHosts, err := nodecfg.ParseSSHConfig()
+	if err != nil {
+		return errResp(req.ID, -32000, fmt.Sprintf("parse ssh config: %v", err))
+	}
+
+	// Filter out already configured hosts
+	existing := h.server.manager.List()
+	existingMap := make(map[string]bool)
+	for _, n := range existing {
+		existingMap[n.Host] = true
+		if n.SSHAlias != "" {
+			existingMap[n.SSHAlias] = true
+		}
+	}
+
+	var toProbe []nodecfg.SSHHost
+	for _, h := range sshHosts {
+		if !existingMap[h.HostName] && !existingMap[h.Name] {
+			toProbe = append(toProbe, h)
+		}
+	}
+
+	// Probe hosts for agentd
+	prober := discover.NewProber()
+	results := prober.Discover(toProbe)
+
+	// Collect found nodes
+	var found []map[string]any
+	for _, r := range results {
+		if r.Found {
+			found = append(found, map[string]any{
+				"id":       r.NodeID,
+				"name":     r.Host.Name,
+				"host":     r.Host.HostName,
+				"sshAlias": r.Host.Name,
+				"sshPort":  r.Host.Port,
+			})
+		}
+	}
+
+	return okResp(req.ID, map[string]any{
+		"scanned": len(toProbe),
+		"found":   found,
+	})
 }
 
 func (h *handler) nodeAdd(req RPCRequest) dispatchResult {

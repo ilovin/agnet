@@ -165,8 +165,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   }
 
   void _startAutoRefresh() {
-    // Refresh every 3 seconds
-    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    // Refresh every 10 seconds (was 3s, increased for slower networks)
+    _refreshTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       _refreshAllNodes();
     });
     // Initial refresh
@@ -225,6 +225,150 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
+  Future<void> _discoverNodes(BuildContext context, WidgetRef ref) async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        title: Text('发现节点'),
+        content: SizedBox(
+          height: 100,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('正在扫描 SSH 配置...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      final result = await client.call('node.discover', {});
+      if (!context.mounted) return;
+      Navigator.pop(context);
+
+      final scanned = (result['scanned'] as num?)?.toInt() ?? 0;
+      final found = (result['found'] as List?) ?? [];
+
+      if (found.isEmpty) {
+        if (!context.mounted) return;
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('发现节点'),
+            content: Text('扫描了 $scanned 个 SSH 主机，未发现运行 agentd 的节点。'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('确定'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+
+      // Show discovered nodes
+      if (!context.mounted) return;
+      final added = await showDialog<List<String>>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setState) {
+            final selected = <String>{};
+            for (final node in found) {
+              selected.add(node['id'] as String);
+            }
+
+            return AlertDialog(
+              title: Text('发现 ${found.length} 个节点'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: found.length,
+                  itemBuilder: (_, i) {
+                    final node = found[i] as Map<String, dynamic>;
+                    final id = node['id'] as String;
+                    return CheckboxListTile(
+                      title: Text(node['name'] as String),
+                      subtitle: Text(node['host'] as String),
+                      value: selected.contains(id),
+                      onChanged: (v) {
+                        setState(() {
+                          if (v == true) {
+                            selected.add(id);
+                          } else {
+                            selected.remove(id);
+                          }
+                        });
+                      },
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, selected.toList()),
+                  child: const Text('添加选中'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+
+      // Add selected nodes
+      if (added != null && added.isNotEmpty && context.mounted) {
+        for (final id in added) {
+          final node = found.firstWhere((n) => n['id'] == id) as Map<String, dynamic>;
+          try {
+            await client.call('node.add', {
+              'id': node['id'],
+              'name': node['name'],
+              'host': node['host'],
+              'sshAlias': node['sshAlias'],
+              'sshPort': node['sshPort'],
+              'agentdPort': 7373,
+              'token': 'testtoken123',
+            });
+          } catch (e) {
+            debugPrint('Failed to add node ${node['name']}: $e');
+          }
+        }
+        // Refresh node list
+        _refreshAllNodes();
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      Navigator.pop(context);
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('错误'),
+          content: Text('扫描失败: $e'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('确定'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final nodeState = ref.watch(nodesProvider);
@@ -236,6 +380,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         actions: [
           // Health status indicator
           const _HealthIndicator(),
+          IconButton(
+            icon: const Icon(Icons.search),
+            tooltip: '发现节点',
+            onPressed: () => _discoverNodes(context, ref),
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
