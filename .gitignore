@@ -5,3 +5,33 @@
 /findings.md
 /progress.md
 /test_plan.md
+
+# Go binaries
+agentd/agentd
+agentd/agentd-linux
+agentgw/agentgw
+
+# Flutter build
+agentapp/build/
+agentapp/.dart_tool/
+agentapp/.flutter-plugins
+agentapp/.flutter-plugins-dependencies
+agentapp/ios/Flutter/flutter_export_environment.sh
+
+# Web build artifacts in static dir
+agentgw/static/
+
+# Dev scripts
+agentgw/scripts/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude worktrees
+.claude/worktrees/

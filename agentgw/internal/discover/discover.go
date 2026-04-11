@@ -2,15 +2,16 @@ package discover
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 	"golang.org/x/crypto/ssh"
-	"net"
-
 	"golang.org/x/crypto/ssh/agent"
 )
 
@@ -81,9 +82,14 @@ func (p *Prober) probe(host nodecfg.SSHHost) Result {
 		return result
 	}
 
-	// Connect to SSH server
-	addr := fmt.Sprintf("%s:%d", host.HostName, host.Port)
-	client, err := ssh.Dial("tcp", addr, config)
+	// Connect to SSH server (with ProxyCommand support)
+	var client *ssh.Client
+	if host.ProxyCommand != "" {
+		client, err = p.dialViaProxyCommand(host, config)
+	} else {
+		addr := fmt.Sprintf("%s:%d", host.HostName, host.Port)
+		client, err = ssh.Dial("tcp", addr, config)
+	}
 	if err != nil {
 		result.Error = fmt.Sprintf("ssh dial: %v", err)
 		return result
@@ -127,6 +133,103 @@ func (p *Prober) probe(host nodecfg.SSHHost) Result {
 
 	return result
 }
+
+// dialViaProxyCommand connects to SSH server through a ProxyCommand.
+// It executes the proxy command and uses its stdin/stdout as the network connection.
+func (p *Prober) dialViaProxyCommand(host nodecfg.SSHHost, config *ssh.ClientConfig) (*ssh.Client, error) {
+	// Replace placeholders in ProxyCommand
+	cmdStr := host.ProxyCommand
+	cmdStr = strings.ReplaceAll(cmdStr, "%h", host.HostName)
+	cmdStr = strings.ReplaceAll(cmdStr, "%p", fmt.Sprintf("%d", host.Port))
+	cmdStr = strings.ReplaceAll(cmdStr, "%r", host.User)
+
+	// Execute proxy command
+	cmdParts := strings.Fields(cmdStr)
+	if len(cmdParts) == 0 {
+		return nil, fmt.Errorf("empty proxy command")
+	}
+	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+
+	// Get stdin/stdout pipes
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("proxy stdin: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("proxy stdout: %v", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("proxy stderr: %v", err)
+	}
+
+	// Start the proxy command
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start proxy: %v", err)
+	}
+
+	// Create a combined read-write closer for the connection
+	conn := &proxyConn{
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: stderr,
+		cmd:    cmd,
+	}
+
+	// Perform SSH handshake on the proxy connection with timeout
+	// The config.Timeout doesn't apply to NewClientConn, so we need a custom approach
+	clientChan := make(chan *ssh.Client, 1)
+	errChan := make(chan error, 1)
+
+	go func() {
+		c, chans, reqs, err := ssh.NewClientConn(conn, host.HostName, config)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		clientChan <- ssh.NewClient(c, chans, reqs)
+	}()
+
+	select {
+	case client := <-clientChan:
+		return client, nil
+	case err := <-errChan:
+		conn.Close()
+		return nil, fmt.Errorf("ssh handshake: %v", err)
+	case <-time.After(p.timeout):
+		conn.Close()
+		return nil, fmt.Errorf("ssh handshake: timeout")
+	}
+}
+
+// proxyConn wraps stdin/stdout pipes from a proxy command into a net.Conn.
+type proxyConn struct {
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr io.ReadCloser
+	cmd    *exec.Cmd
+}
+
+func (c *proxyConn) Read(b []byte) (n int, err error)  { return c.stdout.Read(b) }
+func (c *proxyConn) Write(b []byte) (n int, err error) { return c.stdin.Write(b) }
+func (c *proxyConn) Close() error {
+	c.stdin.Close()
+	c.stdout.Close()
+	if c.stderr != nil {
+		c.stderr.Close()
+	}
+	if c.cmd != nil && c.cmd.Process != nil {
+		c.cmd.Process.Kill()
+		c.cmd.Wait()
+	}
+	return nil
+}
+func (c *proxyConn) LocalAddr() net.Addr              { return nil }
+func (c *proxyConn) RemoteAddr() net.Addr             { return nil }
+func (c *proxyConn) SetDeadline(t time.Time) error    { return nil }
+func (c *proxyConn) SetReadDeadline(t time.Time) error    { return nil }
+func (c *proxyConn) SetWriteDeadline(t time.Time) error   { return nil }
 
 // buildSSHConfig creates SSH client configuration from host settings.
 func (p *Prober) buildSSHConfig(host nodecfg.SSHHost) (*ssh.ClientConfig, error) {

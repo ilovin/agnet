@@ -123,7 +123,8 @@ class ChatMessage {
   /// true if this message is a grouped assistant activity block.
   bool get isActivityBlock => role == 'assistant' && kind == 'activity_block';
 
-  static final _toolCallPattern = RegExp(r'^\[[\w]+:');
+  /// Matches tool call patterns: [Bash: cmd], [Agent], [SendMessage], [TaskList], etc.
+  static final _toolCallPattern = RegExp(r'^\[[\w]+[:\]]');
   static const _thinkingKinds = {'thinking', 'thinking_delta', 'reasoning'};
   static final _explicitThinkingPrefix = RegExp(
     r'^(thinking:|思考过程[:：]|\[thinking\])',
@@ -150,6 +151,17 @@ bool _isToolActivityEvent({
   if (kind == 'tool_use' || kind == 'tool_result') return true;
   if (text.startsWith('[Using tool:')) return true;
   return ChatMessage._toolCallPattern.hasMatch(text);
+}
+
+bool _isThinkingEvent({
+  required String role,
+  required String kind,
+  required String text,
+  required bool raw,
+}) {
+  if (role != 'assistant' || raw) return false;
+  if (const {'thinking', 'thinking_delta', 'reasoning'}.contains(kind)) return true;
+  return ChatMessage._explicitThinkingPrefix.hasMatch(text);
 }
 
 String buildCollapsedPreview(String text, {int maxChars = 80}) {
@@ -324,10 +336,18 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   int mergeBufSeq = 0;
   bool mergeBufRaw = false;
   String mergeBufKind = '';
+  // Track whether we've accumulated any text_delta fragments for the current
+  // assistant turn. If so, skip the final complete 'text' event to avoid
+  // duplicating content that was already flushed from the delta buffer.
+  bool hadTextDelta = false;
 
   // Buffer for grouping consecutive tool activities into a single stable block
   final activityBuf = StringBuffer();
   int activitySeq = 0;
+
+  // Buffer for grouping consecutive thinking events into a single block
+  final thinkingBuf = StringBuffer();
+  int thinkingSeq = 0;
 
   void flushMergeBuf() {
     if (mergeBuf.isEmpty) return;
@@ -363,6 +383,22 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     }
   }
 
+  void flushThinkingBuf() {
+    if (thinkingBuf.isEmpty) return;
+    final thinkingText = thinkingBuf.toString().trim();
+    thinkingBuf.clear();
+    if (thinkingText.isNotEmpty) {
+      messages.add(
+        ChatMessage(
+          role: 'assistant',
+          text: thinkingText,
+          seq: thinkingSeq,
+          kind: 'thinking',
+        ),
+      );
+    }
+  }
+
   for (final e in events) {
     final seq = (e['seq'] as num?)?.toInt() ?? 0;
     final raw = e['raw'] as bool? ?? false;
@@ -383,10 +419,12 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       continue; // Don't add to message list, handled by overlay
     }
 
-    // User messages: flush any pending buffer first
+    // User messages: flush any pending buffer first, reset delta tracking
     if (role == 'user') {
       flushMergeBuf();
       flushActivityBuf();
+      flushThinkingBuf();
+      hadTextDelta = false;
       if (!isNoiseOnlyText(cleaned)) {
         messages.add(
           ChatMessage(
@@ -404,6 +442,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // Group consecutive tool/read/use activity events into one block.
     if (_isToolActivityEvent(role: role, kind: kind, text: cleaned, raw: raw)) {
       flushMergeBuf();
+      flushThinkingBuf();
       if (!isNoiseOnlyText(cleaned) && cleaned.isNotEmpty) {
         if (activityBuf.isEmpty) {
           activitySeq = seq;
@@ -419,19 +458,35 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       continue;
     }
 
-    // Assistant text_delta should not be mixed with activity block.
-    if (kind == 'text_delta') {
+    // Group consecutive thinking events into one block.
+    if (_isThinkingEvent(role: role, kind: kind, text: cleaned, raw: raw)) {
+      flushMergeBuf();
       flushActivityBuf();
+      if (!isNoiseOnlyText(cleaned) && cleaned.isNotEmpty) {
+        if (thinkingBuf.isEmpty) {
+          thinkingSeq = seq;
+          thinkingBuf.write(cleaned);
+        } else {
+          thinkingBuf.write('\n');
+          thinkingBuf.write(cleaned);
+        }
+      }
+      continue;
     }
 
-    // Assistant messages: skip noise
-    if (isNoiseOnlyText(cleaned) && cleaned.isEmpty) continue;
+    // Assistant text_delta should not be mixed with activity block or thinking block.
+    if (kind == 'text_delta') {
+      flushActivityBuf();
+      flushThinkingBuf();
+      hadTextDelta = true;
+    }
 
     // Determine if this is a fragment that should be merged
     // text_delta and raw events are fragments; other non-raw events are complete messages
     final isFragment = raw || kind == 'text_delta';
 
     if (isFragment) {
+      // For raw PTY fragments, apply full noise filter (includes length <= 2 check)
       if (raw && isNoiseOnlyText(cleaned)) continue;
       if (cleaned.isNotEmpty) {
         if (mergeBuf.isEmpty) {
@@ -455,9 +510,19 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       continue;
     }
 
-    // Non-fragment assistant message (complete message from stream-json)
+    // Non-fragment assistant message (complete message from stream-json).
+    // If we already received text_delta fragments for this turn, the content
+    // was already flushed via mergeBuf — skip to avoid duplicates.
+    if (role == 'assistant' && kind == 'text' && hadTextDelta) {
+      // Reset delta flag for the next turn; flush any remaining delta buffer
+      flushMergeBuf();
+      hadTextDelta = false;
+      continue;
+    }
     flushMergeBuf();
     flushActivityBuf();
+    flushThinkingBuf();
+    hadTextDelta = false;
     if (isNoiseOnlyText(cleaned)) continue;
     messages.add(
       ChatMessage(
@@ -473,6 +538,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   // Flush any remaining buffers
   flushMergeBuf();
   flushActivityBuf();
+  flushThinkingBuf();
 
   return messages;
 }
@@ -503,6 +569,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   bool _stickToBottom = true;
   bool _showJumpToLatest = false;
   String? _lastError;
+  String? _agentName; // local override for renamed agent
 
   // Raw events from EventBuffer
   List<Map<String, dynamic>> _rawEvents = [];
@@ -777,7 +844,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   Future<void> _sendMessage() async {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty || _loading) return;
+    if (text.isEmpty) return;
+    final nodeState0 = ref.read(nodesProvider);
+    final agents0 = nodeState0.agentsFor(widget.nodeId);
+    final agent0 = agents0.where((a) => a.id == widget.agentId).firstOrNull;
+    // Claude -p mode doesn't support concurrent input; PTY/tmux modes do
+    final isClaudePipe = (agent0?.provider ?? '') == 'claude';
+    if (_loading && isClaudePipe) return;
     final client = ref.read(connectionProvider);
     if (client == null) {
       setState(() {
@@ -980,6 +1053,41 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
   }
 
+  Future<void> _switchProvider(String provider) async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+
+    try {
+      final result = await client.call('agent.restart', {
+        'nodeId': widget.nodeId,
+        'agentId': widget.agentId,
+        'provider': provider,
+      });
+
+      final map = result is Map
+          ? Map<String, dynamic>.from(result)
+          : <String, dynamic>{};
+      final newId = map['id'] as String?;
+
+      final listResult = await client.call('agent.list', {
+        'nodeId': widget.nodeId,
+      });
+      final agents = (listResult is List
+          ? listResult
+          : (listResult['agents'] as List?) ?? []);
+      ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
+
+      if (newId != null &&
+          newId.isNotEmpty &&
+          mounted &&
+          newId != widget.agentId) {
+        context.go('/agent/${widget.nodeId}/$newId');
+      }
+    } catch (e) {
+      debugPrint('switchProvider error: $e');
+    }
+  }
+
   void _scrollToBottom({bool force = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
@@ -990,6 +1098,45 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         curve: Curves.easeOut,
       );
     });
+  }
+
+  Future<void> _renameAgent(String currentName) async {
+    final controller = TextEditingController(text: currentName);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名会话'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '输入新名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (newName != null && newName.isNotEmpty) {
+      final client = ref.read(connectionProvider);
+      if (client == null) return;
+      try {
+        await client.call('agent.rename', {
+          'nodeId': widget.nodeId,
+          'agentId': widget.agentId,
+          'name': newName,
+        });
+        setState(() => _agentName = newName);
+      } catch (e) {
+        debugPrint('rename agent error: $e');
+      }
+    }
   }
 
   @override
@@ -1008,7 +1155,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              agent?.name ?? widget.agentId,
+              _agentName ?? agent?.name ?? widget.agentId,
               style: const TextStyle(fontSize: 16),
             ),
             if (agent != null)
@@ -1022,6 +1169,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           ],
         ),
         actions: [
+          // Rename button
+          IconButton(
+            icon: const Icon(Icons.edit, size: 20),
+            tooltip: '重命名会话',
+            onPressed: () => _renameAgent(agent?.name ?? widget.agentId),
+          ),
           // Permission mode toggle
           Tooltip(
             message: _autoResolvePermissions ? '权限模式: 自动' : '权限模式: 手动',
@@ -1054,18 +1207,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           ),
         ],
       ),
-      floatingActionButton: _showJumpToLatest
-          ? FloatingActionButton.small(
-              onPressed: () {
-                setState(() {
-                  _stickToBottom = true;
-                  _showJumpToLatest = false;
-                });
-                _scrollToBottom(force: true);
-              },
-              child: const Icon(Icons.arrow_downward),
-            )
-          : null,
       body: Column(
         children: [
           if (_lastError != null)
@@ -1117,54 +1258,77 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               stopping: _stopping,
               onControl: _control,
               onSwitchModel: _switchModel,
+              onSwitchProvider: _switchProvider,
             ),
           // Messages
           Expanded(
-            child: _initialLoading
-                ? const Center(child: CircularProgressIndicator())
-                : messages.isEmpty
-                ? const Center(
-                    child: Text('暂无对话', style: TextStyle(color: Colors.grey)),
-                  )
-                : NotificationListener<ScrollNotification>(
-                    onNotification: (notification) {
-                      if (notification is ScrollUpdateNotification &&
-                          notification.metrics.pixels <=
-                              notification.metrics.minScrollExtent + 24) {
-                        _loadOlderHistory();
-                      }
-                      return false;
-                    },
-                    child: ListView.builder(
-                      controller: _scrollCtrl,
-                      padding: const EdgeInsets.all(12),
-                      itemCount: messages.length + (_loadingOlder ? 1 : 0),
-                      itemBuilder: (_, i) {
-                        if (_loadingOlder && i == 0) {
-                          return const Padding(
-                            padding: EdgeInsets.only(bottom: 8),
-                            child: Center(
-                              child: SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+            child: Stack(
+              children: [
+                _initialLoading
+                    ? const Center(child: CircularProgressIndicator())
+                    : messages.isEmpty
+                    ? const Center(
+                        child: Text(
+                          '暂无对话',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      )
+                    : NotificationListener<ScrollNotification>(
+                        onNotification: (notification) {
+                          if (notification is ScrollUpdateNotification &&
+                              notification.metrics.pixels <=
+                                  notification.metrics.minScrollExtent + 24) {
+                            _loadOlderHistory();
+                          }
+                          return false;
+                        },
+                        child: ListView.builder(
+                          controller: _scrollCtrl,
+                          padding: const EdgeInsets.all(12),
+                          itemCount: messages.length + (_loadingOlder ? 1 : 0),
+                          itemBuilder: (_, i) {
+                            if (_loadingOlder && i == 0) {
+                              return const Padding(
+                                padding: EdgeInsets.only(bottom: 8),
+                                child: Center(
+                                  child: SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                          );
-                        }
-                        final idx = i - (_loadingOlder ? 1 : 0);
-                        return _MessageBubble(
-                          message: messages[idx],
-                          onResolvePermissionPrompt:
-                              messages[idx].isPermissionPrompt
-                              ? _resolvePermissionPrompt
-                              : null,
-                        );
+                              );
+                            }
+                            final idx = i - (_loadingOlder ? 1 : 0);
+                            return _MessageBubble(
+                              message: messages[idx],
+                              onResolvePermissionPrompt:
+                                  messages[idx].isPermissionPrompt
+                                  ? _resolvePermissionPrompt
+                                  : null,
+                            );
+                          },
+                        ),
+                      ),
+                if (_showJumpToLatest)
+                  Positioned(
+                    right: 12,
+                    bottom: 12,
+                    child: FloatingActionButton.small(
+                      onPressed: () {
+                        setState(() {
+                          _stickToBottom = true;
+                          _showJumpToLatest = false;
+                        });
+                        _scrollToBottom(force: true);
                       },
+                      child: const Icon(Icons.arrow_downward),
                     ),
                   ),
+              ],
+            ),
           ),
           // Permission prompt overlay (above input bar)
           if (showPermissionOverlay)
@@ -1222,12 +1386,14 @@ class _ControlBar extends StatelessWidget {
   final bool stopping;
   final Future<void> Function(String action) onControl;
   final Future<void> Function(String model) onSwitchModel;
+  final Future<void> Function(String provider) onSwitchProvider;
 
   const _ControlBar({
     required this.agent,
     required this.stopping,
     required this.onControl,
     required this.onSwitchModel,
+    required this.onSwitchProvider,
   });
 
   @override
@@ -1244,7 +1410,36 @@ class _ControlBar extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          if (agent.provider == 'claude')
+          if (agent.provider == 'claude') ...[
+            PopupMenuButton<String>(
+              tooltip: '切换 Provider',
+              onSelected: onSwitchProvider,
+              itemBuilder: (_) => const [
+                PopupMenuItem(
+                  value: 'claude',
+                  child: Text('Anthropic (Default)'),
+                ),
+                PopupMenuItem(
+                  value: 'claude-bedrock',
+                  child: Text('AWS Bedrock'),
+                ),
+                PopupMenuItem(
+                  value: 'claude-vertex',
+                  child: Text('Google Vertex'),
+                ),
+              ],
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.cloud, size: 18),
+                    SizedBox(width: 4),
+                    Text('Provider'),
+                  ],
+                ),
+              ),
+            ),
             PopupMenuButton<String>(
               tooltip: '切换模型',
               onSelected: onSwitchModel,
@@ -1274,6 +1469,7 @@ class _ControlBar extends StatelessWidget {
                 ),
               ),
             ),
+          ],
           if (stopped)
             TextButton.icon(
               onPressed: () => onControl('restart'),
@@ -1964,7 +2160,30 @@ class _PermissionPromptOverlay extends StatelessWidget {
   }
 }
 
-class _InputBar extends StatelessWidget {
+class SlashCommand {
+  final String command;
+  final String description;
+  const SlashCommand(this.command, this.description);
+}
+
+const kSlashCommands = [
+  SlashCommand('/help', '获取帮助信息'),
+  SlashCommand('/clear', '清除当前对话'),
+  SlashCommand('/compact', '压缩对话上下文'),
+  SlashCommand('/status', '查看当前状态'),
+  SlashCommand('/model', '切换模型'),
+  SlashCommand('/cost', '查看 token 使用量'),
+  SlashCommand('/doctor', '诊断连接问题'),
+  SlashCommand('/review', '审查代码变更'),
+  SlashCommand('/init', '初始化 CLAUDE.md'),
+  SlashCommand('/terminal-setup', '终端设置'),
+  SlashCommand('/memory', '管理记忆'),
+  SlashCommand('/bug', '报告 bug'),
+  SlashCommand('/login', '登录账户'),
+  SlashCommand('/logout', '登出账户'),
+];
+
+class _InputBar extends StatefulWidget {
   final AgentModel? agent;
   final TextEditingController controller;
   final bool loading;
@@ -1988,10 +2207,65 @@ class _InputBar extends StatelessWidget {
   });
 
   @override
+  State<_InputBar> createState() => _InputBarState();
+}
+
+class _InputBarState extends State<_InputBar> {
+  bool _showSlashMenu = false;
+  String _slashFilter = '';
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerChanged);
+  }
+
+  @override
+  void didUpdateWidget(_InputBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_onControllerChanged);
+      widget.controller.addListener(_onControllerChanged);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  void _onControllerChanged() {
+    final text = widget.controller.text;
+    if (text.startsWith('/')) {
+      final filter = text.substring(1).toLowerCase();
+      if (!_showSlashMenu || _slashFilter != filter) {
+        setState(() {
+          _showSlashMenu = true;
+          _slashFilter = filter;
+        });
+      }
+    } else {
+      if (_showSlashMenu) {
+        setState(() => _showSlashMenu = false);
+      }
+    }
+  }
+
+  List<SlashCommand> get _filteredCommands {
+    if (_slashFilter.isEmpty) return kSlashCommands;
+    return kSlashCommands
+        .where((c) => c.command.substring(1).contains(_slashFilter))
+        .toList();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final isReadOnly = isReadOnlyAgent(agent);
-    final effectiveLoading = loading && !isReadOnly;
-    final readOnlyHint = readOnlyHintText(agent);
+    final isReadOnly = isReadOnlyAgent(widget.agent);
+    final isClaudePipe = (widget.agent?.provider ?? '') == 'claude';
+    // For PTY/tmux providers, loading doesn't block input (PTY accepts concurrent input)
+    final effectiveLoading = widget.loading && !isReadOnly && isClaudePipe;
+    final readOnlyHint = readOnlyHintText(widget.agent);
 
     return Container(
       padding: EdgeInsets.only(
@@ -2039,99 +2313,76 @@ class _InputBar extends StatelessWidget {
                 ],
               ),
             ),
-          if (showTerminalControls)
-            Row(
-              children: [
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _KeyButton(
-                      label: 'up',
-                      displayLabel: '↑',
-                      isArrow: true,
-                      onTap: () => onKey('up'),
-                      enabled: !isReadOnly,
-                    ),
-                    _KeyButton(
-                      label: 'down',
-                      displayLabel: '↓',
-                      isArrow: true,
-                      onTap: () => onKey('down'),
-                      enabled: !isReadOnly,
-                    ),
-                    _KeyButton(
-                      label: 'left',
-                      displayLabel: '←',
-                      isArrow: true,
-                      onTap: () => onKey('left'),
-                      enabled: !isReadOnly,
-                    ),
-                    _KeyButton(
-                      label: 'right',
-                      displayLabel: '→',
-                      isArrow: true,
-                      onTap: () => onKey('right'),
-                      enabled: !isReadOnly,
-                    ),
-                    _KeyButton(
-                      label: 'enter',
-                      displayLabel: '⏎',
-                      onTap: () => onKey('enter'),
-                      enabled: !isReadOnly,
-                    ),
-                  ],
+          if (_showSlashMenu && _filteredCommands.isNotEmpty)
+            Container(
+              constraints: const BoxConstraints(maxHeight: 200),
+              margin: const EdgeInsets.only(bottom: 4),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
                 ),
-                if (showRawToggle) ...[
-                  const Spacer(),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('Raw', style: TextStyle(fontSize: 12)),
-                      Switch(
-                        value: rawMode,
-                        onChanged: isReadOnly ? null : onToggleRaw,
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            )
-          else if (showRawToggle)
-            Align(
-              alignment: Alignment.centerRight,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Raw', style: TextStyle(fontSize: 12)),
-                  Switch(
-                    value: rawMode,
-                    onChanged: isReadOnly ? null : onToggleRaw,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 8,
+                    offset: const Offset(0, -2),
                   ),
                 ],
               ),
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                children: _filteredCommands
+                    .map(
+                      (cmd) => ListTile(
+                        dense: true,
+                        title: Text(
+                          cmd.command,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w500,
+                            fontSize: 14,
+                          ),
+                        ),
+                        subtitle: Text(
+                          cmd.description,
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        onTap: () {
+                          widget.controller.text = '\${cmd.command} ';
+                          widget.controller.selection =
+                              TextSelection.fromPosition(
+                            TextPosition(
+                              offset: widget.controller.text.length,
+                            ),
+                          );
+                          setState(() => _showSlashMenu = false);
+                        },
+                      ),
+                    )
+                    .toList(),
+              ),
             ),
-          const SizedBox(height: 8),
           Row(
             children: [
               Expanded(
                 child: TextField(
-                  controller: controller,
-                  enabled: !isReadOnly && !loading,
+                  controller: widget.controller,
+                  enabled: !isReadOnly && !effectiveLoading,
                   decoration: InputDecoration(
                     hintText: readOnlyHint,
                     border: const OutlineInputBorder(
                       borderRadius: BorderRadius.all(Radius.circular(24)),
                     ),
-                    contentPadding: EdgeInsets.symmetric(
+                    contentPadding: const EdgeInsets.symmetric(
                       horizontal: 16,
                       vertical: 10,
                     ),
                     isDense: true,
                   ),
                   textInputAction: TextInputAction.send,
-                  onSubmitted: isReadOnly ? null : (_) => onSend(),
+                  onSubmitted: isReadOnly ? null : (_) => widget.onSend(),
                   maxLines: 4,
                   minLines: 1,
                 ),
@@ -2144,13 +2395,12 @@ class _InputBar extends StatelessWidget {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : IconButton(
-                      onPressed: isReadOnly ? null : onSend,
+                      onPressed: isReadOnly ? null : widget.onSend,
                       icon: const Icon(Icons.send),
                       style: IconButton.styleFrom(
                         backgroundColor: Theme.of(context).colorScheme.primary,
-                        foregroundColor: Theme.of(
-                          context,
-                        ).colorScheme.onPrimary,
+                        foregroundColor:
+                            Theme.of(context).colorScheme.onPrimary,
                       ),
                     ),
             ],

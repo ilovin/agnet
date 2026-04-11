@@ -78,12 +78,23 @@ class NodesNotifier extends StateNotifier<NodeState> {
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
     if (idx == -1) return;
+    final name = params['name'] as String?;
     agentList[idx] = agentList[idx].copyWith(
       status: _parseAgentStatus(params['status'] as String? ?? ''),
+      name: name,
     );
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = agentList;
     state = state.copyWith(agents: updated);
+  }
+
+  /// Rename a node locally (after a successful node.rename RPC call).
+  void renameNode(String nodeId, String name) {
+    final existing = state.nodes[nodeId];
+    if (existing == null) return;
+    final updated = Map<String, NodeModel>.from(state.nodes);
+    updated[nodeId] = existing.copyWith(name: name);
+    state = state.copyWith(nodes: updated);
   }
 
   NodeStatus _parseNodeStatus(String s) {

@@ -63,10 +63,12 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return h.nodeConnect(req)
 	case "node.deploy":
 		return h.nodeDeploy(req)
-	case "agent.list", "agent.create", "agent.stop", "agent.restart",
+	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename",
 		"conversation.history", "conversation.send", "conversation.key",
 		"session.list", "session.create", "session.attach", "session.catalog":
 		return dispatchResult{resp: h.proxyToNode(req)}
+	case "node.rename":
+		return dispatchResult{resp: h.nodeRename(req)}
 	case "session.list_all":
 		return dispatchResult{resp: h.sessionListAll(req)}
 	case "session.catalog_all":
@@ -219,6 +221,7 @@ func (h *handler) nodeAdd(req RPCRequest) dispatchResult {
 	host, _ := req.Params["host"].(string)
 	token, _ := req.Params["token"].(string)
 	sshKeyPath, _ := req.Params["sshKeyPath"].(string)
+	sshAlias, _ := req.Params["sshAlias"].(string)
 
 	sshPort := 22
 	if v, ok := req.Params["sshPort"].(float64); ok {
@@ -237,6 +240,7 @@ func (h *handler) nodeAdd(req RPCRequest) dispatchResult {
 		Name: name, Host: host,
 		SSHPort: sshPort, AgentdPort: agentdPort,
 		Token: token, SSHKeyPath: sshKeyPath,
+		SSHAlias: sshAlias,
 	})
 	if err != nil {
 		return dispatchResult{resp: errResp(req.ID, -32000, err.Error())}
@@ -264,6 +268,18 @@ func (h *handler) nodeAdd(req RPCRequest) dispatchResult {
 		resp:     okResp(req.ID, map[string]any{"nodeId": id}),
 		postSend: postSend,
 	}
+}
+
+func (h *handler) nodeRename(req RPCRequest) RPCResponse {
+	nodeID, _ := req.Params["nodeId"].(string)
+	name, _ := req.Params["name"].(string)
+	if nodeID == "" || name == "" {
+		return errResp(req.ID, -32602, "nodeId and name are required")
+	}
+	if err := h.server.manager.Rename(nodeID, name); err != nil {
+		return errResp(req.ID, -32000, err.Error())
+	}
+	return okResp(req.ID, map[string]any{"ok": true})
 }
 
 func (h *handler) nodeRemove(req RPCRequest) RPCResponse {

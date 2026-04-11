@@ -61,5 +61,58 @@ void main() {
       expect(notifier.messagesFor('n1', 'a1').length, equals(1));
       expect(notifier.messagesFor('n1', 'a2').length, equals(1));
     });
+
+    test('handleEvent appends partial assistant messages to last message', () {
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1},
+      ));
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'Hi', 'partial': true, 'seq': 2},
+      ));
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': ' there', 'partial': true, 'seq': 3},
+      ));
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs.length, equals(2)); // user + 1 streaming assistant
+      expect(msgs[1].text, equals('Hi there'));
+      expect(msgs[1].role, equals(MessageRole.assistant));
+    });
+
+    test('handleEvent final message replaces streaming message', () {
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1},
+      ));
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'Hi', 'partial': true, 'seq': 2},
+      ));
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'Hi there!', 'final': true, 'seq': 3},
+      ));
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs.length, equals(2)); // user + final assistant
+      expect(msgs[1].text, equals('Hi there!'));
+      expect(msgs[1].role, equals(MessageRole.assistant));
+    });
+
+    test('handleEvent partial does not append to user messages', () {
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1},
+      ));
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': ' world', 'partial': true, 'seq': 2},
+      ));
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs.length, equals(2)); // user messages are not combined
+      expect(msgs[0].text, equals('Hello'));
+      expect(msgs[1].text, equals(' world'));
+    });
   });
 }

@@ -46,12 +46,8 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
 
   Future<void> _autoConnectDefault() async {
     _autoConnected = true;
-    // Default connection: current gateway over Tailscale
-    const defaultCfg = ConnectionConfig(
-      url: 'ws://100.126.146.22:8080/ws',
-      token: 'testtoken123',
-    );
-    await _connect(defaultCfg);
+    // No default connection — user must configure one
+    // (removed hardcoded IP/token)
   }
 
   Future<void> _loadSaved() async {

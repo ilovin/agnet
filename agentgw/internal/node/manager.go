@@ -238,6 +238,19 @@ func (m *Manager) Deploy(id string, remoteDir string) error {
 	return nil
 }
 
+// Rename updates the display name of a node and persists the change.
+func (m *Manager) Rename(id, name string) error {
+	m.mu.Lock()
+	n, ok := m.nodes[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("node %q not found", id)
+	}
+	n.Name = name
+	m.mu.Unlock()
+	return m.store.Save(m.toEntries())
+}
+
 // Remove disconnects and deletes a node, then persists the updated list.
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()

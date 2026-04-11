@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -77,6 +78,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.conversationHistory(req), nil
 	case "conversation.permission_response":
 		return h.conversationPermissionResponse(req), nil
+	case "agent.rename":
+		return h.agentRename(req), nil
 	default:
 		return errResp(req.ID, -32601, "method not found: "+req.Method), nil
 	}
@@ -95,6 +98,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		AttachMode     string `json:"attachMode,omitempty"`
 		ReadOnly       bool   `json:"readOnly"`
 		ReadOnlyReason string `json:"readOnlyReason,omitempty"`
+		SessionID      string `json:"sessionId,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
@@ -103,6 +107,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		if ag.WorkDir != "" {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
+		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 		result = append(result, agentInfo{
 			ID:             ag.ID,
 			Name:           ag.Name,
@@ -114,6 +119,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			AttachMode:     ag.AttachMode(),
 			ReadOnly:       ag.AttachReadOnly(),
 			ReadOnlyReason: ag.AttachReadOnlyReason(),
+			SessionID:      resumeID,
 		})
 	}
 	return okResp(req.ID, result)
@@ -148,13 +154,13 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 		_ = json.Unmarshal(b, &args)
 	}
 
-	provider, cmd, args = resolveLaunch(provider, cmd, args, sessionID, model)
+	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model)
 
 	if workDir == "" {
 		workDir = "/tmp"
 	}
 
-	id, err := h.server.manager.Create(name, provider, cmd, args, workDir)
+	id, err := h.server.manager.Create(name, provider, cmd, args, workDir, env)
 	if err != nil {
 		return "", err
 	}
@@ -166,20 +172,49 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 	return id, nil
 }
 
-func resolveLaunch(provider, cmd string, args []string, sessionID, model string) (string, string, []string) {
+// findExecutable searches for a binary in PATH and common user-local locations.
+// When agentd runs as root, user-installed binaries (e.g. ~/.opencode/bin/opencode)
+// are not in root's PATH, so we check /home/*/ directories as well.
+func findExecutable(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	// Scan /home/*/ for common install locations
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			candidates := []string{
+				filepath.Join("/home", e.Name(), ".local", "bin", name),
+				filepath.Join("/home", e.Name(), "."+name, "bin", name),
+				filepath.Join("/home", e.Name(), "bin", name),
+			}
+			for _, c := range candidates {
+				if _, err := os.Stat(c); err == nil {
+					return c
+				}
+			}
+		}
+	}
+	return name // fallback to bare name
+}
+
+func resolveLaunch(provider, cmd string, args []string, sessionID, model string) (string, string, []string, []string) {
 	resolvedProvider := provider
 	resolvedCmd := cmd
 	resolvedArgs := append([]string{}, args...)
+	var env []string
 
 	switch provider {
 	case "opencode":
-		resolvedCmd = "opencode"
+		resolvedCmd = findExecutable("opencode")
 		resolvedArgs = []string{}
 		if sessionID != "" {
 			resolvedArgs = []string{"-s", sessionID}
 		}
-	case "claude":
-		resolvedCmd = "claude"
+	case "claude", "claude-bedrock", "claude-vertex":
+		resolvedCmd = findExecutable("claude")
 		// -p enables non-interactive print mode where --output-format works
 		// --output-format stream-json gives us structured events for permission handling
 		// --verbose is required for stream-json to work with -p
@@ -197,6 +232,15 @@ func resolveLaunch(provider, cmd string, args []string, sessionID, model string)
 		if model != "" {
 			resolvedArgs = append(resolvedArgs, "--model", model)
 		}
+		// Provider-specific environment variables
+		switch provider {
+		case "claude-bedrock":
+			env = append(env, "CLAUDE_CODE_USE_BEDROCK=1")
+			resolvedProvider = "claude"
+		case "claude-vertex":
+			env = append(env, "CLAUDE_CODE_USE_VERTEX=1")
+			resolvedProvider = "claude"
+		}
 	default:
 		if resolvedCmd == "" {
 			resolvedCmd = "claude"
@@ -210,7 +254,7 @@ func resolveLaunch(provider, cmd string, args []string, sessionID, model string)
 		}
 	}
 
-	return resolvedProvider, resolvedCmd, resolvedArgs
+	return resolvedProvider, resolvedCmd, resolvedArgs, env
 }
 
 func (h *handler) sessionList(req RPCRequest) RPCResponse {
@@ -337,10 +381,12 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		if candidate.Status == "crashed" {
 			continue
 		}
-		// For stopped agents, only show if they have resume session ID (attached agents)
-		// This allows re-attaching to terminal sessions after agentd restart
+		// For stopped agents, only show if they have conversation history
+		// AND a resume session ID. This prevents clutter from empty dead sessions
+		// while keeping useful sessions that can be resumed.
 		if candidate.Status == "stopped" {
-			if resumeID == "" {
+			lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
+			if resumeID == "" || lastSeq == 0 {
 				continue
 			}
 			// Mark as attachable for UI
@@ -469,15 +515,25 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	}
 
 	_, modelSpecified := req.Params["model"]
+	_, providerSpecified := req.Params["provider"]
 	model, _ := req.Params["model"].(string)
+	apiProvider, _ := req.Params["provider"].(string)
+
 	provider := ag.Provider
 	cmd := ag.Cmd
 	args := ag.Args
-	if modelSpecified {
-		provider, cmd, args = resolveLaunch(ag.Provider, ag.Cmd, ag.Args, "", model)
+	var env []string
+
+	if modelSpecified || providerSpecified {
+		// Use the requested provider if specified, otherwise keep existing
+		launchProvider := ag.Provider
+		if providerSpecified && apiProvider != "" {
+			launchProvider = apiProvider
+		}
+		provider, cmd, args, env = resolveLaunch(launchProvider, ag.Cmd, ag.Args, "", model)
 	}
 
-	newID, err := h.server.manager.Create(ag.Name, provider, cmd, args, ag.WorkDir)
+	newID, err := h.server.manager.Create(ag.Name, provider, cmd, args, ag.WorkDir, env)
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
@@ -503,10 +559,22 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	}
 
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil
+	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil
+	isOpenCode := ag.Provider == "opencode"
 
-	// For Claude in -p mode, restart the process in-place and send prompt via stdin.
+	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
 		return h.agentRestartWithMessage(req, ag, message)
+	}
+
+	// For fresh Claude agent (no process yet), start with message
+	if isFreshClaude {
+		return h.agentStartWithMessage(req, ag, message)
+	}
+
+	// For OpenCode attached sessions, use resume mode
+	if isOpenCode {
+		return h.openCodeSendWithResume(req, ag, message)
 	}
 
 	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
@@ -584,9 +652,9 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	}
 
 	// Build args with resume session ID for conversation continuity
-	provider, cmd, args := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
+	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
 
-	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args); err != nil {
+	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args, env); err != nil {
 		return errResp(req.ID, -32000, "restart with message: "+err.Error())
 	}
 
@@ -616,6 +684,45 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 		"role":    "user",
 		"text":    message,
 	}), nil)
+
+	h.server.broadcast(event("agent.status_changed", map[string]any{
+		"agentId": ag.ID,
+		"status":  "working",
+	}), nil)
+
+	return okResp(req.ID, map[string]any{"id": ag.ID})
+}
+
+// agentStartWithMessage starts a fresh Claude agent with the first message.
+// Used when a Claude agent was created without starting a process.
+func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string) RPCResponse {
+	log.Printf("[Start] Starting fresh Claude agent %s with message", ag.ID)
+
+	// Get the stored resume session ID if any
+	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+
+	// Build args with the message as input
+	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
+
+	// Record user message first
+	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+		"role": "user",
+		"text": message,
+		"raw":  false,
+	}); err != nil {
+		return errResp(req.ID, -32000, "record user message: "+err.Error())
+	}
+
+	h.server.broadcast(event("conversation.message", map[string]any{
+		"agentId": ag.ID,
+		"role":    "user",
+		"text":    message,
+	}), nil)
+
+	// Start the agent with the message
+	if err := h.server.manager.StartInPlaceWithMessage(ag.ID, provider, cmd, args, env, message); err != nil {
+		return errResp(req.ID, -32000, "start with message: "+err.Error())
+	}
 
 	h.server.broadcast(event("agent.status_changed", map[string]any{
 		"agentId": ag.ID,
@@ -872,6 +979,8 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 }
 
 // opencodeDiscover scans for available opencode sessions on the machine.
+// It scans both the current user's home directory and all other users' home directories
+// (useful when agentd runs as root but sessions are in user directories).
 func (h *handler) opencodeDiscover(req RPCRequest) RPCResponse {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -885,10 +994,36 @@ func (h *handler) opencodeDiscover(req RPCRequest) RPCResponse {
 		Size       int64     `json:"size"`
 	}
 
-	sessionDirs := []string{
-		filepath.Join(home, ".local", "share", "opencode", "storage", "session_diff"),
-		filepath.Join(home, "Library", "Application Support", "opencode", "storage", "session_diff"),
-		filepath.Join(home, "Library", "Application Support", "OpenCode", "storage", "session_diff"),
+	// Build list of directories to scan.
+	// OpenCode may store sessions under session_diff or session subdirectories.
+	opencodeStorageDirs := []string{
+		filepath.Join(home, ".local", "share", "opencode", "storage"),
+		filepath.Join(home, "Library", "Application Support", "opencode", "storage"),
+		filepath.Join(home, "Library", "Application Support", "OpenCode", "storage"),
+	}
+
+	// On Linux, also scan all user home directories under /home
+	// This allows agentd running as root to find sessions from all users
+	if _, err := os.Stat("/home"); err == nil {
+		entries, err := os.ReadDir("/home")
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				userHome := filepath.Join("/home", entry.Name())
+				opencodeStorageDirs = append(opencodeStorageDirs, filepath.Join(userHome, ".local", "share", "opencode", "storage"))
+			}
+		}
+	}
+
+	// Expand storage dirs into candidate session subdirectories
+	var sessionDirs []string
+	for _, storageDir := range opencodeStorageDirs {
+		sessionDirs = append(sessionDirs,
+			filepath.Join(storageDir, "session_diff"),
+			filepath.Join(storageDir, "session"),
+		)
 	}
 
 	sessionsByID := make(map[string]sessionInfo)
@@ -907,7 +1042,8 @@ func (h *handler) opencodeDiscover(req RPCRequest) RPCResponse {
 				continue
 			}
 			sessionID := strings.TrimSuffix(name, ".json")
-			if !strings.HasPrefix(sessionID, "ses_") {
+			// Accept any session file; ses_ prefix is common but not guaranteed
+			if sessionID == "" {
 				continue
 			}
 
@@ -968,44 +1104,63 @@ func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
 		return dirName
 	}
 	projectsDir := filepath.Join(home, ".claude", "projects")
-	projectEntries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return okResp(req.ID, map[string]any{"sessions": []sessionInfo{}})
+
+	// Collect all projects dirs to scan (current user + /home/*)
+	projectsDirs := []string{projectsDir}
+	if _, err := os.Stat("/home"); err == nil {
+		entries, err := os.ReadDir("/home")
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				userProjects := filepath.Join("/home", entry.Name(), ".claude", "projects")
+				if _, err := os.Stat(userProjects); err == nil {
+					projectsDirs = append(projectsDirs, userProjects)
+				}
+			}
+		}
 	}
 
 	sessionsByID := make(map[string]sessionInfo)
-	for _, project := range projectEntries {
-		if !project.IsDir() {
-			continue
-		}
-		projectPath := filepath.Join(projectsDir, project.Name())
-		entries, err := os.ReadDir(projectPath)
+	for _, pDir := range projectsDirs {
+		projectEntries, err := os.ReadDir(pDir)
 		if err != nil {
 			continue
 		}
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+		for _, project := range projectEntries {
+			if !project.IsDir() {
 				continue
 			}
-			info, err := entry.Info()
+			projectPath := filepath.Join(pDir, project.Name())
+			entries, err := os.ReadDir(projectPath)
 			if err != nil {
 				continue
 			}
-			sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
-			if sessionID == "" {
-				continue
-			}
-			candidate := sessionInfo{
-				ID:          sessionID,
-				Name:        sessionID,
-				WorkDir:     project.Name(),
-				ProjectName: extractProjectName(project.Name()),
-				SessionFile: filepath.Join(projectPath, entry.Name()),
-				ModifiedAt:  info.ModTime(),
-				Size:        info.Size(),
-			}
-			if existing, ok := sessionsByID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
-				sessionsByID[sessionID] = candidate
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+					continue
+				}
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
+				if sessionID == "" {
+					continue
+				}
+				candidate := sessionInfo{
+					ID:          sessionID,
+					Name:        sessionID,
+					WorkDir:     project.Name(),
+					ProjectName: extractProjectName(project.Name()),
+					SessionFile: filepath.Join(projectPath, entry.Name()),
+					ModifiedAt:  info.ModTime(),
+					Size:        info.Size(),
+				}
+				if existing, ok := sessionsByID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
+					sessionsByID[sessionID] = candidate
+				}
 			}
 		}
 	}
@@ -1066,6 +1221,22 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 		"processes": result,
 		"count":     len(result),
 	})
+}
+
+func (h *handler) agentRename(req RPCRequest) RPCResponse {
+	agentID, _ := req.Params["agentId"].(string)
+	name, _ := req.Params["name"].(string)
+	if agentID == "" || name == "" {
+		return errResp(req.ID, -32602, "agentId and name are required")
+	}
+	if err := h.server.manager.Rename(agentID, name); err != nil {
+		return errResp(req.ID, -32000, err.Error())
+	}
+	h.server.broadcast(event("agent.status_changed", map[string]any{
+		"agentId": agentID,
+		"name":    name,
+	}), nil)
+	return okResp(req.ID, map[string]any{"ok": true})
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.

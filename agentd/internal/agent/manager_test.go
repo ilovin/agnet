@@ -25,7 +25,7 @@ func newTestManager(t *testing.T) *agent.Manager {
 func TestCreateAndListAgent(t *testing.T) {
 	m := newTestManager(t)
 
-	id, err := m.Create("test-agent", "custom", "echo", []string{"hello"}, t.TempDir())
+	id, err := m.Create("test-agent", "custom", "echo", []string{"hello"}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestCreateAndListAgent(t *testing.T) {
 
 func TestAgentStatusTransition(t *testing.T) {
 	m := newTestManager(t)
-	id, err := m.Create("echo-agent", "custom", "echo", []string{"hello"}, t.TempDir())
+	id, err := m.Create("echo-agent", "custom", "echo", []string{"hello"}, t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestAgentStatusTransition(t *testing.T) {
 
 func TestStopAgent(t *testing.T) {
 	m := newTestManager(t)
-	id, _ := m.Create("sleep-agent", "custom", "sleep", []string{"60"}, t.TempDir())
+	id, _ := m.Create("sleep-agent", "custom", "sleep", []string{"60"}, t.TempDir(), nil)
 	time.Sleep(100 * time.Millisecond)
 
 	if err := m.Stop(id); err != nil {
@@ -102,7 +102,7 @@ func TestAttachedAgentIsReadOnly(t *testing.T) {
 
 func TestEventBufferExists(t *testing.T) {
 	m := newTestManager(t)
-	id, _ := m.Create("buf-agent", "custom", "echo", []string{"x"}, t.TempDir())
+	id, _ := m.Create("buf-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
 	ag := m.Get(id)
 	if ag == nil {
 		t.Fatal("agent not found")

@@ -25,6 +25,7 @@ type ConversationEventRecord struct {
 	Role      string
 	Text      string
 	Raw       bool
+	Kind      string
 	CreatedAt string
 }
 
@@ -178,6 +179,7 @@ func (s *Store) ListConversationEventsSince(agentID string, afterSeq uint64, lim
 		r.Role, _ = data["role"].(string)
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
+		r.Kind, _ = data["kind"].(string)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -214,6 +216,7 @@ func (s *Store) ListConversationEventsBefore(agentID string, beforeSeq uint64, l
 		r.Role, _ = data["role"].(string)
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
+		r.Kind, _ = data["kind"].(string)
 		tmp = append(tmp, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -257,6 +260,7 @@ func (s *Store) ListConversationEventsLatest(agentID string, limit int) ([]Conve
 		r.Role, _ = data["role"].(string)
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
+		r.Kind, _ = data["kind"].(string)
 		tmp = append(tmp, r)
 	}
 	if err := rows.Err(); err != nil {

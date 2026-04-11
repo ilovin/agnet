@@ -4,9 +4,11 @@ package scanner
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ProcessInfo holds information about a discovered agent process.
@@ -96,6 +98,13 @@ func (p *ProcessInfo) AttachReadOnlyReason() string {
 			return "no controlling terminal found for Claude process; attach is observe-only"
 		}
 		return "no safe input route found (tmux pane not detected); use the original terminal to interact"
+	case "opencode":
+		// OpenCode supports resume mode via `opencode run --session`
+		// Input is routed through resume, not PTY
+		if p.SessionID != "" {
+			return "" // Allow input via resume mode
+		}
+		return "no session ID available for OpenCode resume"
 	default:
 		return "attached input routing is not supported for this provider"
 	}
@@ -119,16 +128,20 @@ func (s *Scanner) Scan() ([]ProcessInfo, error) {
 	return s.scanDarwin()
 }
 
-// FindSessionFile returns the exact JSONL session file for a live Claude process.
+// FindSessionFile returns the exact JSONL session file for a live Claude/OpenCode process.
 func (p *ProcessInfo) FindSessionFile() string {
-	if p.Provider != "claude" {
-		return ""
-	}
 	if p.SessionFile != "" {
 		return p.SessionFile
 	}
-	_, sessionFile := findClaudeSessionInfo(p.PID, p.WorkDir)
-	return sessionFile
+	if p.Provider == "claude" {
+		_, sessionFile := findClaudeSessionInfo(p.PID, p.WorkDir)
+		return sessionFile
+	}
+	if p.Provider == "opencode" {
+		_, sessionFile := findOpenCodeSessionInfo(p.PID, p.WorkDir)
+		return sessionFile
+	}
+	return ""
 }
 
 // IsAttachable returns true if this process can be attached for interaction.
@@ -144,6 +157,11 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 			// Try to find session info, but don't skip if not found
 			// Process may still be attachable even without session file
 			sessionID, sessionFile := findClaudeSessionInfo(proc.PID, proc.WorkDir)
+			proc.SessionID = sessionID
+			proc.SessionFile = sessionFile
+		} else if proc.Provider == "opencode" {
+			// Try to find OpenCode session info
+			sessionID, sessionFile := findOpenCodeSessionInfo(proc.PID, proc.WorkDir)
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		}
@@ -193,12 +211,30 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 		return "", ""
 	}
 
+	// Try current user's home first
 	sessionID := readClaudeSessionID(home, pid)
-	if sessionID == "" {
-		return "", ""
+	if sessionID != "" {
+		return sessionID, findClaudeSessionFile(home, sessionID, workDir)
 	}
 
-	return sessionID, findClaudeSessionFile(home, sessionID, workDir)
+	// When running as root, also scan /home/*/.claude/sessions/ for other users
+	if _, err := os.Stat("/home"); err == nil {
+		entries, err := os.ReadDir("/home")
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				userHome := filepath.Join("/home", entry.Name())
+				sessionID = readClaudeSessionID(userHome, pid)
+				if sessionID != "" {
+					return sessionID, findClaudeSessionFile(userHome, sessionID, workDir)
+				}
+			}
+		}
+	}
+
+	return "", ""
 }
 
 func readClaudeSessionID(home string, pid int) string {
@@ -244,6 +280,92 @@ func findClaudeSessionFile(home, sessionID, workDir string) string {
 		}
 	}
 	return ""
+}
+
+func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+
+	// Build list of storage base directories to scan.
+	// OpenCode may store sessions under session_diff or session subdirectories.
+	opencodeStorageDirs := []string{
+		filepath.Join(home, ".local", "share", "opencode", "storage"),
+		filepath.Join(home, "Library", "Application Support", "opencode", "storage"),
+		filepath.Join(home, "Library", "Application Support", "OpenCode", "storage"),
+	}
+
+	// On Linux, also scan all user home directories under /home
+	// This allows agentd running as root to find sessions from all users
+	if _, err := os.Stat("/home"); err == nil {
+		entries, err := os.ReadDir("/home")
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				userHome := filepath.Join("/home", entry.Name())
+				opencodeStorageDirs = append(opencodeStorageDirs, filepath.Join(userHome, ".local", "share", "opencode", "storage"))
+			}
+		}
+	}
+
+	// Expand storage dirs into candidate session subdirectories
+	var sessionDirs []string
+	for _, storageDir := range opencodeStorageDirs {
+		sessionDirs = append(sessionDirs,
+			filepath.Join(storageDir, "session_diff"),
+			filepath.Join(storageDir, "session"),
+		)
+	}
+
+	// Find the most recently modified session file across all directories
+	var latestFile string
+	var latestTime time.Time
+
+	for _, sessionDir := range sessionDirs {
+		entries, err := os.ReadDir(sessionDir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".json") {
+				continue
+			}
+			// Accept any session file; ses_ prefix is common but not guaranteed
+			sessionID := strings.TrimSuffix(name, ".json")
+			if sessionID == "" {
+				continue
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+
+			if info.ModTime().After(latestTime) {
+				latestTime = info.ModTime()
+				latestFile = filepath.Join(sessionDir, name)
+			}
+		}
+	}
+
+	if latestFile != "" {
+		// Extract session ID from filename (ses_XXX.json -> ses_XXX, or other.json -> other)
+		base := filepath.Base(latestFile)
+		sessionID := strings.TrimSuffix(base, ".json")
+		log.Printf("[OpenCode] Found latest session: %s", sessionID)
+		return sessionID, latestFile
+	}
+	log.Printf("[OpenCode] No session file found")
+
+	return "", ""
 }
 
 func projectDirName(workDir string) string {

@@ -227,13 +227,35 @@ func (s *Scanner) detectLinuxTmuxFromTTY(terminal string) (target string, sessio
 		return "", ""
 	}
 
-	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", ""
+	format := "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}"
+
+	// Try default tmux first (works when agentd runs as the same user as tmux).
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", format)
+	if out, err := cmd.Output(); err == nil {
+		if tgt, sess := resolveTmuxTargetFromPaneList(string(out), wantTTY); tgt != "" {
+			return tgt, sess
+		}
 	}
 
-	return resolveTmuxTargetFromPaneList(string(out), wantTTY)
+	// When agentd runs as root but tmux belongs to another user, the default
+	// tmux command can't reach the user's socket.  Scan all /tmp/tmux-*
+	// sockets and try each one explicitly.
+	tmuxDirs, _ := filepath.Glob("/tmp/tmux-*")
+	for _, dir := range tmuxDirs {
+		sockets, _ := filepath.Glob(filepath.Join(dir, "*"))
+		for _, sock := range sockets {
+			cmd := exec.Command("tmux", "-S", sock, "list-panes", "-a", "-F", format)
+			out, err := cmd.Output()
+			if err != nil {
+				continue
+			}
+			if tgt, sess := resolveTmuxTargetFromPaneList(string(out), wantTTY); tgt != "" {
+				return tgt, sess
+			}
+		}
+	}
+
+	return "", ""
 }
 
 // stub for Darwin compatibility - never called on Linux

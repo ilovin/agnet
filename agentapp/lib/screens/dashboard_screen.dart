@@ -93,6 +93,10 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
       ? (result['claudeFiles'] as List?) ?? const []
       : const [];
 
+  final rawOpencode = result is Map<String, dynamic>
+      ? (result['opencodeFiles'] as List?) ?? const []
+      : const [];
+
   final attachable = rawAttachable.whereType<Map>().map(
     (e) => SessionCandidate.fromJson(Map<String, dynamic>.from(e)),
   );
@@ -111,7 +115,24 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
     );
   });
 
-  return [...attachable, ...claudeFiles];
+  // Include OpenCode file sessions - these can be resumed even without a running process
+  final opencodeFiles = rawOpencode.whereType<Map>().map((e) {
+    final m = Map<String, dynamic>.from(e);
+    final sessionId = m['id'] as String? ?? '';
+    return SessionCandidate(
+      pid: null,
+      provider: 'opencode',
+      workDir: '',
+      sessionId: sessionId,
+      terminal: null,
+      attachMode: '',
+      isReadOnly: false,
+      readOnlyReason: '',
+      projectName: sessionId.length > 6 ? sessionId.substring(sessionId.length - 6) : sessionId,
+    );
+  });
+
+  return [...attachable, ...claudeFiles, ...opencodeFiles];
 }
 
 class OpencodeFileCandidate {
@@ -341,7 +362,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               'sshAlias': node['sshAlias'],
               'sshPort': node['sshPort'],
               'agentdPort': 7373,
-              'token': 'testtoken123',
+              'token': client.token,
             });
           } catch (e) {
             debugPrint('Failed to add node ${node['name']}: $e');
@@ -465,13 +486,18 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       }
     }
 
-    // Show active agents + stopped agents that have conversation history
-    // Also show stopped agents with attachMode (reattachable terminal sessions)
+    // Only show active agents and stopped agents with both history and resume capability.
+    // crashed agents are hidden from the main list entirely.
     final bySignature = <String, AgentModel>{};
     for (final a in agents) {
-      if (a.status == AgentStatus.stopped && !a.hasHistory && a.attachMode.isEmpty) continue;
-      if (a.status == AgentStatus.crashed && !a.hasHistory) continue;
-      final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}|${a.id.toLowerCase()}';
+      final hasResumeCapability = a.sessionId != null && a.sessionId!.isNotEmpty;
+      final isActive = a.status == AgentStatus.working ||
+          a.status == AgentStatus.starting ||
+          a.status == AgentStatus.idle;
+      final isResumableStopped = a.status == AgentStatus.stopped &&
+          a.hasHistory && hasResumeCapability;
+      if (!isActive && !isResumableStopped) continue;
+      final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}';
       final existing = bySignature[key];
       if (existing == null ||
           statusPriority(a.status) < statusPriority(existing.status)) {
@@ -499,7 +525,17 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             subtitle: Text('${widget.node.location.displayLocation}  ·  $_statusLabel'),
-            trailing: Icon(Icons.circle, color: _statusColor, size: 12),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.edit, size: 18),
+                  tooltip: '重命名节点',
+                  onPressed: () => _renameNode(context, ref),
+                ),
+                Icon(Icons.circle, color: _statusColor, size: 12),
+              ],
+            ),
           ),
           if (visibleAgents.isNotEmpty) const Divider(height: 1),
           ...visibleAgents.map(
@@ -542,6 +578,44 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         ? result
         : (result['agents'] as List?) ?? []);
     ref.read(nodesProvider.notifier).loadAgents(widget.node.id, agents);
+  }
+
+  Future<void> _renameNode(BuildContext context, WidgetRef ref) async {
+    final controller = TextEditingController(text: widget.node.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名节点'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '输入新名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (newName != null && newName.isNotEmpty) {
+      final client = ref.read(connectionProvider);
+      if (client == null) return;
+      try {
+        await client.call('node.rename', {
+          'nodeId': widget.node.id,
+          'name': newName,
+        });
+        ref.read(nodesProvider.notifier).renameNode(widget.node.id, newName);
+      } catch (e) {
+        debugPrint('rename node error: $e');
+      }
+    }
   }
 
   void _showCreateAgentDialog(BuildContext context, WidgetRef ref) {
@@ -673,14 +747,20 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     List<AgentModel> normalizeManaged(List<AgentModel> input) {
       final byName = <String, AgentModel>{};
       for (final a in input) {
-        // Hide stopped/crashed agents unless they have conversation history
-        // Also show stopped agents with attachMode (reattachable terminal sessions)
-        final isStoppedWithoutHistory = a.status == AgentStatus.stopped && !a.hasHistory && a.attachMode.isEmpty;
-        final isCrashedWithoutHistory = a.status == AgentStatus.crashed && !a.hasHistory;
-        if (isStoppedWithoutHistory || isCrashedWithoutHistory) {
+        // Filter logic must match NodeCard.build():
+        // - Always show working/starting/idle agents
+        // - For stopped agents: only show if hasHistory AND has sessionId (resumable)
+        // - crashed agents are hidden entirely
+        final hasResumeCapability = a.sessionId != null && a.sessionId!.isNotEmpty;
+        final isActive = a.status == AgentStatus.working ||
+            a.status == AgentStatus.starting ||
+            a.status == AgentStatus.idle;
+        final isResumableStopped = a.status == AgentStatus.stopped &&
+            a.hasHistory && hasResumeCapability;
+        if (!isActive && !isResumableStopped) {
           continue;
         }
-        final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}|${a.id.toLowerCase()}';
+        final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}';
         final existing = byName[key];
         if (existing == null ||
             managedPriority(a) < managedPriority(existing)) {

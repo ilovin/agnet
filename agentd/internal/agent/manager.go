@@ -20,6 +20,16 @@ import (
 	"github.com/phone-talk/agentd/internal/watcher"
 )
 
+// containsString checks if a string slice contains a specific string.
+func containsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
+}
+
 // newUUID generates a random UUID v4 string without external dependencies.
 func newUUID() string {
 	var b [16]byte
@@ -307,6 +317,160 @@ func (m *Manager) tryParseStreamJSON(text string) *streamJSONEvent {
 	}
 }
 
+// buildToolResultSummary extracts a concise summary from a tool result output.
+// toolName is optional (may be empty if not available in the event).
+func buildToolResultSummary(toolName string, output []byte) string {
+	text := strings.TrimSpace(string(output))
+	if text == "" {
+		return "(no output)"
+	}
+	// Strip surrounding JSON string quotes if present
+	if len(text) >= 2 && text[0] == '"' {
+		var s string
+		if err := json.Unmarshal(output, &s); err == nil {
+			text = strings.TrimSpace(s)
+		}
+	}
+
+	lines := strings.Split(text, "\n")
+	nonEmpty := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			nonEmpty = append(nonEmpty, l)
+		}
+	}
+
+	switch toolName {
+	case "Bash":
+		// Show first 5 non-empty lines
+		preview := nonEmpty
+		if len(preview) > 5 {
+			preview = preview[:5]
+			return strings.Join(preview, "\n") + fmt.Sprintf("\n... (%d lines total)", len(nonEmpty))
+		}
+		return strings.Join(preview, "\n")
+	case "Grep":
+		return fmt.Sprintf("%d matches", len(nonEmpty))
+	case "Read":
+		return fmt.Sprintf("%d lines", len(nonEmpty))
+	case "Write", "Edit":
+		return "done"
+	}
+
+	// Generic: first 3 lines, max 300 chars
+	preview := nonEmpty
+	if len(preview) > 3 {
+		preview = preview[:3]
+	}
+	result := strings.Join(preview, "\n")
+	if len(result) > 300 {
+		result = result[:300] + "..."
+	}
+	if len(nonEmpty) > 3 {
+		result += fmt.Sprintf("\n... (%d lines total)", len(nonEmpty))
+	}
+	return result
+}
+
+func buildToolInputSummary(toolName string, input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var params map[string]any
+	if err := json.Unmarshal(input, &params); err != nil {
+		return ""
+	}
+
+	switch toolName {
+	case "Bash":
+		if cmd, ok := params["command"].(string); ok {
+			if len(cmd) > 100 {
+				cmd = cmd[:100] + "..."
+			}
+			return cmd
+		}
+	case "Read":
+		if path, ok := params["file_path"].(string); ok {
+			return path
+		}
+	case "Write":
+		if path, ok := params["file_path"].(string); ok {
+			return path
+		}
+	case "Edit":
+		if path, ok := params["file_path"].(string); ok {
+			return path
+		}
+	case "Grep":
+		if pattern, ok := params["pattern"].(string); ok {
+			return "pattern: " + pattern
+		}
+	case "Glob":
+		if pattern, ok := params["pattern"].(string); ok {
+			return pattern
+		}
+	case "Agent":
+		if desc, ok := params["description"].(string); ok && desc != "" {
+			return desc
+		}
+		if prompt, ok := params["prompt"].(string); ok && prompt != "" {
+			if len(prompt) > 80 {
+				prompt = prompt[:80] + "..."
+			}
+			return prompt
+		}
+	case "SendMessage":
+		to, _ := params["to"].(string)
+		summary, _ := params["summary"].(string)
+		if summary != "" && to != "" {
+			return fmt.Sprintf("→ %s: %s", to, summary)
+		}
+		if to != "" {
+			return "→ " + to
+		}
+	case "TaskCreate":
+		if subject, ok := params["subject"].(string); ok && subject != "" {
+			return subject
+		}
+	case "TaskUpdate":
+		taskId, _ := params["taskId"].(string)
+		status, _ := params["status"].(string)
+		if taskId != "" && status != "" {
+			return fmt.Sprintf("#%s → %s", taskId, status)
+		}
+		if status != "" {
+			return status
+		}
+	case "TaskList":
+		return "查看任务列表"
+	case "TodoWrite":
+		return "更新任务"
+	case "WebSearch":
+		if query, ok := params["query"].(string); ok && query != "" {
+			return query
+		}
+	case "WebFetch":
+		if url, ok := params["url"].(string); ok && url != "" {
+			return url
+		}
+	case "NotebookEdit":
+		if path, ok := params["notebook_path"].(string); ok && path != "" {
+			return path
+		}
+	}
+
+	// Generic fallback: show first string value
+	for _, v := range params {
+		if s, ok := v.(string); ok && len(s) > 0 {
+			if len(s) > 80 {
+				s = s[:80] + "..."
+			}
+			return s
+		}
+	}
+	return ""
+}
+
 func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSONEvent) {
 	var data map[string]any
 
@@ -351,10 +515,20 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			}
 		}
 
+		// Skip assistant events with text content if we're using stream_event/text_delta
+		// to avoid duplicates. stream_event provides better incremental updates.
+		if role == "assistant" && text != "" {
+			// Just update status, don't store/broadcast duplicate content
+			ag.setStatus(StatusWorking)
+			return
+		}
+
+		kind := role // "user" or "assistant"
 		data = map[string]any{
 			"role": role,
 			"text": text,
 			"raw":  false,
+			"kind": kind,
 		}
 
 		// Update status based on content
@@ -363,20 +537,30 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		}
 
 	case "tool_use":
+		summary := buildToolInputSummary(ev.Name, ev.Input)
+		var toolText string
+		if summary != "" {
+			toolText = fmt.Sprintf("[%s: %s]", ev.Name, summary)
+		} else {
+			toolText = fmt.Sprintf("[%s]", ev.Name)
+		}
 		data = map[string]any{
 			"role":     "assistant",
-			"text":     fmt.Sprintf("[Using tool: %s]", ev.Name),
+			"text":     toolText,
 			"raw":      false,
+			"kind":     "tool_use",
 			"toolName": ev.Name,
 		}
 		ag.setStatus(StatusWorking)
 
 	case "tool_result":
-		resultText := string(ev.Output)
+		toolName, _ := ev.Raw["tool_name"].(string)
+		resultText := buildToolResultSummary(toolName, ev.Output)
 		data = map[string]any{
 			"role":   "assistant",
 			"text":   resultText,
 			"raw":    false,
+			"kind":   "tool_result",
 			"result": true,
 		}
 
@@ -567,64 +751,24 @@ func (m *Manager) wireStatusCallback(ag *Agent) {
 	})
 }
 
-func (m *Manager) Create(name, provider, cmd string, args []string, workDir string) (string, error) {
-	id := newUUID()
-	if provider == "" {
-		provider = "custom"
-	}
-	ag := newAgent(id, name, provider, workDir, cmd, args)
-	m.wireStatusCallback(ag)
-
-	m.mu.Lock()
-	m.agents[id] = ag
-	m.mu.Unlock()
-
-	_ = m.store.SaveAgent(store.AgentRecord{
-		ID: id, Name: name, Provider: provider, WorkDir: workDir,
-	})
-
-	ag.setStatus(StatusStarting)
-
-	// Use pipe mode for Claude to avoid TUI permission menus
-	// Pipe mode with -p flag makes Claude run in non-interactive mode where --permission-mode works correctly
-	var p *agentpty.Process
-	var err error
-	if provider == "claude" {
-		// Claude with -p flag exits after one response, so we don't start permanent readers
-		p, err = agentpty.SpawnPipes(cmd, args, workDir, nil)
-	} else {
-		p, err = agentpty.Spawn(cmd, args, workDir, nil)
-	}
-	if err != nil {
-		ag.setStatus(StatusCrashed)
-		return id, fmt.Errorf("spawn: %w", err)
-	}
-	ag.setProcess(p)
-	ag.setStatus(StatusIdle)
-
-	if provider != "claude" {
-		// For interactive providers (opencode), use session file watcher
-		go m.startSessionWatcher(id, ag, p.Pid(), workDir)
-		go m.readPTYForPermissionPrompts(id, ag, provider, p)
-	} else {
-		// For Claude -p mode: read output directly from pipe, process will exit after response
-		log.Printf("[Create] Starting Claude in -p mode, agent %s, pid %d", id, p.Pid())
-		go m.readPipeOutputAndWait(id, ag, p)
-	}
-
-	return id, nil
-}
-
 // readPipeOutputAndWait reads stream-json output from pipe and waits for process exit.
 // Used for Claude -p mode where the process exits after each response.
-func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.Process) {
+// Set initial to true when called from Create() to prevent immediate stopped status.
+func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.Process, initial bool) {
 	defer func() {
 		if ag.Process() == p {
 			ag.setProcess(nil)
-			ag.setStatus(StatusStopped)
+			log.Printf("[Pipe] Agent %s process exited, initial=%v, current status=%s", agentID, initial, ag.Status())
+			// Don't set stopped status on initial creation - keep agent idle
+			// so it remains visible in the UI. Status will be updated when
+			// a message is sent (which restarts the process).
+			if !initial {
+				ag.setStatus(StatusStopped)
+				log.Printf("[Pipe] Agent %s status set to stopped", agentID)
+			}
 		}
 	}()
-	log.Printf("[Pipe] Started reading output for agent %s", agentID)
+	log.Printf("[Pipe] Started reading output for agent %s (initial=%v)", agentID, initial)
 
 	buf := make([]byte, 4096)
 	var lineBuffer strings.Builder
@@ -733,6 +877,68 @@ func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.P
 	log.Printf("[Pipe] Finished reading output for agent %s, captured %d chars", agentID, fullText.Len())
 }
 
+// readPipeOutputAndWait reads stream-json output from pipe and waits for process exit.
+// Used for Claude -p mode where the process exits after each response.
+
+func (m *Manager) Create(name, provider, cmd string, args []string, workDir string, env []string) (string, error) {
+	id := newUUID()
+	if provider == "" {
+		provider = "custom"
+	}
+	ag := newAgent(id, name, provider, workDir, cmd, args)
+	m.wireStatusCallback(ag)
+
+	m.mu.Lock()
+	m.agents[id] = ag
+	m.mu.Unlock()
+
+	_ = m.store.SaveAgent(store.AgentRecord{
+		ID: id, Name: name, Provider: provider, WorkDir: workDir,
+	})
+
+	ag.setStatus(StatusStarting)
+
+	// For Claude with -p mode, don't start process on initial creation
+	// because -p requires stdin input. Process will be started on first message.
+	isClaudePrintMode := provider == "claude" && containsString(args, "-p")
+	if isClaudePrintMode {
+		ag.setStatus(StatusIdle)
+		log.Printf("[Create] Agent %s created in idle mode (Claude -p, will start on first message)", id)
+		return id, nil
+	}
+
+	// Use pipe mode for Claude to avoid TUI permission menus
+	// Pipe mode with -p flag makes Claude run in non-interactive mode where --permission-mode works correctly
+	var p *agentpty.Process
+	var err error
+	if provider == "claude" {
+		// Claude with -p flag exits after one response, so we don't start permanent readers
+		p, err = agentpty.SpawnPipes(cmd, args, workDir, env)
+	} else {
+		p, err = agentpty.Spawn(cmd, args, workDir, env)
+	}
+	if err != nil {
+		ag.setStatus(StatusCrashed)
+		return id, fmt.Errorf("spawn: %w", err)
+	}
+	ag.setProcess(p)
+	ag.setStatus(StatusIdle)
+	log.Printf("[Create] Agent %s started with pid=%d status=%s", id, p.Pid(), ag.Status())
+
+	if provider != "claude" {
+		// For interactive providers (opencode), use session file watcher
+		go m.startSessionWatcher(id, ag, p.Pid(), workDir)
+		go m.readPTYForPermissionPrompts(id, ag, provider, p)
+	} else {
+		// For Claude -p mode: read output directly from pipe, process will exit after response
+		// Pass initial=false since this is a message restart, not initial creation
+		log.Printf("[Create] Starting Claude in -p mode, agent %s, pid %d", id, p.Pid())
+		go m.readPipeOutputAndWait(id, ag, p, false)
+	}
+
+	return id, nil
+}
+
 // startSessionWatcher tries to find the session file for a newly created agent
 // and starts a ClaudeWatcher to parse structured conversation data.
 // It will retry periodically until the file is found or the agent stops.
@@ -806,73 +1012,71 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 }
 
 // findSessionFile attempts to find the Claude JSONL session file for a given PID.
+// It searches all candidate home directories so agentd running as root can find
+// sessions belonging to non-root users.
 func (m *Manager) findSessionFile(pid int, workDir string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
+	for _, home := range allClaudeHomeDirs() {
+		// Step 1: Check ~/.claude/sessions/<PID>.json to get sessionId
+		sessionsDir := filepath.Join(home, ".claude", "sessions")
+		pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", pid))
 
-	// Step 1: Check ~/.claude/sessions/<PID>.json to get sessionId
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", pid))
-
-	if _, err := os.Stat(pidFile); err == nil {
-		// Read the PID file to get sessionId
-		data, err := os.ReadFile(pidFile)
-		if err == nil {
-			var pidInfo struct {
-				SessionID string `json:"sessionId"`
-			}
-			if err := json.Unmarshal(data, &pidInfo); err == nil && pidInfo.SessionID != "" {
-				// Look for the JSONL file in projects directories
-				projectsBase := filepath.Join(home, ".claude", "projects")
-				entries, _ := os.ReadDir(projectsBase)
-				for _, entry := range entries {
-					if entry.IsDir() {
-						jsonlPath := filepath.Join(projectsBase, entry.Name(), pidInfo.SessionID+".jsonl")
-						if _, err := os.Stat(jsonlPath); err == nil {
-							return jsonlPath
+		if _, err := os.Stat(pidFile); err == nil {
+			data, err := os.ReadFile(pidFile)
+			if err == nil {
+				var pidInfo struct {
+					SessionID string `json:"sessionId"`
+				}
+				if err := json.Unmarshal(data, &pidInfo); err == nil && pidInfo.SessionID != "" {
+					projectsBase := filepath.Join(home, ".claude", "projects")
+					entries, _ := os.ReadDir(projectsBase)
+					for _, entry := range entries {
+						if entry.IsDir() {
+							jsonlPath := filepath.Join(projectsBase, entry.Name(), pidInfo.SessionID+".jsonl")
+							if _, err := os.Stat(jsonlPath); err == nil {
+								return jsonlPath
+							}
 						}
 					}
 				}
 			}
 		}
-	}
 
-	// Step 2: Fallback - look for JSONL created after this agent started (within the last 5 min)
-	// to avoid picking up old session files.
-	dirName := strings.ReplaceAll(workDir, "/", "-")
-	if dirName == "" || dirName == "-" {
-		dirName = "-"
-	}
+		// Step 2: Fallback - look for JSONL created after this agent started (within the last 5 min)
+		dirName := strings.ReplaceAll(workDir, "/", "-")
+		if dirName == "" || dirName == "-" {
+			dirName = "-"
+		}
 
-	projectsDir := filepath.Join(home, ".claude", "projects", dirName)
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return ""
-	}
+		projectsDir := filepath.Join(home, ".claude", "projects", dirName)
+		entries, err := os.ReadDir(projectsDir)
+		if err != nil {
+			continue
+		}
 
-	// Find most recent JSONL file that is newer than 5 minutes ago
-	cutoff := time.Now().Add(-5 * time.Minute)
-	var latest string
-	var latestTime time.Time
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".jsonl") {
-			info, err := entry.Info()
-			if err != nil {
-				continue
+		cutoff := time.Now().Add(-5 * time.Minute)
+		var latest string
+		var latestTime time.Time
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".jsonl") {
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().After(cutoff) && info.ModTime().After(latestTime) {
+					latestTime = info.ModTime()
+					latest = filepath.Join(projectsDir, entry.Name())
+				}
 			}
-			if info.ModTime().After(cutoff) && info.ModTime().After(latestTime) {
-				latestTime = info.ModTime()
-				latest = filepath.Join(projectsDir, entry.Name())
-			}
+		}
+		if latest != "" {
+			return latest
 		}
 	}
 
-	return latest
+	return ""
 }
 
-func (m *Manager) RestartInPlace(id, provider, cmd string, args []string) error {
+func (m *Manager) RestartInPlace(id, provider, cmd string, args []string, env []string) error {
 	ag := m.Get(id)
 	if ag == nil {
 		return fmt.Errorf("agent %q not found", id)
@@ -895,9 +1099,9 @@ func (m *Manager) RestartInPlace(id, provider, cmd string, args []string) error 
 		err error
 	)
 	if provider == "claude" {
-		p, err = agentpty.SpawnPipes(cmd, args, workDir, nil)
+		p, err = agentpty.SpawnPipes(cmd, args, workDir, env)
 	} else {
-		p, err = agentpty.Spawn(cmd, args, workDir, nil)
+		p, err = agentpty.Spawn(cmd, args, workDir, env)
 	}
 	if err != nil {
 		ag.setStatus(StatusCrashed)
@@ -912,7 +1116,56 @@ func (m *Manager) RestartInPlace(id, provider, cmd string, args []string) error 
 		go m.readPTYForPermissionPrompts(id, ag, provider, p)
 	} else {
 		log.Printf("[Restart] Starting Claude in -p mode, agent %s, pid %d", id, p.Pid())
-		go m.readPipeOutputAndWait(id, ag, p)
+		// Pass initial=false since this is a restart with message, not initial creation
+		go m.readPipeOutputAndWait(id, ag, p, false)
+	}
+
+	return nil
+}
+
+// StartInPlaceWithMessage starts a fresh agent with a message written to stdin.
+// Similar to RestartInPlace but for agents that haven't been started yet.
+func (m *Manager) StartInPlaceWithMessage(id, provider, cmd string, args []string, env []string, message string) error {
+	ag := m.Get(id)
+	if ag == nil {
+		return fmt.Errorf("agent %q not found", id)
+	}
+
+	ag.setStatus(StatusStarting)
+
+	ag.mu.Lock()
+	workDir := ag.WorkDir
+	ag.mu.Unlock()
+
+	var (
+		p   *agentpty.Process
+		err error
+	)
+	if provider == "claude" {
+		p, err = agentpty.SpawnPipes(cmd, args, workDir, env)
+	} else {
+		p, err = agentpty.Spawn(cmd, args, workDir, env)
+	}
+	if err != nil {
+		ag.setStatus(StatusCrashed)
+		return fmt.Errorf("spawn: %w", err)
+	}
+
+	// Write message to stdin
+	if _, err := p.Write([]byte(message + "\n")); err != nil {
+		p.Kill()
+		ag.setStatus(StatusCrashed)
+		return fmt.Errorf("write message: %w", err)
+	}
+	p.CloseStdin()
+
+	ag.setProcess(p)
+	ag.setStatus(StatusIdle)
+
+	if provider == "claude" {
+		log.Printf("[Start] Starting Claude in -p mode, agent %s, pid %d", id, p.Pid())
+		// Pass initial=false since this is a message send, not initial creation
+		go m.readPipeOutputAndWait(id, ag, p, false)
 	}
 
 	return nil
@@ -920,7 +1173,7 @@ func (m *Manager) RestartInPlace(id, provider, cmd string, args []string) error 
 
 // CreateWithWatcher spawns an agent and starts a ClaudeWatcher on sessionFile.
 func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, workDir, sessionFile string) (string, error) {
-	id, err := m.Create(name, provider, cmd, args, workDir)
+	id, err := m.Create(name, provider, cmd, args, workDir, nil)
 	if err != nil {
 		return id, err
 	}
@@ -987,6 +1240,7 @@ func (m *Manager) LoadPersistedEventsSince(agentID string, afterSeq uint64, limi
 			"role": r.Role,
 			"text": r.Text,
 			"raw":  r.Raw,
+			"kind": r.Kind,
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -1004,6 +1258,7 @@ func (m *Manager) LoadPersistedEventsBefore(agentID string, beforeSeq uint64, li
 			"role": r.Role,
 			"text": r.Text,
 			"raw":  r.Raw,
+			"kind": r.Kind,
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -1021,6 +1276,7 @@ func (m *Manager) LoadPersistedEventsLatest(agentID string, limit int) ([]eventb
 			"role": r.Role,
 			"text": r.Text,
 			"raw":  r.Raw,
+			"kind": r.Kind,
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -1097,26 +1353,26 @@ func (m *Manager) StartWatcherForAgent(id string) error {
 		return fmt.Errorf("agent %q has no stored session ID", id)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
-	}
-
-	// Search all project directories for the session file
-	projectsBase := filepath.Join(home, ".claude", "projects")
-	entries, err := os.ReadDir(projectsBase)
-	if err != nil {
-		return fmt.Errorf("read projects dir: %w", err)
-	}
-
+	// Search all candidate home directories so agentd running as root finds
+	// sessions belonging to non-root users.
 	var sessionFile string
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, home := range allClaudeHomeDirs() {
+		projectsBase := filepath.Join(home, ".claude", "projects")
+		entries, err := os.ReadDir(projectsBase)
+		if err != nil {
 			continue
 		}
-		candidate := filepath.Join(projectsBase, entry.Name(), sessionID+".jsonl")
-		if _, err := os.Stat(candidate); err == nil {
-			sessionFile = candidate
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			candidate := filepath.Join(projectsBase, entry.Name(), sessionID+".jsonl")
+			if _, err := os.Stat(candidate); err == nil {
+				sessionFile = candidate
+				break
+			}
+		}
+		if sessionFile != "" {
 			break
 		}
 	}
@@ -1166,6 +1422,18 @@ func (m *Manager) StartWatcherForAgent(id string) error {
 	return nil
 }
 
+// Rename updates the display name of an agent.
+func (m *Manager) Rename(agentID, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ag, ok := m.agents[agentID]
+	if !ok {
+		return fmt.Errorf("agent not found: %s", agentID)
+	}
+	ag.Name = name
+	return nil
+}
+
 // Stop kills the agent process.
 func (m *Manager) Stop(id string) error {
 	ag := m.Get(id)
@@ -1188,6 +1456,79 @@ func (m *Manager) Remove(id string) error {
 	return m.store.DeleteAgent(id)
 }
 
+// allClaudeHomeDirs returns candidate home directories to search for Claude sessions.
+// When agentd runs as root it also includes all /home/* user directories so that
+// sessions belonging to non-root users are discovered correctly.
+func allClaudeHomeDirs() []string {
+	seen := map[string]struct{}{}
+	var dirs []string
+	add := func(d string) {
+		if d == "" {
+			return
+		}
+		if _, ok := seen[d]; ok {
+			return
+		}
+		seen[d] = struct{}{}
+		dirs = append(dirs, d)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(home)
+	}
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				add(filepath.Join("/home", e.Name()))
+			}
+		}
+	}
+	return dirs
+}
+
+// findSessionFileByWorkDir attempts to find a session file by work directory.
+// This is a fallback for older Claude processes that don't have PID files.
+// It searches all candidate home directories so agentd running as root can find
+// sessions belonging to non-root users.
+func (m *Manager) findSessionFileByWorkDir(workDir string) string {
+	// Convert workDir to project directory name format used by Claude
+	// Claude replaces '/', '.', and '_' with '-'
+	dirName := strings.ReplaceAll(workDir, "/", "-")
+	dirName = strings.ReplaceAll(dirName, ".", "-")
+	dirName = strings.ReplaceAll(dirName, "_", "-")
+
+	for _, home := range allClaudeHomeDirs() {
+		projectDir := filepath.Join(home, ".claude", "projects", dirName)
+		log.Printf("[findSessionFileByWorkDir] Looking in: %s", projectDir)
+
+		entries, err := os.ReadDir(projectDir)
+		if err != nil {
+			log.Printf("[findSessionFileByWorkDir] ReadDir error: %v", err)
+			continue
+		}
+
+		var latestFile string
+		var latestTime int64
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
+				info, err := entry.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().Unix() > latestTime {
+					latestTime = info.ModTime().Unix()
+					latestFile = filepath.Join(projectDir, entry.Name())
+				}
+			}
+		}
+		if latestFile != "" {
+			log.Printf("[findSessionFileByWorkDir] Returning: %s", latestFile)
+			return latestFile
+		}
+	}
+	log.Printf("[findSessionFileByWorkDir] No session file found for workDir=%s", workDir)
+	return ""
+}
+
 // ScanExisting discovers running Claude/OpenCode processes on the system.
 func (m *Manager) ScanExisting() ([]scanner.ProcessInfo, error) {
 	if m.scanExisting != nil {
@@ -1204,13 +1545,25 @@ func (m *Manager) ScanExisting() ([]scanner.ProcessInfo, error) {
 func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	// Find session file for watching
 	sessionFile := info.FindSessionFile()
+	log.Printf("[Attach] PID %d: FindSessionFile returned: %s", info.PID, sessionFile)
 	if sessionFile == "" {
-		return nil, fmt.Errorf("no session file found for process %d", info.PID)
+		// Fallback: try to find session file by workDir for older Claude processes
+		// that don't have PID files in ~/.claude/sessions/
+		log.Printf("[Attach] PID %d: Trying fallback, WorkDir=%s, Provider=%s", info.PID, info.WorkDir, info.Provider)
+		if info.WorkDir != "" && info.Provider == "claude" {
+			sessionFile = m.findSessionFileByWorkDir(info.WorkDir)
+			log.Printf("[Attach] PID %d: findSessionFileByWorkDir returned: %s", info.PID, sessionFile)
+		}
+		if sessionFile == "" {
+			return nil, fmt.Errorf("no session file found for process %d", info.PID)
+		}
 	}
 
 	// Extract session ID from filename
 	parts := strings.Split(sessionFile, "/")
-	sessionID := strings.TrimSuffix(parts[len(parts)-1], ".jsonl")
+	fileName := parts[len(parts)-1]
+	// Handle both .json (OpenCode) and .jsonl (Claude) extensions
+	sessionID := strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
 
 	applyAttachMetadata := func(ag *Agent) {
 		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
@@ -1315,6 +1668,25 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		WorkDir:         info.WorkDir,
 		ResumeSessionID: sessionID,
 	})
+
+	// Load historical events for OpenCode sessions
+	if info.Provider == "opencode" && sessionID != "" {
+		historyEvents, err := watcher.OpenCodeSessionHistory(sessionID)
+		if err != nil {
+			log.Printf("[Attach] Warning: failed to load OpenCode history for %s: %v", id, err)
+		} else {
+			log.Printf("[Attach] Loaded %d historical events for OpenCode agent %s", len(historyEvents), id)
+			// Append historical events to agent's event buffer
+			for _, ev := range historyEvents {
+				data := map[string]any{
+					"role": ev.Role,
+					"text": ev.Text,
+					"raw":  false,
+				}
+				m.appendAndPersistEvent(id, ag, data)
+			}
+		}
+	}
 
 	// Start watcher on the existing session file
 	// This allows us to monitor the session without owning the process
