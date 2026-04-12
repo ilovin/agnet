@@ -80,6 +80,10 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.conversationPermissionResponse(req), nil
 	case "agent.rename":
 		return h.agentRename(req), nil
+	case "provider.list":
+		return h.providerList(req), nil
+	case "provider.switch":
+		return h.providerSwitch(req), nil
 	default:
 		return errResp(req.ID, -32601, "method not found: "+req.Method), nil
 	}
@@ -1237,6 +1241,158 @@ func (h *handler) agentRename(req RPCRequest) RPCResponse {
 		"name":    name,
 	}), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
+}
+
+func findCCSwitchDB() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{filepath.Join(home, ".cc-switch", "cc-switch.db")}
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				candidates = append(candidates, filepath.Join("/home", e.Name(), ".cc-switch", "cc-switch.db"))
+			}
+		}
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+func findClaudeSettings() string {
+	home, _ := os.UserHomeDir()
+	candidates := []string{filepath.Join(home, ".claude", "settings.json")}
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				candidates = append(candidates, filepath.Join("/home", e.Name(), ".claude", "settings.json"))
+			}
+		}
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+func (h *handler) providerList(req RPCRequest) RPCResponse {
+	dbPath := findCCSwitchDB()
+	if dbPath == "" {
+		return okResp(req.ID, map[string]any{"providers": []any{}, "current": ""})
+	}
+
+	cmd := exec.Command("sqlite3", "-json", dbPath,
+		"SELECT id, name, api_url, is_active FROM providers WHERE app='claude'")
+	out, err := cmd.Output()
+	if err != nil {
+		return errResp(req.ID, -32000, "read cc-switch db: "+err.Error())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil || rows == nil {
+		rows = []map[string]any{}
+	}
+
+	current := ""
+	for _, r := range rows {
+		if r["is_active"] == 1.0 || r["is_active"] == "1" {
+			if id, ok := r["id"].(string); ok {
+				current = id
+			}
+		}
+	}
+
+	return okResp(req.ID, map[string]any{"providers": rows, "current": current})
+}
+
+func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
+	providerID, _ := req.Params["providerId"].(string)
+	if providerID == "" {
+		return errResp(req.ID, -32602, "providerId is required")
+	}
+
+	dbPath := findCCSwitchDB()
+	if dbPath == "" {
+		return errResp(req.ID, -32000, "cc-switch not found")
+	}
+
+	// Get provider config from DB — use parameter substitution via printf to avoid injection
+	query := fmt.Sprintf("SELECT id, config_json FROM providers WHERE id='%s' AND app='claude'", providerID)
+	cmd := exec.Command("sqlite3", "-json", dbPath, query)
+	out, err := cmd.Output()
+	if err != nil {
+		return errResp(req.ID, -32000, "read provider: "+err.Error())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil || len(rows) == 0 {
+		return errResp(req.ID, -32000, "provider not found: "+providerID)
+	}
+
+	configJSON, _ := rows[0]["config_json"].(string)
+	var providerConfig map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &providerConfig); err != nil {
+		return errResp(req.ID, -32000, "parse provider config: "+err.Error())
+	}
+
+	settingsPath := findClaudeSettings()
+	if settingsPath == "" {
+		// Create settings.json in the default location
+		home, _ := os.UserHomeDir()
+		settingsPath = filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+			return errResp(req.ID, -32000, "create .claude dir: "+err.Error())
+		}
+	}
+
+	settingsData, _ := os.ReadFile(settingsPath)
+	var settings map[string]any
+	if len(settingsData) > 0 {
+		_ = json.Unmarshal(settingsData, &settings)
+	}
+	if settings == nil {
+		settings = make(map[string]any)
+	}
+
+	// Merge provider env into settings env
+	if providerEnv, ok := providerConfig["env"].(map[string]any); ok {
+		existingEnv, _ := settings["env"].(map[string]any)
+		if existingEnv == nil {
+			existingEnv = make(map[string]any)
+		}
+		for k, v := range providerEnv {
+			existingEnv[k] = v
+		}
+		settings["env"] = existingEnv
+	}
+
+	// Merge other top-level keys from provider config
+	for k, v := range providerConfig {
+		if k != "env" {
+			settings[k] = v
+		}
+	}
+
+	newData, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return errResp(req.ID, -32000, "marshal settings: "+err.Error())
+	}
+	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+		return errResp(req.ID, -32000, "write settings: "+err.Error())
+	}
+
+	// Update is_active in DB
+	updateSQL := fmt.Sprintf(
+		"UPDATE providers SET is_active=0 WHERE app='claude'; UPDATE providers SET is_active=1 WHERE id='%s' AND app='claude'",
+		providerID,
+	)
+	_ = exec.Command("sqlite3", dbPath, updateSQL).Run()
+
+	return okResp(req.ID, map[string]any{"ok": true, "providerId": providerID})
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.

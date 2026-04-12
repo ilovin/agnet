@@ -513,7 +513,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // Non-fragment assistant message (complete message from stream-json).
     // If we already received text_delta fragments for this turn, the content
     // was already flushed via mergeBuf — skip to avoid duplicates.
-    if (role == 'assistant' && kind == 'text' && hadTextDelta) {
+    // Also handle legacy events where kind is empty.
+    if (role == 'assistant' && !raw && hadTextDelta &&
+        (kind == 'text' || kind == '' || kind == 'assistant')) {
       // Reset delta flag for the next turn; flush any remaining delta buffer
       flushMergeBuf();
       hadTextDelta = false;
@@ -1053,15 +1055,36 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
   }
 
-  Future<void> _switchProvider(String provider) async {
+  Future<void> _switchProvider(String providerId) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
+    // Check if this is a cc-switch provider ID (not a legacy 'claude'/'claude-bedrock' value).
+    // cc-switch provider IDs are typically numeric strings or UUIDs, not the legacy names.
+    final isLegacyProvider = providerId == 'claude' ||
+        providerId == 'claude-bedrock' ||
+        providerId == 'claude-vertex';
+
     try {
+      if (!isLegacyProvider) {
+        // Use provider.switch to update ~/.claude/settings.json via cc-switch
+        await client.call('provider.switch', {
+          'nodeId': widget.nodeId,
+          'providerId': providerId,
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('已切换到 $providerId')),
+          );
+        }
+        return;
+      }
+
+      // Legacy path: restart agent with provider env var
       final result = await client.call('agent.restart', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
-        'provider': provider,
+        'provider': providerId,
       });
 
       final map = result is Map
@@ -1255,6 +1278,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           if (agent != null)
             _ControlBar(
               agent: agent,
+              nodeId: widget.nodeId,
               stopping: _stopping,
               onControl: _control,
               onSwitchModel: _switchModel,
@@ -1381,15 +1405,17 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   }
 }
 
-class _ControlBar extends StatelessWidget {
+class _ControlBar extends ConsumerStatefulWidget {
   final AgentModel agent;
+  final String nodeId;
   final bool stopping;
   final Future<void> Function(String action) onControl;
   final Future<void> Function(String model) onSwitchModel;
-  final Future<void> Function(String provider) onSwitchProvider;
+  final Future<void> Function(String providerId) onSwitchProvider;
 
   const _ControlBar({
     required this.agent,
+    required this.nodeId,
     required this.stopping,
     required this.onControl,
     required this.onSwitchModel,
@@ -1397,10 +1423,35 @@ class _ControlBar extends StatelessWidget {
   });
 
   @override
+  ConsumerState<_ControlBar> createState() => _ControlBarState();
+}
+
+class _ControlBarState extends ConsumerState<_ControlBar> {
+  Future<Map<String, dynamic>>? _providerListFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.agent.provider == 'claude') {
+      _fetchProviders();
+    }
+  }
+
+  void _fetchProviders() {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    setState(() {
+      _providerListFuture = client
+          .call('provider.list', {'nodeId': widget.nodeId})
+          .then((r) => r is Map ? Map<String, dynamic>.from(r) : <String, dynamic>{});
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final stopped =
-        agent.status == AgentStatus.stopped ||
-        agent.status == AgentStatus.crashed;
+        widget.agent.status == AgentStatus.stopped ||
+        widget.agent.status == AgentStatus.crashed;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -1410,39 +1461,80 @@ class _ControlBar extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
-          if (agent.provider == 'claude') ...[
-            PopupMenuButton<String>(
-              tooltip: '切换 Provider',
-              onSelected: onSwitchProvider,
-              itemBuilder: (_) => const [
-                PopupMenuItem(
-                  value: 'claude',
-                  child: Text('Anthropic (Default)'),
-                ),
-                PopupMenuItem(
-                  value: 'claude-bedrock',
-                  child: Text('AWS Bedrock'),
-                ),
-                PopupMenuItem(
-                  value: 'claude-vertex',
-                  child: Text('Google Vertex'),
-                ),
-              ],
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.cloud, size: 18),
-                    SizedBox(width: 4),
-                    Text('Provider'),
-                  ],
-                ),
-              ),
+          if (widget.agent.provider == 'claude') ...[
+            // Dynamic provider selector from cc-switch
+            FutureBuilder<Map<String, dynamic>>(
+              future: _providerListFuture,
+              builder: (context, snapshot) {
+                final data = snapshot.data ?? {};
+                final providers = (data['providers'] as List?) ?? [];
+                final current = data['current'] as String? ?? '';
+
+                if (providers.isEmpty) {
+                  // Fallback to static list when cc-switch is not available
+                  return PopupMenuButton<String>(
+                    tooltip: '切换 Provider',
+                    onSelected: (id) {
+                      // Static providers map to agent.restart provider param
+                      widget.onSwitchProvider(id);
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'claude', child: Text('Anthropic (Default)')),
+                      PopupMenuItem(value: 'claude-bedrock', child: Text('AWS Bedrock')),
+                      PopupMenuItem(value: 'claude-vertex', child: Text('Google Vertex')),
+                    ],
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 8),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.cloud, size: 18),
+                          SizedBox(width: 4),
+                          Text('Provider'),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+
+                return PopupMenuButton<String>(
+                  tooltip: '切换 Provider',
+                  onSelected: widget.onSwitchProvider,
+                  itemBuilder: (_) => providers.map((p) {
+                    final id = (p['id'] ?? '').toString();
+                    final name = (p['name'] ?? id).toString();
+                    final isActive = id == current;
+                    return PopupMenuItem<String>(
+                      value: id,
+                      child: Row(
+                        children: [
+                          if (isActive) ...[
+                            const Icon(Icons.check, size: 16),
+                            const SizedBox(width: 4),
+                          ] else
+                            const SizedBox(width: 20),
+                          Text(name),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.cloud, size: 18),
+                        const SizedBox(width: 4),
+                        Text(current.isNotEmpty ? 'Provider' : 'Provider'),
+                      ],
+                    ),
+                  ),
+                );
+              },
             ),
             PopupMenuButton<String>(
               tooltip: '切换模型',
-              onSelected: onSwitchModel,
+              onSelected: widget.onSwitchModel,
               itemBuilder: (_) => const [
                 PopupMenuItem(
                   value: 'claude-sonnet-4-6',
@@ -1472,25 +1564,25 @@ class _ControlBar extends StatelessWidget {
           ],
           if (stopped)
             TextButton.icon(
-              onPressed: () => onControl('restart'),
+              onPressed: () => widget.onControl('restart'),
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('启动'),
             ),
           if (!stopped)
             TextButton.icon(
-              onPressed: stopping ? null : () => onControl('stop'),
-              icon: stopping
+              onPressed: widget.stopping ? null : () => widget.onControl('stop'),
+              icon: widget.stopping
                   ? const SizedBox(
                       width: 14,
                       height: 14,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.stop, size: 18),
-              label: Text(stopping ? '停止中…' : '停止'),
+              label: Text(widget.stopping ? '停止中…' : '停止'),
             ),
           const SizedBox(width: 8),
           TextButton.icon(
-            onPressed: () => onControl('restart'),
+            onPressed: () => widget.onControl('restart'),
             icon: const Icon(Icons.refresh, size: 18),
             label: const Text('重启'),
           ),
