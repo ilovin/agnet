@@ -515,13 +515,9 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			}
 		}
 
-		// Skip assistant events with text content if we're using stream_event/text_delta
-		// to avoid duplicates. stream_event provides better incremental updates.
-		if role == "assistant" && text != "" {
-			// Just update status, don't store/broadcast duplicate content
-			ag.setStatus(StatusWorking)
-			return
-		}
+			if role == "assistant" {
+				ag.setStatus(StatusWorking)
+			}
 
 		kind := role // "user" or "assistant"
 		data = map[string]any{
@@ -850,23 +846,9 @@ func (m *Manager) readPipeOutputAndWait(agentID string, ag *Agent, p *agentpty.P
 	}
 
 	// Store complete response as a single event if we accumulated text
-	finalText := strings.TrimSpace(fullText.String())
-	if finalText != "" {
-		data := map[string]any{
-			"role": "assistant",
-			"text": finalText,
-			"raw":  false,
-		}
-		seq := m.appendAndPersistEvent(agentID, ag, data)
-		data["seq"] = seq
-
-		m.mu.RLock()
-		cb := m.onOutput
-		m.mu.RUnlock()
-		if cb != nil {
-			cb(agentID, data)
-		}
-	}
+	// Don't flush fullText here — events are already stored in real-time
+	// by handleStreamJSONEvent. fullText was only used as a fallback when
+	// assistant text events were being skipped.
 
 	// Wait for process to complete
 	if err := p.Wait(); err != nil {
@@ -1003,6 +985,8 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 		}
 	})
 
+	w.SetWorkDir(workDir)
+	w.SetPID(pid)
 	if err := w.Start(); err != nil {
 		log.Printf("[Watcher] Watcher start failed for agent %s: %v", agentID, err)
 		return
@@ -1627,6 +1611,12 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 						cb(existing.ID, data)
 					}
 				})
+				if info.WorkDir != "" {
+					w.SetWorkDir(info.WorkDir)
+				}
+				if info.PID > 0 {
+					w.SetPID(info.PID)
+				}
 				if err := w.Start(); err != nil {
 					log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
 				} else {

@@ -71,7 +71,18 @@ func runServer() {
 	}
 
 	store := nodecfg.New(cfg.NodesFile)
-	mgr := node.NewManager(store, nil)
+
+	// Load agentd binary for remote deploy
+	var agentdBin []byte
+	for _, p := range agentdBinCandidates() {
+		if data, err := os.ReadFile(p); err == nil {
+			agentdBin = data
+			log.Printf("Loaded agentd binary from: %s (%d bytes)", p, len(data))
+			break
+		}
+	}
+
+	mgr := node.NewManager(store, agentdBin)
 
 	entries, err := store.Load()
 	if err != nil {
@@ -157,6 +168,18 @@ func runServer() {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+func agentdBinCandidates() []string {
+	candidates := []string{"agentd-linux", "./agentd-linux", "../agentd/agentd-linux"}
+	if ex, err := os.Executable(); err == nil {
+		exDir := filepath.Dir(ex)
+		candidates = append([]string{
+			filepath.Join(exDir, "agentd-linux"),
+			filepath.Join(exDir, "..", "agentd", "agentd-linux"),
+		}, candidates...)
+	}
+	return candidates
 }
 
 func findStaticDir() string {

@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -84,6 +86,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.providerList(req), nil
 	case "provider.switch":
 		return h.providerSwitch(req), nil
+	case "provider.add":
+		return h.providerAdd(req), nil
 	default:
 		return errResp(req.ID, -32601, "method not found: "+req.Method), nil
 	}
@@ -158,7 +162,7 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 		_ = json.Unmarshal(b, &args)
 	}
 
-	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model)
+	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model, "")
 
 	if workDir == "" {
 		workDir = "/tmp"
@@ -204,7 +208,17 @@ func findExecutable(name string) string {
 	return name // fallback to bare name
 }
 
-func resolveLaunch(provider, cmd string, args []string, sessionID, model string) (string, string, []string, []string) {
+// currentPermissionMode extracts the --permission-mode value from args.
+func currentPermissionMode(args []string) string {
+	for i, a := range args {
+		if a == "--permission-mode" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func resolveLaunch(provider, cmd string, args []string, sessionID, model, permissionMode string) (string, string, []string, []string) {
 	resolvedProvider := provider
 	resolvedCmd := cmd
 	resolvedArgs := append([]string{}, args...)
@@ -229,6 +243,9 @@ func resolveLaunch(provider, cmd string, args []string, sessionID, model string)
 			"--output-format", "stream-json",
 			"--include-partial-messages",
 			"--verbose",
+		}
+		if permissionMode != "" {
+			resolvedArgs[2] = permissionMode
 		}
 		if sessionID != "" {
 			resolvedArgs = append(resolvedArgs, "--resume", sessionID)
@@ -381,20 +398,10 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 			WorkDir: ag.WorkDir, ProjectName: projectName, Status: string(ag.Status()),
 			SessionID: resumeID,
 		}
-		// Skip crashed agents unless they have conversation history
-		if candidate.Status == "crashed" {
+		// Skip crashed and stopped agents.
+		// Active processes show in "attachable"; resumable sessions in file lists.
+		if candidate.Status == "crashed" || candidate.Status == "stopped" {
 			continue
-		}
-		// For stopped agents, only show if they have conversation history
-		// AND a resume session ID. This prevents clutter from empty dead sessions
-		// while keeping useful sessions that can be resumed.
-		if candidate.Status == "stopped" {
-			lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
-			if resumeID == "" || lastSeq == 0 {
-				continue
-			}
-			// Mark as attachable for UI
-			candidate.Status = "idle"
 		}
 		// Use sessionId as primary key if available, otherwise fall back to ID
 		// This ensures multiple sessions in the same directory are all shown
@@ -514,38 +521,49 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found"), nil
 	}
-	if err := h.server.manager.Stop(id); err != nil {
-		log.Printf("stop agent %s on restart: %v", id, err)
-	}
 
 	_, modelSpecified := req.Params["model"]
 	_, providerSpecified := req.Params["provider"]
+	permissionMode, _ := req.Params["permissionMode"].(string)
 	model, _ := req.Params["model"].(string)
 	apiProvider, _ := req.Params["provider"].(string)
+
+	// For tmux-attached agents, switch mode via Shift+Tab (no restart needed).
+	// Only applies when ONLY permissionMode is specified (no model/provider change).
+	if ag.AttachMode() == "tmux" && permissionMode != "" && !modelSpecified && !providerSpecified {
+		// Shift+Tab cycles modes in Claude TUI: bypassPermissions → plan → auto → ...
+		if err := ag.WriteInput("\x1b[Z"); err != nil {
+			return errResp(req.ID, -32000, "write shift-tab: "+err.Error()), nil
+		}
+		return okResp(req.ID, map[string]any{"id": id}), nil
+	}
 
 	provider := ag.Provider
 	cmd := ag.Cmd
 	args := ag.Args
 	var env []string
 
-	if modelSpecified || providerSpecified {
+	if modelSpecified || providerSpecified || permissionMode != "" {
 		// Use the requested provider if specified, otherwise keep existing
 		launchProvider := ag.Provider
 		if providerSpecified && apiProvider != "" {
 			launchProvider = apiProvider
+			provider = apiProvider
 		}
-		provider, cmd, args, env = resolveLaunch(launchProvider, ag.Cmd, ag.Args, "", model)
+		// Preserve conversation via --resume
+		resumeSessionID, _ := h.server.manager.GetResumeSessionID(id)
+		provider, cmd, args, env = resolveLaunch(launchProvider, ag.Cmd, ag.Args, resumeSessionID, model, permissionMode)
 	}
 
-	newID, err := h.server.manager.Create(ag.Name, provider, cmd, args, ag.WorkDir, env)
-	if err != nil {
+	// Restart in-place to keep the same agent ID and conversation history
+	if err := h.server.manager.RestartInPlace(id, provider, cmd, args, env); err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
-	resp := okResp(req.ID, map[string]any{"id": newID})
+	resp := okResp(req.ID, map[string]any{"id": id})
 	conn := h.conn
 	return resp, func() {
 		h.server.broadcast(event("agent.status_changed", map[string]any{
-			"agentId": newID, "status": "idle",
+			"agentId": id, "status": "idle",
 		}), conn)
 	}
 }
@@ -562,9 +580,36 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "agent not found")
 	}
 
-	isPipeMode := ag.Provider == "claude" && ag.Process() != nil
-	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil
+	attachMode := ag.AttachMode()
+	isTmuxAttached := attachMode == "tmux"
+	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
+	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
 	isOpenCode := ag.Provider == "opencode"
+
+	// For tmux-attached Claude sessions, write directly to PTY (don't restart)
+	if isTmuxAttached {
+		// Same as the generic PTY path below, but skip the opencode/fresh checks
+		if _, err := h.server.manager.RecordConversationEvent(agentID, map[string]any{
+			"role": "user",
+			"text": message,
+			"raw":  false,
+		}); err != nil {
+			return errResp(req.ID, -32000, "record user message: "+err.Error())
+		}
+		h.server.broadcast(event("conversation.message", map[string]any{
+			"agentId": agentID,
+			"role":    "user",
+			"text":    message,
+		}), nil)
+		input := message
+		if !raw {
+			input = message + "\n"
+		}
+		if err := ag.WriteInput(input); err != nil {
+			return errResp(req.ID, -32000, "write to tmux agent: "+err.Error())
+		}
+		return okResp(req.ID, map[string]any{"id": agentID})
+	}
 
 	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
@@ -655,8 +700,10 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 		log.Printf("[Restart] Resuming session %s for agent %s", resumeSessionID, ag.ID)
 	}
 
-	// Build args with resume session ID for conversation continuity
-	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
+	// Build args with resume session ID for conversation continuity.
+	// Preserve the current permission mode from agent's existing args.
+	mode := currentPermissionMode(ag.Args)
+	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args, env); err != nil {
 		return errResp(req.ID, -32000, "restart with message: "+err.Error())
@@ -705,8 +752,10 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 	// Get the stored resume session ID if any
 	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 
-	// Build args with the message as input
-	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "")
+	// Build args with the message as input.
+	// Preserve the current permission mode from agent's existing args.
+	mode := currentPermissionMode(ag.Args)
+	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	// Record user message first
 	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
@@ -1286,7 +1335,7 @@ func (h *handler) providerList(req RPCRequest) RPCResponse {
 	}
 
 	cmd := exec.Command("sqlite3", "-json", dbPath,
-		"SELECT id, name, api_url, is_active FROM providers WHERE app='claude'")
+		"SELECT id, name, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index, name")
 	out, err := cmd.Output()
 	if err != nil {
 		return errResp(req.ID, -32000, "read cc-switch db: "+err.Error())
@@ -1299,7 +1348,7 @@ func (h *handler) providerList(req RPCRequest) RPCResponse {
 
 	current := ""
 	for _, r := range rows {
-		if r["is_active"] == 1.0 || r["is_active"] == "1" {
+		if r["is_current"] == 1.0 || r["is_current"] == "1" || r["is_current"] == true {
 			if id, ok := r["id"].(string); ok {
 				current = id
 			}
@@ -1320,8 +1369,8 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "cc-switch not found")
 	}
 
-	// Get provider config from DB — use parameter substitution via printf to avoid injection
-	query := fmt.Sprintf("SELECT id, config_json FROM providers WHERE id='%s' AND app='claude'", providerID)
+	// Get provider config from DB
+	query := fmt.Sprintf("SELECT id, settings_config FROM providers WHERE id='%s' AND app_type='claude'", providerID)
 	cmd := exec.Command("sqlite3", "-json", dbPath, query)
 	out, err := cmd.Output()
 	if err != nil {
@@ -1333,7 +1382,7 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "provider not found: "+providerID)
 	}
 
-	configJSON, _ := rows[0]["config_json"].(string)
+	configJSON, _ := rows[0]["settings_config"].(string)
 	var providerConfig map[string]any
 	if err := json.Unmarshal([]byte(configJSON), &providerConfig); err != nil {
 		return errResp(req.ID, -32000, "parse provider config: "+err.Error())
@@ -1385,14 +1434,113 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "write settings: "+err.Error())
 	}
 
-	// Update is_active in DB
+	// Update is_current in DB
 	updateSQL := fmt.Sprintf(
-		"UPDATE providers SET is_active=0 WHERE app='claude'; UPDATE providers SET is_active=1 WHERE id='%s' AND app='claude'",
+		"UPDATE providers SET is_current=0 WHERE app_type='claude'; UPDATE providers SET is_current=1 WHERE id='%s' AND app_type='claude'",
 		providerID,
 	)
 	_ = exec.Command("sqlite3", dbPath, updateSQL).Run()
 
 	return okResp(req.ID, map[string]any{"ok": true, "providerId": providerID})
+}
+
+func (h *handler) providerAdd(req RPCRequest) RPCResponse {
+	name, _ := req.Params["name"].(string)
+	if name == "" {
+		return errResp(req.ID, -32602, "name is required")
+	}
+
+	dbPath := findCCSwitchDB()
+	if dbPath == "" {
+		// Create cc-switch directory and DB if not exists
+		home, _ := os.UserHomeDir()
+		ccDir := filepath.Join(home, ".cc-switch")
+		_ = os.MkdirAll(ccDir, 0755)
+		dbPath = filepath.Join(ccDir, "cc-switch.db")
+		// Initialize table
+		initSQL := `CREATE TABLE IF NOT EXISTS providers (
+			id TEXT NOT NULL,
+			app_type TEXT NOT NULL,
+			name TEXT NOT NULL,
+			settings_config TEXT NOT NULL,
+			website_url TEXT,
+			category TEXT,
+			created_at INTEGER,
+			sort_index INTEGER,
+			notes TEXT,
+			icon TEXT,
+			icon_color TEXT,
+			meta TEXT NOT NULL DEFAULT '{}',
+			is_current BOOLEAN NOT NULL DEFAULT 0,
+			in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+			cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+			limit_daily_usd TEXT,
+			limit_monthly_usd TEXT,
+			provider_type TEXT,
+			PRIMARY KEY (id, app_type)
+		)`
+		_ = exec.Command("sqlite3", dbPath, initSQL).Run()
+	}
+
+	// Generate UUID for new provider
+	id := generateUUID()
+
+	// Build settings_config from params
+	baseURL, _ := req.Params["baseUrl"].(string)
+	authToken, _ := req.Params["authToken"].(string)
+	model, _ := req.Params["model"].(string)
+
+	settingsConfig := map[string]any{}
+	env := map[string]any{}
+	if baseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = baseURL
+	}
+	if authToken != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = authToken
+	}
+	if model != "" {
+		env["ANTHROPIC_MODEL"] = model
+		settingsConfig["model"] = model
+	}
+	if len(env) > 0 {
+		settingsConfig["env"] = env
+	}
+	settingsJSON, _ := json.Marshal(settingsConfig)
+
+	now := time.Now().Unix()
+	// Use sqlite3 to insert
+	args := []string{dbPath,
+		fmt.Sprintf(".mode insert providers"),
+		fmt.Sprintf("SELECT '%s','claude','%s','%s','','',%d,0,'','','','{}',0,0,'1.0','',''", id, name, string(settingsJSON), now),
+	}
+	insertOut, insertErr := exec.Command("sqlite3", args...).CombinedOutput()
+	if insertErr != nil {
+		// Fallback: use raw SQL
+		escapedName := strings.ReplaceAll(name, "'", "''")
+		escapedConfig := strings.ReplaceAll(string(settingsJSON), "'", "''")
+		insertSQL := fmt.Sprintf(
+			"INSERT INTO providers (id, app_type, name, settings_config, created_at, sort_index, meta, is_current, in_failover_queue, cost_multiplier) VALUES ('%s', 'claude', '%s', '%s', %d, 0, '{}', 0, 0, '1.0')",
+			id, escapedName, escapedConfig, now,
+		)
+		if err := exec.Command("sqlite3", dbPath, insertSQL).Run(); err != nil {
+			return errResp(req.ID, -32000, "insert provider: "+err.Error()+"; "+string(insertOut))
+		}
+	}
+
+	return okResp(req.ID, map[string]any{"ok": true, "id": id, "name": name})
+}
+
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		binary.BigEndian.Uint32(b[0:4]),
+		binary.BigEndian.Uint16(b[4:6]),
+		binary.BigEndian.Uint16(b[6:8]),
+		binary.BigEndian.Uint16(b[8:10]),
+		b[10:16])
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.

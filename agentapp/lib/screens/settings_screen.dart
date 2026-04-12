@@ -1,10 +1,17 @@
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../providers/connection_provider.dart';
 import '../models/connection_config.dart';
+import '../services/apk_downloader.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -40,7 +47,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     context.go('/connections');
   }
 
-  /// Derive HTTP base URL from the WebSocket URL.
   /// ws://host:port/ws  ->  http://host:port
   String? _httpBase(String wsUrl) {
     try {
@@ -55,49 +61,77 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _checkForUpdate(BuildContext context) async {
     final client = ref.read(connectionProvider);
     if (client == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先连接到网关')),
-      );
+      _snack('请先连接到网关');
       return;
     }
 
     final base = _httpBase(client.url);
     if (base == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法解析网关地址')),
-      );
+      _snack('无法解析网关地址');
       return;
     }
 
-    final apkUrl = Uri.parse('$base/apk?token=${Uri.encodeComponent(client.token)}');
-
+    // Fetch version info first
     if (!context.mounted) return;
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('检查更新'),
-        content: Text('从网关下载最新 APK？\n\n$base/apk'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              if (await canLaunchUrl(apkUrl)) {
-                await launchUrl(apkUrl, mode: LaunchMode.externalApplication);
-              } else if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('无法打开下载链接')),
-                );
-              }
-            },
-            child: const Text('下载更新'),
-          ),
-        ],
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('正在检查更新...'),
+          ],
+        ),
       ),
     );
+
+    try {
+      final versionUrl = Uri.parse('$base/apk/version?token=${Uri.encodeComponent(client.token)}');
+      final resp = await http.get(versionUrl).timeout(const Duration(seconds: 10));
+
+      if (!context.mounted) return;
+      Navigator.pop(context); // dismiss checking dialog
+
+      if (resp.statusCode != 200) {
+        _snack(resp.statusCode == 404 ? '网关上没有 APK 文件' : 'HTTP ${resp.statusCode}');
+        return;
+      }
+
+      final info = jsonDecode(resp.body) as Map<String, dynamic>;
+      final size = info['size'] as int? ?? 0;
+      final modifiedAt = info['modifiedAt'] as String? ?? '';
+
+      if (!context.mounted) return;
+      _showDownloadDialog(context, base, client.token, size, modifiedAt);
+    } catch (e) {
+      if (context.mounted) Navigator.pop(context);
+      _snack('检查更新失败: $e');
+    }
+  }
+
+  void _showDownloadDialog(
+    BuildContext context,
+    String base,
+    String token,
+    int totalSize,
+    String modifiedAt,
+  ) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _DownloadDialog(
+        apkUrl: '$base/apk?token=${Uri.encodeComponent(token)}',
+        totalSize: totalSize,
+        modifiedAt: modifiedAt,
+      ),
+    );
+  }
+
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   @override
@@ -108,7 +142,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       appBar: AppBar(title: const Text('设置')),
       body: ListView(
         children: [
-          // Connection status section
           ListTile(
             leading: Icon(
               client != null ? Icons.wifi : Icons.wifi_off,
@@ -119,7 +152,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             onTap: client != null ? _disconnect : () => context.go('/connections'),
           ),
           const Divider(),
-          // Saved connections
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text('保存的连接', style: TextStyle(color: Colors.grey, fontSize: 13)),
@@ -156,10 +188,277 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           const ListTile(
             leading: Icon(Icons.info_outline),
             title: Text('Agent Manager'),
-            subtitle: Text('v1.0.0 — Multi-AI-Agent Remote Manager'),
+            subtitle: Text('v0.2.2 — Multi-AI-Agent Remote Manager'),
           ),
         ],
       ),
     );
+  }
+}
+
+// ─── Download Dialog with progress ───────────────────────────────────
+
+class _DownloadDialog extends StatefulWidget {
+  final String apkUrl;
+  final int totalSize;
+  final String modifiedAt;
+
+  const _DownloadDialog({
+    required this.apkUrl,
+    required this.totalSize,
+    required this.modifiedAt,
+  });
+
+  @override
+  State<_DownloadDialog> createState() => _DownloadDialogState();
+}
+
+enum _DlState { idle, downloading, paused, done, error }
+
+class _DownloadDialogState extends State<_DownloadDialog> {
+  _DlState _state = _DlState.idle;
+  ApkDownloader? _downloader;
+  String? _savePath;
+  String _errorMsg = '';
+  String _versionLabel = '';
+
+  int _received = 0;
+  int _total = -1;
+  double _speed = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _total = widget.totalSize;
+    _initVersionLabel();
+  }
+
+  Future<void> _initVersionLabel() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) {
+      setState(() {
+        _versionLabel = info.version;
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _downloader?.cancel();
+    super.dispose();
+  }
+
+  /// Download to external storage Download directory with version-stamped filename.
+  Future<String> _getSavePath() async {
+    if (_savePath != null) return _savePath!;
+    // Use external storage Downloads directory
+    final dir = await getExternalStorageDirectory();
+    final downloadsDir = dir != null
+        ? Directory('${dir.parent.parent.parent.parent.path}/Download')
+        : await getTemporaryDirectory();
+    if (!await downloadsDir.exists()) {
+      await downloadsDir.create(recursive: true);
+    }
+    // Clean up old agentapp APKs first
+    try {
+      await for (final f in downloadsDir.list()) {
+        if (f.path.contains('agentapp') && f.path.endsWith('.apk')) {
+          await f.delete();
+        }
+      }
+    } catch (_) {}
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    _savePath =
+        '${downloadsDir.path}/agentapp-v${_versionLabel.isNotEmpty ? _versionLabel : 'unknown'}-$timestamp.apk';
+    return _savePath!;
+  }
+
+  Future<void> _startDownload() async {
+    final path = await _getSavePath();
+    setState(() {
+      _state = _DlState.downloading;
+      _errorMsg = '';
+    });
+
+    _downloader = ApkDownloader(
+      url: widget.apkUrl,
+      savePath: path,
+      onProgress: (p) {
+        if (mounted) {
+          setState(() {
+            _received = p.received;
+            _total = p.total;
+            _speed = p.speed;
+          });
+        }
+      },
+    );
+
+    try {
+      await _downloader!.download();
+      if (mounted) setState(() => _state = _DlState.done);
+    } catch (e) {
+      if (mounted) {
+        final msg = e.toString();
+        if (msg.contains('取消')) {
+          setState(() => _state = _DlState.paused);
+        } else {
+          setState(() {
+            _state = _DlState.error;
+            _errorMsg = msg;
+          });
+        }
+      }
+    }
+  }
+
+  void _pause() {
+    _downloader?.cancel();
+    _downloader = null;
+    if (mounted) setState(() => _state = _DlState.paused);
+  }
+
+  void _resume() => _startDownload(); // ApkDownloader checks existing bytes
+
+  Future<void> _install() async {
+    if (_savePath == null) return;
+    final file = File(_savePath!);
+    if (!await file.exists()) return;
+
+    // Make file world-readable so PackageInstaller can access it
+    try {
+      await Process.run('chmod', ['644', _savePath!]);
+    } catch (_) {}
+
+    // Trigger APK install via Android Intent
+    // Uses platform channel: open_file or direct method channel
+    try {
+      final result = await _installChannel.invokeMethod('installApk', {'path': _savePath});
+      if (!mounted) return;
+      if (result == true) {
+        Navigator.pop(context);
+      } else {
+        // Fallback: tell user where the file is
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('APK 已保存到: $_savePath')),
+        );
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('安装失败: $e\n文件路径: $_savePath')),
+      );
+      Navigator.pop(context);
+    }
+  }
+
+  static final _installChannel = const MethodChannel('com.phonetalk.agentapp/install');
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
+
+  String _formatSpeed(double bps) {
+    if (bps <= 0) return '--';
+    if (bps < 1024) return '${bps.toStringAsFixed(0)} B/s';
+    if (bps < 1024 * 1024) return '${(bps / 1024).toStringAsFixed(1)} KB/s';
+    return '${(bps / 1024 / 1024).toStringAsFixed(1)} MB/s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('更新 APK'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (widget.modifiedAt.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text('更新时间: ${widget.modifiedAt}',
+                  style: const TextStyle(fontSize: 13, color: Colors.grey)),
+            ),
+          Text('大小: ${_formatBytes(widget.totalSize)}',
+              style: const TextStyle(fontSize: 13, color: Colors.grey)),
+          const SizedBox(height: 16),
+
+          // Progress bar
+          if (_state == _DlState.downloading || _state == _DlState.paused || _state == _DlState.done)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                LinearProgressIndicator(
+                  value: _total > 0 ? _received / _total : null,
+                  minHeight: 6,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('${_formatBytes(_received)} / ${_total > 0 ? _formatBytes(_total) : "?"}',
+                        style: const TextStyle(fontSize: 12)),
+                    if (_state == _DlState.downloading)
+                      Text(_formatSpeed(_speed), style: const TextStyle(fontSize: 12)),
+                    if (_state == _DlState.paused)
+                      const Text('已暂停', style: TextStyle(fontSize: 12, color: Colors.orange)),
+                    if (_state == _DlState.done)
+                      const Text('完成', style: TextStyle(fontSize: 12, color: Colors.green)),
+                  ],
+                ),
+              ],
+            ),
+
+          if (_state == _DlState.error)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_errorMsg,
+                  style: const TextStyle(color: Colors.red, fontSize: 13)),
+            ),
+        ],
+      ),
+      actions: _buildActions(),
+    );
+  }
+
+  List<Widget> _buildActions() {
+    switch (_state) {
+      case _DlState.idle:
+        return [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          FilledButton(onPressed: _startDownload, child: const Text('开始下载')),
+        ];
+      case _DlState.downloading:
+        return [
+          TextButton(onPressed: _pause, child: const Text('暂停')),
+        ];
+      case _DlState.paused:
+        return [
+          TextButton(
+            onPressed: () {
+              // Delete partial file and close
+              if (_savePath != null) {
+                File(_savePath!).delete().catchError((_) => File(_savePath!));
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('取消'),
+          ),
+          FilledButton(onPressed: _resume, child: const Text('继续下载')),
+        ];
+      case _DlState.done:
+        return [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
+          FilledButton(onPressed: _install, child: const Text('安装')),
+        ];
+      case _DlState.error:
+        return [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
+          FilledButton(onPressed: _startDownload, child: const Text('重试')),
+        ];
+    }
   }
 }

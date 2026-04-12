@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"log"
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -28,8 +29,11 @@ type ConversationEvent struct {
 }
 
 // ClaudeWatcher tails a Claude Code JSONL session file and emits ConversationEvents.
+// It also auto-detects when a newer session file appears (e.g. after /clear) and switches to it.
 type ClaudeWatcher struct {
-	path     string
+	path     string // current JSONL file path
+	workDir  string // project working directory (for finding newer sessions)
+	pid      int    // Claude process PID (for session lookup)
 	callback func(ConversationEvent)
 	stop     chan struct{}
 	once     sync.Once
@@ -38,6 +42,16 @@ type ClaudeWatcher struct {
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
 	return &ClaudeWatcher{path: path, callback: callback, stop: make(chan struct{})}
+}
+
+// SetWorkDir sets the project directory used for auto-detecting newer session files.
+func (w *ClaudeWatcher) SetWorkDir(dir string) {
+	w.workDir = dir
+}
+
+// SetPID sets the Claude process PID for session tracking.
+func (w *ClaudeWatcher) SetPID(pid int) {
+	w.pid = pid
 }
 
 func (w *ClaudeWatcher) Start() error {
@@ -56,14 +70,79 @@ func (w *ClaudeWatcher) Stop() {
 func (w *ClaudeWatcher) loop() {
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
+	refreshTicker := time.NewTicker(5 * time.Second)
+	defer refreshTicker.Stop()
 	for {
 		select {
 		case <-w.stop:
 			return
 		case <-ticker.C:
 			_ = w.poll()
+		case <-refreshTicker.C:
+			w.refreshSessionFile()
 		}
 	}
+}
+
+// refreshSessionFile finds the most recently modified .jsonl in the project
+// directory and switches to it if it differs from the current file.
+// After /clear, Claude creates a new session file — this detects it by mtime.
+func (w *ClaudeWatcher) refreshSessionFile() {
+	if w.workDir == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	projectsDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
+
+	// Find the most recently modified .jsonl in the project directory.
+	// The active session is always the one being written to, so it has
+	// the latest mtime. After /clear, the new session file will quickly
+	// become the most recently modified.
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return
+	}
+
+	var bestPath string
+	var bestMtime time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+			continue
+		}
+		fi, err := e.Info()
+		if err != nil {
+			continue
+		}
+		mt := fi.ModTime()
+		if mt.After(bestMtime) {
+			bestMtime = mt
+			bestPath = filepath.Join(projectsDir, e.Name())
+		}
+	}
+
+	// Switch only if we found a different file
+	if bestPath != "" && bestPath != w.path {
+		w.switchToFile(bestPath)
+	}
+}
+
+
+func (w *ClaudeWatcher) switchToFile(newPath string) {
+	oldPath := w.path
+	w.path = newPath
+	w.offset = 0
+	log.Printf("[Watcher] Switching session file: %s -> %s", oldPath, newPath)
+}
+
+func projectDirName(workDir string) string {
+	// Must match Claude's project directory naming: replace / . _ with -
+	s := strings.ReplaceAll(strings.TrimRight(workDir, "/"), "/", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	return s
 }
 
 func (w *ClaudeWatcher) poll() error {
@@ -112,7 +191,7 @@ func (w *ClaudeWatcher) poll() error {
 type claudeLine struct {
 	Type    string `json:"type"`
 	Message struct {
-		Role    string `json:"role"`
+		Role    string      `json:"role"`
 		Content interface{} `json:"content"` // Can be string or array
 	} `json:"message"`
 }

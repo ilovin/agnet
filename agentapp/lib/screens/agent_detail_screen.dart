@@ -584,6 +584,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   // true = auto-resolve (default for mobile), false = manual confirmation
   bool _autoResolvePermissions = true;
 
+  // Current agent mode (e.g. bypassPermissions, plan)
+  String _currentMode = 'bypassPermissions';
+
   @override
   void initState() {
     super.initState();
@@ -742,6 +745,21 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final permissionRequests = (raw['permissionRequests'] as List?) ?? [];
       if (!mounted) return;
+
+      // Detect sequence regression (e.g. after /clear resets server history)
+      if (lastSeq < _lastSeq && lastSeq >= 0) {
+        debugPrint('seq regression detected: server=$lastSeq local=$_lastSeq, reloading history');
+        _pollingNewEvents = false;
+        setState(() {
+          _rawEvents.clear();
+          _lastSeq = 0;
+          _oldestSeq = 0;
+          _hasMoreHistory = true;
+          _initialLoading = true;
+        });
+        _loadHistory();
+        return;
+      }
 
       if (events.isNotEmpty) {
         // Deduplicate by seq before appending
@@ -1055,6 +1073,58 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
   }
 
+  Future<void> _switchMode(String mode) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('切换权限模式'),
+        content: Text('切换到 ${_modeLabel(mode)} 模式。对话历史将通过 --resume 保留。确定要切换吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    setState(() => _currentMode = mode);
+    try {
+      final result = await client.call('agent.restart', {
+        'nodeId': widget.nodeId,
+        'agentId': widget.agentId,
+        'permissionMode': mode,
+      });
+      final map = result is Map
+          ? Map<String, dynamic>.from(result)
+          : <String, dynamic>{};
+      // Agent ID stays the same — just refresh the agent list
+      final listResult = await client.call('agent.list', {
+        'nodeId': widget.nodeId,
+      });
+      final agents = (listResult is List
+          ? listResult
+          : (listResult['agents'] as List?) ?? []);
+      ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
+    } catch (e) {
+      debugPrint('switchMode error: $e');
+    }
+  }
+
+  String _modeLabel(String modeId) {
+    final allModes = [...kClaudeModes, ...kOpenCodeModes];
+    return allModes
+        .firstWhere((m) => m.id == modeId, orElse: () => AgentMode(id: modeId, label: modeId, icon: Icons.help))
+        .label;
+  }
+
   Future<void> _switchProvider(String providerId) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
@@ -1280,9 +1350,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               agent: agent,
               nodeId: widget.nodeId,
               stopping: _stopping,
+              currentMode: _currentMode,
               onControl: _control,
               onSwitchModel: _switchModel,
               onSwitchProvider: _switchProvider,
+              onSwitchMode: _switchMode,
             ),
           // Messages
           Expanded(
@@ -1409,17 +1481,21 @@ class _ControlBar extends ConsumerStatefulWidget {
   final AgentModel agent;
   final String nodeId;
   final bool stopping;
+  final String currentMode;
   final Future<void> Function(String action) onControl;
   final Future<void> Function(String model) onSwitchModel;
   final Future<void> Function(String providerId) onSwitchProvider;
+  final Future<void> Function(String mode) onSwitchMode;
 
   const _ControlBar({
     required this.agent,
     required this.nodeId,
     required this.stopping,
+    required this.currentMode,
     required this.onControl,
     required this.onSwitchModel,
     required this.onSwitchProvider,
+    required this.onSwitchMode,
   });
 
   @override
@@ -1427,6 +1503,59 @@ class _ControlBar extends ConsumerStatefulWidget {
 }
 
 class _ControlBarState extends ConsumerState<_ControlBar> {
+  List<Widget> _buildModeSelector(BuildContext context) {
+    final modes = modesForProvider(widget.agent.provider);
+    if (modes.isEmpty) return [];
+    final scheme = Theme.of(context).colorScheme;
+    final current = modes.firstWhere(
+      (m) => m.id == widget.currentMode,
+      orElse: () => modes.first,
+    );
+    return [
+      PopupMenuButton<String>(
+        tooltip: '切换权限模式',
+        onSelected: (id) {
+          if (id != widget.currentMode) widget.onSwitchMode(id);
+        },
+        itemBuilder: (_) => modes.map((m) {
+          final active = m.id == widget.currentMode;
+          return PopupMenuItem<String>(
+            value: m.id,
+            child: Row(
+              children: [
+                if (active) ...[
+                  const Icon(Icons.check, size: 16),
+                  const SizedBox(width: 4),
+                ] else
+                  const SizedBox(width: 20),
+                Icon(m.icon, size: 16),
+                const SizedBox(width: 6),
+                Text(m.label, style: TextStyle(
+                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                )),
+              ],
+            ),
+          );
+        }).toList(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(current.icon, size: 16, color: scheme.primary),
+              const SizedBox(width: 3),
+              Text(current.label, style: TextStyle(
+                fontSize: 12, color: scheme.primary, fontWeight: FontWeight.w600,
+              )),
+              const Icon(Icons.arrow_drop_down, size: 16),
+            ],
+          ),
+        ),
+      ),
+      const SizedBox(width: 2),
+    ];
+  }
+
   Future<Map<String, dynamic>>? _providerListFuture;
 
   @override
@@ -1447,20 +1576,117 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
     });
   }
 
+  void _showAddProviderDialog(BuildContext context) {
+    final nameCtrl = TextEditingController();
+    final urlCtrl = TextEditingController();
+    final tokenCtrl = TextEditingController();
+    final modelCtrl = TextEditingController();
+    String error = '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('新增 Provider'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '名称 *',
+                    hintText: 'My Provider',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: urlCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'API Base URL',
+                    hintText: 'https://api.anthropic.com',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tokenCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Auth Token',
+                    hintText: 'sk-...',
+                    isDense: true,
+                  ),
+                  obscureText: true,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: modelCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '模型',
+                    hintText: 'claude-sonnet-4-6',
+                    isDense: true,
+                  ),
+                ),
+                if (error.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(error, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (nameCtrl.text.trim().isEmpty) {
+                  setDialogState(() => error = '名称不能为空');
+                  return;
+                }
+                final client = ref.read(connectionProvider);
+                if (client == null) return;
+                try {
+                  await client.call('provider.add', {
+                    'nodeId': widget.nodeId,
+                    'name': nameCtrl.text.trim(),
+                    'baseUrl': urlCtrl.text.trim(),
+                    'authToken': tokenCtrl.text.trim(),
+                    'model': modelCtrl.text.trim(),
+                  });
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  // Refresh provider list
+                  _fetchProviders();
+                } catch (e) {
+                  setDialogState(() => error = e.toString());
+                }
+              },
+              child: const Text('添加'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final stopped =
         widget.agent.status == AgentStatus.stopped ||
         widget.agent.status == AgentStatus.crashed;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
         border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
         children: [
+          // Mode selector dropdown
+          ..._buildModeSelector(context),
           if (widget.agent.provider == 'claude') ...[
             // Dynamic provider selector from cc-switch
             FutureBuilder<Map<String, dynamic>>(
@@ -1470,27 +1696,43 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                 final providers = (data['providers'] as List?) ?? [];
                 final current = data['current'] as String? ?? '';
 
+                // Find current provider name for display
+                String currentName = 'Provider';
+                if (current.isNotEmpty) {
+                  for (final p in providers) {
+                    if ((p['id'] ?? '') == current) {
+                      currentName = (p['name'] ?? current).toString();
+                      break;
+                    }
+                  }
+                }
+
                 if (providers.isEmpty) {
                   // Fallback to static list when cc-switch is not available
                   return PopupMenuButton<String>(
                     tooltip: '切换 Provider',
                     onSelected: (id) {
-                      // Static providers map to agent.restart provider param
-                      widget.onSwitchProvider(id);
+                      if (id == '__add__') {
+                        _showAddProviderDialog(context);
+                      } else {
+                        widget.onSwitchProvider(id);
+                      }
                     },
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'claude', child: Text('Anthropic (Default)')),
-                      PopupMenuItem(value: 'claude-bedrock', child: Text('AWS Bedrock')),
-                      PopupMenuItem(value: 'claude-vertex', child: Text('Google Vertex')),
+                    itemBuilder: (_) => [
+                      const PopupMenuItem(value: 'claude', child: Text('Anthropic (Default)')),
+                      const PopupMenuItem(value: 'claude-bedrock', child: Text('AWS Bedrock')),
+                      const PopupMenuItem(value: 'claude-vertex', child: Text('Google Vertex')),
+                      const PopupMenuDivider(),
+                      const PopupMenuItem(value: '__add__', child: Text('＋ 新增 Provider')),
                     ],
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.cloud, size: 18),
-                          SizedBox(width: 4),
-                          Text('Provider'),
+                          const Icon(Icons.cloud, size: 16),
+                          const SizedBox(width: 3),
+                          Text(currentName, style: const TextStyle(fontSize: 12)),
                         ],
                       ),
                     ),
@@ -1499,33 +1741,43 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
 
                 return PopupMenuButton<String>(
                   tooltip: '切换 Provider',
-                  onSelected: widget.onSwitchProvider,
-                  itemBuilder: (_) => providers.map((p) {
-                    final id = (p['id'] ?? '').toString();
-                    final name = (p['name'] ?? id).toString();
-                    final isActive = id == current;
-                    return PopupMenuItem<String>(
-                      value: id,
-                      child: Row(
-                        children: [
-                          if (isActive) ...[
-                            const Icon(Icons.check, size: 16),
-                            const SizedBox(width: 4),
-                          ] else
-                            const SizedBox(width: 20),
-                          Text(name),
-                        ],
-                      ),
-                    );
-                  }).toList(),
+                  onSelected: (id) {
+                    if (id == '__add__') {
+                      _showAddProviderDialog(context);
+                    } else {
+                      widget.onSwitchProvider(id);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    ...providers.map((p) {
+                      final id = (p['id'] ?? '').toString();
+                      final name = (p['name'] ?? id).toString();
+                      final isActive = id == current;
+                      return PopupMenuItem<String>(
+                        value: id,
+                        child: Row(
+                          children: [
+                            if (isActive) ...[
+                              const Icon(Icons.check, size: 16),
+                              const SizedBox(width: 4),
+                            ] else
+                              const SizedBox(width: 20),
+                            Text(name),
+                          ],
+                        ),
+                      );
+                    }),
+                    const PopupMenuDivider(),
+                    const PopupMenuItem(value: '__add__', child: Text('＋ 新增 Provider')),
+                  ],
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.cloud, size: 18),
-                        const SizedBox(width: 4),
-                        Text(current.isNotEmpty ? 'Provider' : 'Provider'),
+                        const Icon(Icons.cloud, size: 16),
+                        const SizedBox(width: 3),
+                        Text(currentName, style: const TextStyle(fontSize: 12)),
                       ],
                     ),
                   ),
@@ -1550,26 +1802,28 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                 ),
               ],
               child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 8),
+                padding: EdgeInsets.symmetric(horizontal: 4),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.psychology, size: 18),
-                    SizedBox(width: 4),
-                    Text('模型'),
+                    Icon(Icons.psychology, size: 16),
+                    SizedBox(width: 3),
+                    Text('模型', style: TextStyle(fontSize: 12)),
                   ],
                 ),
               ),
             ),
           ],
+          const Spacer(),
           if (stopped)
-            TextButton.icon(
+            IconButton(
               onPressed: () => widget.onControl('restart'),
               icon: const Icon(Icons.play_arrow, size: 18),
-              label: const Text('启动'),
+              tooltip: '启动',
+              visualDensity: VisualDensity.compact,
             ),
           if (!stopped)
-            TextButton.icon(
+            IconButton(
               onPressed: widget.stopping ? null : () => widget.onControl('stop'),
               icon: widget.stopping
                   ? const SizedBox(
@@ -1578,13 +1832,14 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.stop, size: 18),
-              label: Text(widget.stopping ? '停止中…' : '停止'),
+              tooltip: widget.stopping ? '停止中…' : '停止',
+              visualDensity: VisualDensity.compact,
             ),
-          const SizedBox(width: 8),
-          TextButton.icon(
+          IconButton(
             onPressed: () => widget.onControl('restart'),
             icon: const Icon(Icons.refresh, size: 18),
-            label: const Text('重启'),
+            tooltip: '重启',
+            visualDensity: VisualDensity.compact,
           ),
         ],
       ),
@@ -2154,6 +2409,36 @@ String keyToDisplay(String key) {
   }
 }
 
+/// Mode definitions per provider.
+class AgentMode {
+  final String id;
+  final String label;
+  final IconData icon;
+  const AgentMode({required this.id, required this.label, required this.icon});
+}
+
+const kClaudeModes = [
+  AgentMode(id: 'bypassPermissions', label: 'Build', icon: Icons.build),
+  AgentMode(id: 'plan', label: 'Plan', icon: Icons.architecture),
+  AgentMode(id: 'auto', label: 'Auto', icon: Icons.auto_mode),
+];
+
+const kOpenCodeModes = [
+  AgentMode(id: 'plan', label: 'Plan', icon: Icons.architecture),
+  AgentMode(id: 'build', label: 'Build', icon: Icons.build),
+];
+
+List<AgentMode> modesForProvider(String provider) {
+  switch (provider) {
+    case 'claude':
+      return kClaudeModes;
+    case 'opencode':
+      return kOpenCodeModes;
+    default:
+      return [];
+  }
+}
+
 bool shouldShowTerminalControls(String provider) {
   return provider != 'claude';
 }
@@ -2273,6 +2558,13 @@ const kSlashCommands = [
   SlashCommand('/bug', '报告 bug'),
   SlashCommand('/login', '登录账户'),
   SlashCommand('/logout', '登出账户'),
+  SlashCommand('/skill', '调用内置技能'),
+  SlashCommand('/fast', '切换快速模式'),
+  SlashCommand('/commit', '生成 commit'),
+  SlashCommand('/plan', '进入规划模式'),
+  SlashCommand('/mcp', '管理 MCP 服务器'),
+  SlashCommand('/permissions', '管理权限'),
+  SlashCommand('/config', '查看/修改配置'),
 ];
 
 class _InputBar extends StatefulWidget {
@@ -2442,7 +2734,7 @@ class _InputBarState extends State<_InputBar> {
                           style: const TextStyle(fontSize: 12),
                         ),
                         onTap: () {
-                          widget.controller.text = '\${cmd.command} ';
+                          widget.controller.text = '${cmd.command} ';
                           widget.controller.selection =
                               TextSelection.fromPosition(
                             TextPosition(
