@@ -66,7 +66,8 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename",
 		"conversation.history", "conversation.send", "conversation.key",
 		"session.list", "session.create", "session.attach", "session.catalog",
-		"provider.list", "provider.switch", "provider.add":
+		"provider.list", "provider.switch", "provider.add",
+		"system.info":
 		return dispatchResult{resp: h.proxyToNode(req)}
 	case "node.rename":
 		return dispatchResult{resp: h.nodeRename(req)}
@@ -76,6 +77,8 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return dispatchResult{resp: h.sessionCatalogAll(req)}
 	case "system.health":
 		return dispatchResult{resp: h.systemHealth(req)}
+	case "rpc.ping":
+		return dispatchResult{resp: okResp(req.ID, map[string]any{"ok": true, "time": time.Now().Unix()})}
 	default:
 		return dispatchResult{resp: errResp(req.ID, -32601, "method not found: "+req.Method)}
 	}

@@ -9,7 +9,11 @@
 # Go binaries
 agentd/agentd
 agentd/agentd-linux
+agentd/agentd-linux-new
+agentd/agentd.bak
+agentd/EOF
 agentgw/agentgw
+agentgw/agentapp.apk
 
 # Flutter build
 agentapp/build/

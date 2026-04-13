@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
-	provider, cmd, args, env := resolveLaunch("claude", "", nil, "abc123", "claude-sonnet-4-6")
+	provider, cmd, args, env := resolveLaunch("claude", "", nil, "abc123", "claude-sonnet-4-6", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -37,7 +37,7 @@ func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
 }
 
 func TestResolveLaunchOpencodeSession(t *testing.T) {
-	provider, cmd, args, _ := resolveLaunch("opencode", "", []string{"ignored"}, "ses_123", "")
+	provider, cmd, args, _ := resolveLaunch("opencode", "", []string{"ignored"}, "ses_123", "", "")
 	if provider != "opencode" {
 		t.Fatalf("provider = %q, want opencode", provider)
 	}
@@ -56,7 +56,7 @@ func TestResolveLaunchOpencodeSession(t *testing.T) {
 }
 
 func TestResolveLaunchDefaultProviderUsesClaude(t *testing.T) {
-	provider, cmd, args, _ := resolveLaunch("", "", nil, "", "")
+	provider, cmd, args, _ := resolveLaunch("", "", nil, "", "", "")
 	if provider != "" {
 		t.Fatalf("provider = %q, want empty", provider)
 	}
@@ -75,7 +75,7 @@ func TestResolveLaunchDefaultProviderUsesClaude(t *testing.T) {
 }
 
 func TestResolveLaunchBedrockSetsEnvAndNormalizesProvider(t *testing.T) {
-	provider, cmd, _, env := resolveLaunch("claude-bedrock", "", nil, "", "")
+	provider, cmd, _, env := resolveLaunch("claude-bedrock", "", nil, "", "", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -94,7 +94,7 @@ func TestResolveLaunchBedrockSetsEnvAndNormalizesProvider(t *testing.T) {
 }
 
 func TestResolveLaunchVertexSetsEnvAndNormalizesProvider(t *testing.T) {
-	provider, cmd, _, env := resolveLaunch("claude-vertex", "", nil, "", "")
+	provider, cmd, _, env := resolveLaunch("claude-vertex", "", nil, "", "", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -109,5 +109,46 @@ func TestResolveLaunchVertexSetsEnvAndNormalizesProvider(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("env = %v, want CLAUDE_CODE_USE_VERTEX=1", env)
+	}
+}
+
+func TestResolveLaunchOpencodeWithModel(t *testing.T) {
+	provider, cmd, args, _ := resolveLaunch("opencode", "", nil, "ses_abc", "tb-api/claude-sonnet-4-6", "")
+	if provider != "opencode" {
+		t.Fatalf("provider = %q, want opencode", provider)
+	}
+	if filepath.Base(cmd) != "opencode" {
+		t.Fatalf("cmd = %q, want basename opencode", cmd)
+	}
+	want := []string{"-s", "ses_abc", "-m", "tb-api/claude-sonnet-4-6"}
+	if len(args) != len(want) {
+		t.Fatalf("args len = %d, want %d (%v)", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q (all=%v)", i, args[i], want[i], args)
+		}
+	}
+}
+
+func TestResolveLaunchOpencodeModelWithoutSession(t *testing.T) {
+	_, _, args, _ := resolveLaunch("opencode", "", nil, "", "ADVibe/Kimi-K2.5", "")
+	want := []string{"-m", "ADVibe/Kimi-K2.5"}
+	if len(args) != len(want) {
+		t.Fatalf("args len = %d, want %d (%v)", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q (all=%v)", i, args[i], want[i], args)
+		}
+	}
+}
+
+func TestCurrentOpenCodeModel(t *testing.T) {
+	if got := currentOpenCodeModel([]string{"-s", "ses_123", "-m", "tb-api/claude-sonnet-4-6"}); got != "tb-api/claude-sonnet-4-6" {
+		t.Fatalf("got %q, want tb-api/claude-sonnet-4-6", got)
+	}
+	if got := currentOpenCodeModel([]string{"-s", "ses_123"}); got != "" {
+		t.Fatalf("got %q, want empty", got)
 	}
 }

@@ -214,6 +214,10 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 	// Try current user's home first
 	sessionID := readClaudeSessionID(home, pid)
 	if sessionID != "" {
+		// Verify PID is still a Claude process (prevent PID reuse attack)
+		if !isClaudeProcess(pid) {
+			return "", ""
+		}
 		return sessionID, findClaudeSessionFile(home, sessionID, workDir)
 	}
 
@@ -228,6 +232,10 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 				userHome := filepath.Join("/home", entry.Name())
 				sessionID = readClaudeSessionID(userHome, pid)
 				if sessionID != "" {
+					// Verify PID is still a Claude process (prevent PID reuse attack)
+					if !isClaudeProcess(pid) {
+						return "", ""
+					}
 					return sessionID, findClaudeSessionFile(userHome, sessionID, workDir)
 				}
 			}
@@ -250,6 +258,21 @@ func readClaudeSessionID(home string, pid int) string {
 		return ""
 	}
 	return pidInfo.SessionID
+}
+
+func isClaudeProcess(pid int) bool {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		// On non-Linux systems (e.g., macOS), /proc doesn't exist.
+		// Skip validation on these platforms as PID reuse is less of a concern.
+		if os.IsNotExist(err) {
+			return true
+		}
+		return false
+	}
+	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+	return strings.Contains(cmdline, "claude")
 }
 
 func findClaudeSessionFile(home, sessionID, workDir string) string {
@@ -320,7 +343,84 @@ func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {
 		)
 	}
 
-	// Find the most recently modified session file across all directories
+	// First: try to find session file by workDir matching
+	// OpenCode stores sessions with workDir in the file content
+	if workDir != "" {
+		for _, sessionDir := range sessionDirs {
+			entries, err := os.ReadDir(sessionDir)
+			if err != nil {
+				continue
+			}
+
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				name := entry.Name()
+				if !strings.HasSuffix(name, ".json") {
+					continue
+				}
+
+				sessionFile := filepath.Join(sessionDir, name)
+				sessionID := strings.TrimSuffix(name, ".json")
+
+				// Read session file and check if workDir matches
+				if match, err := matchSessionWorkDir(sessionFile, workDir); err == nil && match {
+					// Verify the process is still running and is opencode
+					if pid > 0 && !isOpenCodeProcess(pid) {
+						continue
+					}
+					log.Printf("[OpenCode] Found session by workDir match: %s", sessionID)
+					return sessionID, sessionFile
+				}
+			}
+		}
+	}
+
+	// Second: if PID is provided, try to validate process and find its session
+	if pid > 0 {
+		if isOpenCodeProcess(pid) {
+			// Find the most recently modified session file
+			var latestFile string
+			var latestTime time.Time
+
+			for _, sessionDir := range sessionDirs {
+				entries, err := os.ReadDir(sessionDir)
+				if err != nil {
+					continue
+				}
+
+				for _, entry := range entries {
+					if entry.IsDir() {
+						continue
+					}
+					name := entry.Name()
+					if !strings.HasSuffix(name, ".json") {
+						continue
+					}
+
+					info, err := entry.Info()
+					if err != nil {
+						continue
+					}
+
+					if info.ModTime().After(latestTime) {
+						latestTime = info.ModTime()
+						latestFile = filepath.Join(sessionDir, name)
+					}
+				}
+			}
+
+			if latestFile != "" {
+				base := filepath.Base(latestFile)
+				sessionID := strings.TrimSuffix(base, ".json")
+				log.Printf("[OpenCode] Found latest session for PID %d: %s", pid, sessionID)
+				return sessionID, latestFile
+			}
+		}
+	}
+
+	// Third: fallback to most recently modified session file (original behavior)
 	var latestFile string
 	var latestTime time.Time
 
@@ -338,7 +438,6 @@ func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {
 			if !strings.HasSuffix(name, ".json") {
 				continue
 			}
-			// Accept any session file; ses_ prefix is common but not guaranteed
 			sessionID := strings.TrimSuffix(name, ".json")
 			if sessionID == "" {
 				continue
@@ -357,15 +456,46 @@ func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {
 	}
 
 	if latestFile != "" {
-		// Extract session ID from filename (ses_XXX.json -> ses_XXX, or other.json -> other)
 		base := filepath.Base(latestFile)
 		sessionID := strings.TrimSuffix(base, ".json")
-		log.Printf("[OpenCode] Found latest session: %s", sessionID)
+		log.Printf("[OpenCode] Found latest session (fallback): %s", sessionID)
 		return sessionID, latestFile
 	}
 	log.Printf("[OpenCode] No session file found")
 
 	return "", ""
+}
+
+// matchSessionWorkDir reads a session file and checks if its workDir matches
+func matchSessionWorkDir(sessionFile, workDir string) (bool, error) {
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		return false, err
+	}
+
+	var session struct {
+		WorkDir string `json:"workDir"`
+	}
+	if err := json.Unmarshal(data, &session); err != nil {
+		return false, err
+	}
+
+	return session.WorkDir == workDir, nil
+}
+
+func isOpenCodeProcess(pid int) bool {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		// On non-Linux systems (e.g., macOS), /proc doesn't exist.
+		// Skip validation on these platforms as PID reuse is less of a concern.
+		if os.IsNotExist(err) {
+			return true
+		}
+		return false
+	}
+	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
+	return strings.Contains(cmdline, "opencode")
 }
 
 func projectDirName(workDir string) string {

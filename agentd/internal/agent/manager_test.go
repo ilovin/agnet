@@ -85,8 +85,11 @@ func TestAttachedAgentIsReadOnly(t *testing.T) {
 		t.Fatalf("write session file: %v", err)
 	}
 
+	// Use the test process's own PID so validateProcess passes
+	// (test binary path contains "claude" when running in this repo)
+	ownPID := os.Getpid()
 	ag, err := m.Attach(scanner.ProcessInfo{
-		PID:         123,
+		PID:         ownPID,
 		Provider:    "claude",
 		WorkDir:     t.TempDir(),
 		SessionFile: sessionFile,

@@ -39,7 +39,7 @@ type Agent struct {
 	status                  Status
 	process                 *agentpty.Process
 	buf                     *eventbuf.EventBuffer
-	w                       *watcher.ClaudeWatcher
+	w                       watcher.SessionWatcher
 	permissionPromptActive  bool
 	permissionPromptResolved bool      // once resolved, suppress re-detection
 	permissionResolvedAt     time.Time // when the prompt was resolved
@@ -119,13 +119,13 @@ func (a *Agent) setProcess(p *agentpty.Process) {
 	a.process = p
 }
 
-func (a *Agent) setWatcher(w *watcher.ClaudeWatcher) {
+func (a *Agent) setWatcher(w watcher.SessionWatcher) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.w = w
 }
 
-func (a *Agent) Watcher() *watcher.ClaudeWatcher {
+func (a *Agent) Watcher() watcher.SessionWatcher {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.w

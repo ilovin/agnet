@@ -51,16 +51,25 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 		"status":  "working",
 	}), nil)
 
+	// Extract model from agent args (set by resolveLaunch via -m flag)
+	currentModel := currentOpenCodeModel(ag.Args)
+
 	// Start OpenCode resume process in background
 	go func() {
+		// Build opencode run args
+		ocArgs := []string{"run", "--session", resumeSessionID, "--format", "json"}
+		if currentModel != "" {
+			ocArgs = append(ocArgs, "-m", currentModel)
+		}
+
 		// Use stdbuf to disable output buffering for real-time JSON streaming.
 		// Fall back to direct opencode invocation if stdbuf is not available.
 		var cmd *exec.Cmd
 		if _, err := exec.LookPath("stdbuf"); err == nil {
-			cmd = exec.Command("stdbuf", "-o0", "opencode", "run", "--session", resumeSessionID, "--format", "json")
+			cmd = exec.Command("stdbuf", append([]string{"-o0", "opencode"}, ocArgs...)...)
 		} else {
 			log.Printf("[OpenCode] stdbuf not available, invoking opencode directly")
-			cmd = exec.Command("opencode", "run", "--session", resumeSessionID, "--format", "json")
+			cmd = exec.Command("opencode", ocArgs...)
 		}
 		cmd.Dir = ag.WorkDir
 

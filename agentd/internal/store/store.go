@@ -16,6 +16,7 @@ type AgentRecord struct {
 	Provider        string
 	WorkDir         string
 	ResumeSessionID string
+	PID             int
 }
 
 // ConversationEventRecord is a persisted conversation event.
@@ -54,11 +55,17 @@ func (s *Store) migrate() error {
 		name TEXT NOT NULL,
 		provider TEXT NOT NULL,
 		work_dir TEXT NOT NULL,
-		resume_session_id TEXT NOT NULL DEFAULT ''
+		resume_session_id TEXT NOT NULL DEFAULT '',
+		pid INTEGER NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+
+	// Add pid column to existing tables that were created before it existed.
+	// ALTER TABLE ADD COLUMN is a no-op error if the column already exists,
+	// so we just ignore the error.
+	_, _ = s.db.Exec(`ALTER TABLE agents ADD COLUMN pid INTEGER NOT NULL DEFAULT 0`)
 
 	_, err = s.db.Exec(`CREATE TABLE IF NOT EXISTS conversation_events (
 		agent_id TEXT NOT NULL,
@@ -77,8 +84,8 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) SaveAgent(r AgentRecord) error {
 	_, err := s.db.Exec(
-		`INSERT OR REPLACE INTO agents (id, name, provider, work_dir, resume_session_id) VALUES (?,?,?,?,?)`,
-		r.ID, r.Name, r.Provider, r.WorkDir, r.ResumeSessionID,
+		`INSERT OR REPLACE INTO agents (id, name, provider, work_dir, resume_session_id, pid) VALUES (?,?,?,?,?,?)`,
+		r.ID, r.Name, r.Provider, r.WorkDir, r.ResumeSessionID, r.PID,
 	)
 	if err != nil {
 		return fmt.Errorf("save agent %s: %w", r.ID, err)
@@ -87,7 +94,7 @@ func (s *Store) SaveAgent(r AgentRecord) error {
 }
 
 func (s *Store) ListAgents() ([]AgentRecord, error) {
-	rows, err := s.db.Query(`SELECT id, name, provider, work_dir, resume_session_id FROM agents`)
+	rows, err := s.db.Query(`SELECT id, name, provider, work_dir, resume_session_id, pid FROM agents`)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +102,7 @@ func (s *Store) ListAgents() ([]AgentRecord, error) {
 	var out []AgentRecord
 	for rows.Next() {
 		var r AgentRecord
-		if err := rows.Scan(&r.ID, &r.Name, &r.Provider, &r.WorkDir, &r.ResumeSessionID); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Provider, &r.WorkDir, &r.ResumeSessionID, &r.PID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -111,6 +118,18 @@ func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("agent %s not found", id)
+	}
+	return nil
+}
+
+func (s *Store) UpdateAgentProvider(id, provider string) error {
+	result, err := s.db.Exec(`UPDATE agents SET provider=? WHERE id=?`, provider, id)
+	if err != nil {
+		return fmt.Errorf("update provider: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("agent not found")
 	}
 	return nil
 }

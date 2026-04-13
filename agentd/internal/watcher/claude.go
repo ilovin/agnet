@@ -28,6 +28,13 @@ type ConversationEvent struct {
 	StatusChange *AgentStatus // non-nil when this line changes agent status
 }
 
+// SessionWatcher is the interface implemented by all session watchers
+// (ClaudeWatcher, OpenCodeDBWatcher, etc.)
+type SessionWatcher interface {
+	Start() error
+	Stop()
+}
+
 // ClaudeWatcher tails a Claude Code JSONL session file and emits ConversationEvents.
 // It also auto-detects when a newer session file appears (e.g. after /clear) and switches to it.
 type ClaudeWatcher struct {

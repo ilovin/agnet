@@ -2,6 +2,7 @@ package agent
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	agentpty "github.com/phone-talk/agentd/internal/pty"
@@ -66,7 +69,8 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 }
 
 // LoadFromStore loads persisted agents from the store into memory.
-// Agents are registered with status=stopped; use agent.restart to start them.
+// Only agents whose process is still running are restored as idle;
+// stopped agents (pid=0 or dead process) are cleaned up from the store.
 func (m *Manager) LoadFromStore() error {
 	records, err := m.store.ListAgents()
 	if err != nil {
@@ -76,6 +80,14 @@ func (m *Manager) LoadFromStore() error {
 	defer m.mu.Unlock()
 	loadedAttached := make(map[string]struct{})
 	for _, r := range records {
+		// Skip agents whose process is no longer running — they will be
+		// re-discovered by ScanExisting/Attach if the process comes back.
+		if r.PID <= 0 || !isProcessRunning(r.PID, r.Provider) {
+			log.Printf("[LoadFromStore] Skipping stopped agent %s (%s, PID %d)", r.ID, r.Name, r.PID)
+			_ = m.store.DeleteAgent(r.ID)
+			continue
+		}
+
 		if strings.Contains(r.Name, "-attached-") {
 			key := r.Provider + "|" + r.Name
 			if _, ok := loadedAttached[key]; ok {
@@ -97,7 +109,9 @@ func (m *Manager) LoadFromStore() error {
 		}
 		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
 		m.wireStatusCallback(ag)
-		ag.setStatus(StatusStopped)
+		ag.setStatus(StatusIdle)
+		log.Printf("[LoadFromStore] Agent %s (PID %d) is still running, setting status to idle", r.ID, r.PID)
+
 		// Initialize buffer seq from persisted events so new appends continue after existing data
 		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
 			ag.InitSeq(lastSeq)
@@ -105,6 +119,22 @@ func (m *Manager) LoadFromStore() error {
 		m.agents[r.ID] = ag
 	}
 	return nil
+}
+
+// isProcessRunning checks if a process with the given PID is still running
+// and matches the expected provider (claude or opencode).
+func isProcessRunning(pid int, provider string) bool {
+	if pid <= 0 {
+		return false
+	}
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		// Process doesn't exist or we can't read it
+		return false
+	}
+	cmdline := strings.ToLower(string(data))
+	return strings.Contains(cmdline, strings.ToLower(provider))
 }
 
 // SetOnOutput registers a callback invoked whenever an agent produces PTY output.
@@ -736,6 +766,7 @@ func (m *Manager) wireStatusCallback(ag *Agent) {
 			m.mu.RUnlock()
 			if cb != nil {
 				cb(agentID, map[string]any{
+					"jsonrpc": "2.0",
 					"method": "agent.status_changed",
 					"params": map[string]any{
 						"agentId": agentID,
@@ -876,6 +907,7 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 
 	_ = m.store.SaveAgent(store.AgentRecord{
 		ID: id, Name: name, Provider: provider, WorkDir: workDir,
+		// PID will be updated after process is spawned
 	})
 
 	ag.setStatus(StatusStarting)
@@ -907,6 +939,15 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 	ag.setStatus(StatusIdle)
 	log.Printf("[Create] Agent %s started with pid=%d status=%s", id, p.Pid(), ag.Status())
 
+	// Update store with PID
+	_ = m.store.SaveAgent(store.AgentRecord{
+		ID:   id,
+		Name: name,
+		Provider: provider,
+		WorkDir: workDir,
+		PID: p.Pid(),
+	})
+
 	if provider != "claude" {
 		// For interactive providers (opencode), use session file watcher
 		go m.startSessionWatcher(id, ag, p.Pid(), workDir)
@@ -922,19 +963,33 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 }
 
 // startSessionWatcher tries to find the session file for a newly created agent
-// and starts a ClaudeWatcher to parse structured conversation data.
-// It will retry periodically until the file is found or the agent stops.
+// and starts the appropriate watcher. For opencode it uses OpenCodeDBWatcher;
+// for claude/others it uses ClaudeWatcher on the JSONL file.
 func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDir string) {
-	// Give Claude time to initialize and create the session file
-	// The JSONL file is only created after the first user message
 	log.Printf("[Watcher] Starting session watcher for agent %s (PID %d)", agentID, pid)
+
+	// For opencode, we can start the DB watcher immediately once we know the session ID
+	if ag.Provider == "opencode" {
+		sessionID := m.findOpenCodeSessionID(pid)
+		if sessionID != "" {
+			cb := m.makeWatcherCallback(agentID, ag)
+			w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
+			if err := w.Start(); err != nil {
+				log.Printf("[Watcher] OpenCode DB watcher start failed for agent %s: %v", agentID, err)
+				return
+			}
+			ag.setWatcher(w)
+			log.Printf("[Watcher] Started OpenCode DB watcher for agent %s (session %s)", agentID, sessionID)
+			return
+		}
+		// Fall through to file-based watcher if we can't find the session ID
+	}
 
 	var sessionFile string
 	retryCount := 0
 	maxRetries := 300 // Retry for up to 5 minutes (TUI agents may take a while for first message)
 
 	for sessionFile == "" && retryCount < maxRetries {
-		// Check if agent is still running
 		if ag.Status() == StatusStopped {
 			log.Printf("[Watcher] Agent %s stopped, aborting watcher", agentID)
 			return
@@ -956,35 +1011,8 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 	}
 	log.Printf("[Watcher] Found session file for agent %s: %s", agentID, sessionFile)
 
-	// Start watcher on the session file
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
-		data := map[string]any{
-			"role": e.Role,
-			"text": e.Text,
-			"raw":  false, // Structured content from JSONL
-		}
-		if e.ToolSummary != "" {
-			data["toolSummary"] = e.ToolSummary
-		}
-		if e.StatusChange != nil {
-			data["statusChange"] = string(*e.StatusChange)
-			if *e.StatusChange == watcher.StatusWorking {
-				ag.setStatus(StatusWorking)
-			} else {
-				ag.setStatus(StatusIdle)
-			}
-		}
-		m.appendAndPersistEvent(agentID, ag, data)
-
-		// Broadcast to WS clients
-		m.mu.RLock()
-		cb := m.onOutput
-		m.mu.RUnlock()
-		if cb != nil {
-			cb(agentID, data)
-		}
-	})
-
+	cb := m.makeWatcherCallback(agentID, ag)
+	w := watcher.NewClaudeWatcher(sessionFile, cb)
 	w.SetWorkDir(workDir)
 	w.SetPID(pid)
 	if err := w.Start(); err != nil {
@@ -1155,7 +1183,7 @@ func (m *Manager) StartInPlaceWithMessage(id, provider, cmd string, args []strin
 	return nil
 }
 
-// CreateWithWatcher spawns an agent and starts a ClaudeWatcher on sessionFile.
+// CreateWithWatcher spawns an agent and starts the appropriate watcher.
 func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, workDir, sessionFile string) (string, error) {
 	id, err := m.Create(name, provider, cmd, args, workDir, nil)
 	if err != nil {
@@ -1166,21 +1194,15 @@ func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, w
 		return id, nil
 	}
 
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
-		data := map[string]any{
-			"role": e.Role,
-			"text": e.Text,
-		}
-		if e.StatusChange != nil {
-			data["statusChange"] = string(*e.StatusChange)
-			if *e.StatusChange == watcher.StatusWorking {
-				ag.setStatus(StatusWorking)
-			} else {
-				ag.setStatus(StatusIdle)
-			}
-		}
-		m.appendAndPersistEvent(id, ag, data)
-	})
+	sessionID := ""
+	if sessionFile != "" {
+		parts := strings.Split(sessionFile, "/")
+		fileName := parts[len(parts)-1]
+		sessionID = strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
+	}
+
+	cb := m.makeWatcherCallback(id, ag)
+	w := m.newSessionWatcher(provider, sessionID, sessionFile, workDir, 0, cb)
 
 	if err := w.Start(); err != nil {
 		return id, fmt.Errorf("watcher start: %w", err)
@@ -1300,6 +1322,16 @@ func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 	return nil
 }
 
+func (m *Manager) UpdateAgentProvider(id, provider string) error {
+	m.mu.Lock()
+	ag, ok := m.agents[id]
+	if ok {
+		ag.Provider = provider
+	}
+	m.mu.Unlock()
+	return m.store.UpdateAgentProvider(id, provider)
+}
+
 // SetSessionParent sets the parent agent ID for session tracking.
 // When a child agent extracts a session ID, it will also be saved to the parent.
 func (m *Manager) SetSessionParent(childID, parentID string) {
@@ -1369,33 +1401,22 @@ func (m *Manager) StartWatcherForAgent(id string) error {
 		old.Stop()
 	}
 
-	// Start new watcher
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
-		data := map[string]any{
-			"role": e.Role,
-			"text": e.Text,
-			"raw":  false,
+	// For opencode, use DB watcher instead of file watcher
+	if ag.Provider == "opencode" && sessionID != "" {
+		cb := m.makeWatcherCallback(id, ag)
+		w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
+		if err := w.Start(); err != nil {
+			return fmt.Errorf("watcher start: %w", err)
 		}
-		if e.ToolSummary != "" {
-			data["toolSummary"] = e.ToolSummary
-		}
-		if e.StatusChange != nil {
-			data["statusChange"] = string(*e.StatusChange)
-			if *e.StatusChange == watcher.StatusWorking {
-				ag.setStatus(StatusWorking)
-			} else {
-				ag.setStatus(StatusIdle)
-			}
-		}
-		m.appendAndPersistEvent(id, ag, data)
+		ag.setWatcher(w)
+		ag.setStatus(StatusIdle)
+		log.Printf("[Watcher] Started OpenCode DB watcher for loaded agent %s (session %s)", id, sessionID)
+		return nil
+	}
 
-		m.mu.RLock()
-		cb := m.onOutput
-		m.mu.RUnlock()
-		if cb != nil {
-			cb(id, data)
-		}
-	})
+	// Start new watcher
+	cb := m.makeWatcherCallback(id, ag)
+	w := watcher.NewClaudeWatcher(sessionFile, cb)
 
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("watcher start: %w", err)
@@ -1527,6 +1548,11 @@ func (m *Manager) ScanExisting() ([]scanner.ProcessInfo, error) {
 // that monitors the session file for changes, allowing local and remote
 // sessions to coexist and synchronize through the shared session file.
 func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
+	// Verify the process is still the expected provider (prevent PID reuse attack)
+	if !validateProcess(info.PID, info.Provider) {
+		return nil, fmt.Errorf("process %d is not a valid %s process", info.PID, info.Provider)
+	}
+
 	// Find session file for watching
 	sessionFile := info.FindSessionFile()
 	log.Printf("[Attach] PID %d: FindSessionFile returned: %s", info.PID, sessionFile)
@@ -1585,43 +1611,14 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 				existing.setWatcher(nil)
 			}
 			sessionFile := info.FindSessionFile()
-			if sessionFile != "" {
-				w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
-					data := map[string]any{
-						"role": e.Role,
-						"text": e.Text,
-						"raw":  false,
-					}
-					if e.ToolSummary != "" {
-						data["toolSummary"] = e.ToolSummary
-					}
-					if e.StatusChange != nil {
-						data["statusChange"] = string(*e.StatusChange)
-						if *e.StatusChange == watcher.StatusWorking {
-							existing.setStatus(StatusWorking)
-						} else {
-							existing.setStatus(StatusIdle)
-						}
-					}
-					m.appendAndPersistEvent(existing.ID, existing, data)
-					m.mu.RLock()
-					cb := m.onOutput
-					m.mu.RUnlock()
-					if cb != nil {
-						cb(existing.ID, data)
-					}
-				})
-				if info.WorkDir != "" {
-					w.SetWorkDir(info.WorkDir)
-				}
-				if info.PID > 0 {
-					w.SetPID(info.PID)
-				}
+			if sessionFile != "" || info.Provider == "opencode" {
+				cb := m.makeWatcherCallback(existing.ID, existing)
+				w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb)
 				if err := w.Start(); err != nil {
 					log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
 				} else {
 					existing.setWatcher(w)
-					log.Printf("[ReAttach] Restarted watcher for agent %s on %s", existing.ID, sessionFile)
+					log.Printf("[ReAttach] Restarted watcher for agent %s", existing.ID)
 				}
 			}
 			return existing, nil
@@ -1657,16 +1654,16 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		Provider:        info.Provider,
 		WorkDir:         info.WorkDir,
 		ResumeSessionID: sessionID,
+		PID:             info.PID,
 	})
 
-	// Load historical events for OpenCode sessions
+	// Load historical events for OpenCode sessions from SQLite DB
 	if info.Provider == "opencode" && sessionID != "" {
-		historyEvents, err := watcher.OpenCodeSessionHistory(sessionID)
+		historyEvents, err := watcher.OpenCodeDBHistory(sessionID)
 		if err != nil {
 			log.Printf("[Attach] Warning: failed to load OpenCode history for %s: %v", id, err)
 		} else {
 			log.Printf("[Attach] Loaded %d historical events for OpenCode agent %s", len(historyEvents), id)
-			// Append historical events to agent's event buffer
 			for _, ev := range historyEvents {
 				data := map[string]any{
 					"role": ev.Role,
@@ -1678,13 +1675,53 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 	}
 
-	// Start watcher on the existing session file
-	// This allows us to monitor the session without owning the process
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
+	// Start the appropriate watcher
+	cb := m.makeWatcherCallback(id, ag)
+	w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb)
+
+	if err := w.Start(); err != nil {
+		log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
+	} else {
+		ag.setWatcher(w)
+		log.Printf("[Attach] Started watcher for agent %s", id)
+	}
+
+	return ag, nil
+}
+
+func validateProcess(pid int, expectedProvider string) bool {
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	data, err := os.ReadFile(cmdlinePath)
+	if err != nil {
+		// On non-Linux systems (e.g., macOS), /proc doesn't exist.
+		// Skip validation on these platforms as PID reuse is less of a concern.
+		if os.IsNotExist(err) {
+			return true
+		}
+		return false
+	}
+	cmdline := strings.ToLower(string(data))
+	return strings.Contains(cmdline, strings.ToLower(expectedProvider))
+}
+
+// getString safely extracts a string value from a map
+func getString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// makeWatcherCallback builds the standard callback used by all session watchers.
+func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
+	return func(e watcher.ConversationEvent) {
 		data := map[string]any{
 			"role": e.Role,
 			"text": e.Text,
-			"raw":  false, // Structured content from JSONL
+			"raw":  false,
+		}
+		if e.ToolSummary != "" {
+			data["toolSummary"] = e.ToolSummary
 		}
 		if e.StatusChange != nil {
 			data["statusChange"] = string(*e.StatusChange)
@@ -1694,32 +1731,59 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 				ag.setStatus(StatusIdle)
 			}
 		}
-		m.appendAndPersistEvent(id, ag, data)
-
-		// Broadcast to WS clients
+		m.appendAndPersistEvent(agentID, ag, data)
 		m.mu.RLock()
 		cb := m.onOutput
 		m.mu.RUnlock()
 		if cb != nil {
-			cb(id, data)
+			cb(agentID, data)
 		}
-	})
-
-	if err := w.Start(); err != nil {
-		// Watcher failed, but we still have the agent - it just won't get updates
-		log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
-	} else {
-		ag.setWatcher(w)
-		log.Printf("[Attach] Started watcher for agent %s on %s", id, sessionFile)
 	}
-
-	return ag, nil
 }
 
-// getString safely extracts a string value from a map
-func getString(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
+// newSessionWatcher creates the appropriate watcher for the given provider.
+// For opencode it returns an OpenCodeDBWatcher that reads from the SQLite DB;
+// for claude (and others) it returns a ClaudeWatcher on the JSONL file.
+func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent)) watcher.SessionWatcher {
+	if provider == "opencode" && sessionID != "" {
+		return watcher.NewOpenCodeDBWatcher(sessionID, cb)
 	}
-	return ""
+	w := watcher.NewClaudeWatcher(sessionFile, cb)
+	w.SetWorkDir(workDir)
+	w.SetPID(pid)
+	return w
+}
+
+// findOpenCodeSessionID queries the opencode SQLite DB to find the most recent
+// session for the given PID's working directory.
+func (m *Manager) findOpenCodeSessionID(pid int) string {
+	// Read the process working directory from /proc
+	cwdLink := fmt.Sprintf("/proc/%d/cwd", pid)
+	cwd, err := os.Readlink(cwdLink)
+	if err != nil {
+		// On macOS, /proc doesn't exist. Try lsof as fallback.
+		return ""
+	}
+
+	dbPath := watcher.FindOpenCodeDB()
+	if dbPath == "" {
+		return ""
+	}
+
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+
+	var sessionID string
+	err = db.QueryRow(`
+		SELECT id FROM session
+		WHERE directory = ?
+		ORDER BY time_updated DESC
+		LIMIT 1`, cwd).Scan(&sessionID)
+	if err != nil {
+		return ""
+	}
+	return sessionID
 }

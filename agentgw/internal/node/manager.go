@@ -138,7 +138,8 @@ func (m *Manager) Connect(id string) error {
 		wsURL = fmt.Sprintf("ws://127.0.0.1:%d/ws", localPort)
 	}
 
-	p, err := proxy.New(wsURL, n.Token)
+	// Enable auto-reconnect for resilient connections
+	p, err := proxy.NewWithReconnect(wsURL, n.Token, true)
 	if err != nil {
 		n.SetStatus(StatusError)
 		return fmt.Errorf("ws proxy: %w", err)
@@ -149,9 +150,15 @@ func (m *Manager) Connect(id string) error {
 	m.mu.RUnlock()
 	if cb != nil {
 		p.OnEvent(func(ev map[string]any) {
-			if params, ok := ev["params"].(map[string]any); ok {
-				params["nodeId"] = n.ID
+			if ev == nil {
+				ev = make(map[string]any)
 			}
+			params, ok := ev["params"].(map[string]any)
+			if !ok {
+				params = make(map[string]any)
+				ev["params"] = params
+			}
+			params["nodeId"] = n.ID
 			cb(n.ID, ev)
 		})
 	}

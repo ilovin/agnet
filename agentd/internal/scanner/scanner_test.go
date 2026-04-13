@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,7 +50,11 @@ func TestFinalizeProcessScanAddsLiveClaudeSessionInfo(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".claude", "sessions", "123.json"), []byte(`{"sessionId":"sess-live"}`), 0o644); err != nil {
+
+	// Use the test process's own PID so isClaudeProcess validation passes
+	// (test binary contains "claude" in the path when running in this repo)
+	ownPID := os.Getpid()
+	if err := os.WriteFile(filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", ownPID)), []byte(`{"sessionId":"sess-live"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sessionFile := filepath.Join(projectDir, "sess-live.jsonl")
@@ -58,7 +63,7 @@ func TestFinalizeProcessScanAddsLiveClaudeSessionInfo(t *testing.T) {
 	}
 
 	got := finalizeProcessScan([]ProcessInfo{{
-		PID:      123,
+		PID:      ownPID,
 		PPID:     1,
 		Provider: "claude",
 		WorkDir:  "/repo",

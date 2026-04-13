@@ -42,11 +42,18 @@ class WsClient {
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   bool _disposed = false;
+  bool _reconnecting = false; // single-flight reconnect guard
 
   int _nextId = 1;
   final Map<int, Completer<dynamic>> _pending = {};
   final List<EventCallback> _eventListeners = [];
   final ReconnectBackoff _backoff = ReconnectBackoff();
+
+  // Heartbeat
+  Timer? _pingTimer;
+  Timer? _pingTimeout;
+  static const _pingInterval = Duration(seconds: 25);
+  static const _pingTimeoutDuration = Duration(seconds: 10);
 
   // Connection state stream
   final _connectedCtrl = StreamController<bool>.broadcast();
@@ -71,6 +78,9 @@ class WsClient {
       _connected = true;
       _connectedCtrl.add(true);
       _backoff.reset();
+      _reconnecting = false;
+
+      _startPingTimer();
 
       _sub = _channel!.stream.listen(
         _onData,
@@ -115,15 +125,74 @@ class WsClient {
 
   void _scheduleReconnect() {
     if (_disposed) return;
+    if (_reconnecting) return; // single-flight guard
+    _reconnecting = true;
+
+    _stopPingTimer();
     _connected = false;
     _connectedCtrl.add(false);
     _sub?.cancel();
     _channel?.sink.close();
     _channel = null;
 
+    // Fail all pending RPC calls immediately
+    _failAllPending('disconnected');
+
     final delay = _backoff.next();
     Future.delayed(delay, () {
       if (!_disposed) connect();
+    });
+  }
+
+  /// Fail all pending RPC completers with an error.
+  void _failAllPending(String reason) {
+    final pending = Map<int, Completer<dynamic>>.from(_pending);
+    _pending.clear();
+    for (final completer in pending.values) {
+      if (!completer.isCompleted) {
+        completer.completeError(reason);
+      }
+    }
+  }
+
+  // ── Heartbeat (application-level JSON-RPC ping) ─────────────────────────
+
+  void _startPingTimer() {
+    _stopPingTimer();
+    _pingTimer = Timer.periodic(_pingInterval, (_) => _sendPing());
+  }
+
+  void _stopPingTimer() {
+    _pingTimer?.cancel();
+    _pingTimer = null;
+    _pingTimeout?.cancel();
+    _pingTimeout = null;
+  }
+
+  void _sendPing() {
+    if (!_connected || _channel == null) return;
+    final id = _nextId++;
+    final completer = Completer<dynamic>();
+    _pending[id] = completer;
+    final raw = jsonEncode(buildRequest(id, 'rpc.ping', {}));
+    _channel?.sink.add(raw);
+
+    // Start timeout: if no response within 10s, force reconnect
+    _pingTimeout?.cancel();
+    _pingTimeout = Timer(_pingTimeoutDuration, () {
+      _pending.remove(id);
+      if (!completer.isCompleted) {
+        completer.completeError('ping timeout');
+      }
+      _scheduleReconnect();
+    });
+
+    // On successful pong response, cancel the timeout
+    completer.future.then((_) {
+      _pingTimeout?.cancel();
+      _pingTimeout = null;
+    }).catchError((_) {
+      // Error already handled by timeout or disconnect
     });
   }
 
@@ -159,8 +228,10 @@ class WsClient {
 
   void dispose() {
     _disposed = true;
+    _stopPingTimer();
     _sub?.cancel();
     _channel?.sink.close();
+    _failAllPending('disposed');
     _connectedCtrl.close();
   }
 

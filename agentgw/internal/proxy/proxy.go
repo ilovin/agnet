@@ -3,11 +3,17 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	proxyPingInterval = 25 * time.Second
+	proxyPongTimeout  = 60 * time.Second
 )
 
 type rpcMsg struct {
@@ -33,22 +39,68 @@ type Proxy struct {
 
 	eventMu sync.RWMutex
 	onEvent func(map[string]any)
+
+	// Reconnection fields
+	url       string
+	token     string
+	reconnect bool
+	quit      chan struct{}
 }
 
 // New connects to the agentd WebSocket URL with the given token.
 func New(url, token string) (*Proxy, error) {
+	return NewWithReconnect(url, token, false)
+}
+
+// NewWithReconnect connects to the agentd WebSocket URL with optional auto-reconnect.
+func NewWithReconnect(url, token string, reconnect bool) (*Proxy, error) {
 	hdr := http.Header{"Authorization": {"Bearer " + token}}
 	conn, _, err := websocket.DefaultDialer.Dial(url, hdr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", url, err)
 	}
 	p := &Proxy{
-		conn:    conn,
-		pending: make(map[float64]*pending),
-		nextID:  1,
+		conn:      conn,
+		pending:   make(map[float64]*pending),
+		nextID:    1,
+		url:       url,
+		token:     token,
+		reconnect: reconnect,
+		quit:      make(chan struct{}),
 	}
+	p.setupPingPong()
 	go p.readLoop()
+	go p.pingLoop()
 	return p, nil
+}
+
+// setupPingPong configures pong handler and initial read deadline on the connection.
+func (p *Proxy) setupPingPong() {
+	p.conn.SetReadDeadline(time.Now().Add(proxyPongTimeout))
+	p.conn.SetPongHandler(func(string) error {
+		p.conn.SetReadDeadline(time.Now().Add(proxyPongTimeout))
+		return nil
+	})
+}
+
+// pingLoop sends periodic WebSocket pings to keep the connection alive.
+func (p *Proxy) pingLoop() {
+	ticker := time.NewTicker(proxyPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.quit:
+			return
+		case <-ticker.C:
+			p.writeMu.Lock()
+			err := p.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			p.writeMu.Unlock()
+			if err != nil {
+				log.Printf("proxy ping: %v", err)
+				return
+			}
+		}
+	}
 }
 
 func (p *Proxy) readLoop() {
@@ -61,6 +113,13 @@ func (p *Proxy) readLoop() {
 			}
 			p.pending = make(map[float64]*pending)
 			p.mu.Unlock()
+
+			// Attempt reconnection if enabled
+			if p.reconnect {
+				if reconnectErr := p.tryReconnect(); reconnectErr == nil {
+					continue // Successfully reconnected, continue reading
+				}
+			}
 			return
 		}
 		var msg rpcMsg
@@ -147,7 +206,47 @@ func (p *Proxy) Send(method string, params any) error {
 	return p.conn.WriteJSON(req)
 }
 
+// tryReconnect attempts to reconnect with exponential backoff.
+func (p *Proxy) tryReconnect() error {
+	maxRetries := 5
+	baseDelay := time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-p.quit:
+			return fmt.Errorf("reconnect aborted: proxy closed")
+		default:
+		}
+
+		delay := baseDelay * time.Duration(i+1)
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+
+		time.Sleep(delay)
+
+		hdr := http.Header{"Authorization": {"Bearer " + p.token}}
+		conn, _, err := websocket.DefaultDialer.Dial(p.url, hdr)
+		if err != nil {
+			continue // Try again
+		}
+
+		p.mu.Lock()
+		p.conn = conn
+		p.mu.Unlock()
+
+		// Re-setup ping/pong on the new connection and restart ping loop
+		p.setupPingPong()
+		go p.pingLoop()
+
+		return nil // Successfully reconnected
+	}
+
+	return fmt.Errorf("failed to reconnect after %d attempts", maxRetries)
+}
+
 // Close closes the underlying WebSocket connection.
 func (p *Proxy) Close() error {
+	close(p.quit)
 	return p.conn.Close()
 }

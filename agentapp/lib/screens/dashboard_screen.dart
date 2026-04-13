@@ -8,6 +8,7 @@ import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/health_provider.dart';
+import '../theme/agent_status_theme.dart';
 
 class SessionCandidate {
   final int? pid;
@@ -448,6 +449,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     }
   }
 
+
   String get _statusLabel {
     switch (widget.node.status) {
       case NodeStatus.connected:
@@ -624,6 +626,26 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     final sessionCtrl = TextEditingController();
     final modelCtrl = TextEditingController();
     String provider = 'claude';
+
+    // Fetch home directory from agentd
+    Future<void> fetchHomeDir() async {
+      final client = ref.read(connectionProvider);
+      if (client == null) return;
+      try {
+        final result = await client.call('system.info', {'nodeId': widget.node.id});
+        if (result is Map<String, dynamic>) {
+          final homeDir = result['homeDir'] as String?;
+          if (homeDir != null && homeDir.isNotEmpty) {
+            cwdCtrl.text = homeDir;
+          }
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch home dir: $e');
+      }
+    }
+
+    // Fetch home directory when dialog opens
+    fetchHomeDir();
 
     showDialog(
       context: context,
@@ -1365,20 +1387,8 @@ class AgentRow extends ConsumerWidget {
   final String nodeId;
   const AgentRow({super.key, required this.agent, required this.nodeId});
 
-  Color get _statusColor {
-    switch (agent.status) {
-      case AgentStatus.working:
-        return Colors.blue;
-      case AgentStatus.idle:
-        return Colors.yellow.shade700;
-      case AgentStatus.starting:
-        return Colors.orange;
-      case AgentStatus.stopped:
-        return Colors.grey;
-      case AgentStatus.crashed:
-        return Colors.red;
-    }
-  }
+  Color get _statusColor => AgentStatusTheme.getColor(agent.status);
+
 
   String get _statusLabel {
     switch (agent.status) {

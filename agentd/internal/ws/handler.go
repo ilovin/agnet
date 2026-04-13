@@ -2,6 +2,7 @@ package ws
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,9 +27,26 @@ type handler struct {
 }
 
 func (h *handler) loop() {
+	// Generate a unique client ID for this connection
+	clientID := generateClientID()
+	defer func() {
+		// Log and broadcast disconnect event when connection closes
+		log.Printf("[Handler] connection closed: %s", clientID)
+		h.server.broadcast(event("client.disconnected", map[string]any{
+			"clientId": clientID,
+			"time":     time.Now().Unix(),
+		}), h.conn)
+	}()
+	// Broadcast connect event
+	h.server.broadcast(event("client.connected", map[string]any{
+		"clientId": clientID,
+		"time":     time.Now().Unix(),
+	}), h.conn)
+
 	for {
 		_, msg, err := h.conn.ReadMessage()
 		if err != nil {
+			log.Printf("[Handler] connection closed: %v", err)
 			return
 		}
 		var req RPCRequest
@@ -85,9 +104,13 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 	case "provider.list":
 		return h.providerList(req), nil
 	case "provider.switch":
-		return h.providerSwitch(req), nil
+		return h.providerSwitch(req)
 	case "provider.add":
 		return h.providerAdd(req), nil
+	case "system.info":
+		return h.systemInfo(req), nil
+	case "rpc.ping":
+		return okResp(req.ID, map[string]any{"ok": true, "time": time.Now().Unix()}), nil
 	default:
 		return errResp(req.ID, -32601, "method not found: "+req.Method), nil
 	}
@@ -165,7 +188,12 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model, "")
 
 	if workDir == "" {
-		workDir = "/tmp"
+		home, err := os.UserHomeDir()
+		if err != nil {
+			workDir = "/tmp"
+		} else {
+			workDir = home
+		}
 	}
 
 	id, err := h.server.manager.Create(name, provider, cmd, args, workDir, env)
@@ -218,6 +246,16 @@ func currentPermissionMode(args []string) string {
 	return ""
 }
 
+// currentOpenCodeModel extracts the -m value from opencode args.
+func currentOpenCodeModel(args []string) string {
+	for i, a := range args {
+		if a == "-m" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 func resolveLaunch(provider, cmd string, args []string, sessionID, model, permissionMode string) (string, string, []string, []string) {
 	resolvedProvider := provider
 	resolvedCmd := cmd
@@ -230,6 +268,9 @@ func resolveLaunch(provider, cmd string, args []string, sessionID, model, permis
 		resolvedArgs = []string{}
 		if sessionID != "" {
 			resolvedArgs = []string{"-s", sessionID}
+		}
+		if model != "" {
+			resolvedArgs = append(resolvedArgs, "-m", model)
 		}
 	case "claude", "claude-bedrock", "claude-vertex":
 		resolvedCmd = findExecutable("claude")
@@ -559,6 +600,14 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	if err := h.server.manager.RestartInPlace(id, provider, cmd, args, env); err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
+
+	// Save provider to store if it was explicitly specified
+	if providerSpecified {
+		if err := h.server.manager.UpdateAgentProvider(id, provider); err != nil {
+			log.Printf("[Handler] update provider in store: %v", err)
+		}
+	}
+
 	resp := okResp(req.ID, map[string]any{"id": id})
 	conn := h.conn
 	return resp, func() {
@@ -575,6 +624,45 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	if message == "" {
 		return errResp(req.ID, -32602, "message is required")
 	}
+
+	// Extract image attachments (base64-encoded)
+	var imageFiles []string // temp file paths to pass via --file
+	if rawImages, ok := req.Params["images"]; ok {
+		if images, ok := rawImages.([]any); ok {
+			for i, img := range images {
+				imgMap, ok := img.(map[string]any)
+				if !ok {
+					continue
+				}
+				data, _ := imgMap["data"].(string)
+				mimeType, _ := imgMap["mimeType"].(string)
+				if data == "" {
+					continue
+				}
+				ext := ".png"
+				switch mimeType {
+				case "image/jpeg":
+					ext = ".jpg"
+				case "image/gif":
+					ext = ".gif"
+				case "image/webp":
+					ext = ".webp"
+				}
+				decoded, err := base64Decode(data)
+				if err != nil {
+					log.Printf("[conversationSend] decode image %d: %v", i, err)
+					continue
+				}
+				tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("agentd-img-%s-%d%s", agentID[:8], i, ext))
+				if err := os.WriteFile(tmpFile, decoded, 0644); err != nil {
+					log.Printf("[conversationSend] write image %d: %v", i, err)
+					continue
+				}
+				imageFiles = append(imageFiles, tmpFile)
+			}
+		}
+	}
+
 	ag := h.server.manager.Get(agentID)
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found")
@@ -613,12 +701,12 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
-		return h.agentRestartWithMessage(req, ag, message)
+		return h.agentRestartWithMessage(req, ag, message, imageFiles)
 	}
 
 	// For fresh Claude agent (no process yet), start with message
 	if isFreshClaude {
-		return h.agentStartWithMessage(req, ag, message)
+		return h.agentStartWithMessage(req, ag, message, imageFiles)
 	}
 
 	// For OpenCode attached sessions, use resume mode
@@ -693,7 +781,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 // agentRestartWithMessage restarts a Claude agent with a new message written to stdin.
 // Used for -p mode where Claude exits after each response and reads prompt from stdin.
-func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string) RPCResponse {
+func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
 	// Get the stored resume session ID for conversation continuity
 	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 	if resumeSessionID != "" {
@@ -704,6 +792,11 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	// Preserve the current permission mode from agent's existing args.
 	mode := currentPermissionMode(ag.Args)
 	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
+
+	// Append --file flags for image attachments
+	for i, f := range imageFiles {
+		args = append(args, "--file", fmt.Sprintf("img%d:%s", i, f))
+	}
 
 	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args, env); err != nil {
 		return errResp(req.ID, -32000, "restart with message: "+err.Error())
@@ -746,7 +839,7 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 
 // agentStartWithMessage starts a fresh Claude agent with the first message.
 // Used when a Claude agent was created without starting a process.
-func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string) RPCResponse {
+func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
 	log.Printf("[Start] Starting fresh Claude agent %s with message", ag.ID)
 
 	// Get the stored resume session ID if any
@@ -756,6 +849,11 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 	// Preserve the current permission mode from agent's existing args.
 	mode := currentPermissionMode(ag.Args)
 	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
+
+	// Append --file flags for image attachments
+	for i, f := range imageFiles {
+		args = append(args, "--file", fmt.Sprintf("img%d:%s", i, f))
+	}
 
 	// Record user message first
 	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
@@ -803,6 +901,16 @@ func keyToBytes(key string) (string, bool) {
 		return "\t", true
 	case "backspace":
 		return "\x7f", true
+	case "ctrl_c":
+		return "\x03", true
+	case "ctrl_d":
+		return "\x04", true
+	case "ctrl_z":
+		return "\x1a", true
+	case "ctrl_a":
+		return "\x01", true
+	case "ctrl_e":
+		return "\x05", true
 	default:
 		return "", false
 	}
@@ -1176,6 +1284,7 @@ func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
 	}
 
 	sessionsByID := make(map[string]sessionInfo)
+	cutoff := time.Now().Add(-7 * 24 * time.Hour) // Only include sessions from the last 7 days
 	for _, pDir := range projectsDirs {
 		projectEntries, err := os.ReadDir(pDir)
 		if err != nil {
@@ -1196,6 +1305,10 @@ func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
 				}
 				info, err := entry.Info()
 				if err != nil {
+					continue
+				}
+				// Skip old sessions
+				if info.ModTime().Before(cutoff) {
 					continue
 				}
 				sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
@@ -1358,34 +1471,37 @@ func (h *handler) providerList(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"providers": rows, "current": current})
 }
 
-func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
+func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 	providerID, _ := req.Params["providerId"].(string)
 	if providerID == "" {
-		return errResp(req.ID, -32602, "providerId is required")
+		return errResp(req.ID, -32602, "providerId is required"), nil
 	}
+
+	agentID, _ := req.Params["agentId"].(string)
 
 	dbPath := findCCSwitchDB()
 	if dbPath == "" {
-		return errResp(req.ID, -32000, "cc-switch not found")
+		return errResp(req.ID, -32000, "cc-switch not found"), nil
 	}
 
-	// Get provider config from DB
-	query := fmt.Sprintf("SELECT id, settings_config FROM providers WHERE id='%s' AND app_type='claude'", providerID)
+	// Get provider config from DB (also fetch name for display)
+	query := fmt.Sprintf("SELECT id, name, settings_config FROM providers WHERE id='%s' AND app_type='claude'", providerID)
 	cmd := exec.Command("sqlite3", "-json", dbPath, query)
 	out, err := cmd.Output()
 	if err != nil {
-		return errResp(req.ID, -32000, "read provider: "+err.Error())
+		return errResp(req.ID, -32000, "read provider: "+err.Error()), nil
 	}
 
 	var rows []map[string]any
 	if err := json.Unmarshal(out, &rows); err != nil || len(rows) == 0 {
-		return errResp(req.ID, -32000, "provider not found: "+providerID)
+		return errResp(req.ID, -32000, "provider not found: "+providerID), nil
 	}
 
+	providerName, _ := rows[0]["name"].(string)
 	configJSON, _ := rows[0]["settings_config"].(string)
 	var providerConfig map[string]any
 	if err := json.Unmarshal([]byte(configJSON), &providerConfig); err != nil {
-		return errResp(req.ID, -32000, "parse provider config: "+err.Error())
+		return errResp(req.ID, -32000, "parse provider config: "+err.Error()), nil
 	}
 
 	settingsPath := findClaudeSettings()
@@ -1394,7 +1510,7 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 		home, _ := os.UserHomeDir()
 		settingsPath = filepath.Join(home, ".claude", "settings.json")
 		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-			return errResp(req.ID, -32000, "create .claude dir: "+err.Error())
+			return errResp(req.ID, -32000, "create .claude dir: "+err.Error()), nil
 		}
 	}
 
@@ -1428,10 +1544,10 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 
 	newData, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
-		return errResp(req.ID, -32000, "marshal settings: "+err.Error())
+		return errResp(req.ID, -32000, "marshal settings: "+err.Error()), nil
 	}
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
-		return errResp(req.ID, -32000, "write settings: "+err.Error())
+		return errResp(req.ID, -32000, "write settings: "+err.Error()), nil
 	}
 
 	// Update is_current in DB
@@ -1441,7 +1557,55 @@ func (h *handler) providerSwitch(req RPCRequest) RPCResponse {
 	)
 	_ = exec.Command("sqlite3", dbPath, updateSQL).Run()
 
-	return okResp(req.ID, map[string]any{"ok": true, "providerId": providerID})
+	// Extract model from provider config for the response and restart
+	model, _ := providerConfig["model"].(string)
+	if model == "" {
+		// Fallback: check ANTHROPIC_MODEL in env
+		if envMap, ok := providerConfig["env"].(map[string]any); ok {
+			model, _ = envMap["ANTHROPIC_MODEL"].(string)
+		}
+	}
+
+	// Restart the agent so the new provider config takes effect immediately.
+	// Keep agent.provider as "claude" — it's still a claude process, just with
+	// different env/model via settings.json.
+	var afterSend func()
+	if agentID != "" {
+		ag := h.server.manager.Get(agentID)
+		if ag != nil {
+			resumeSessionID, _ := h.server.manager.GetResumeSessionID(agentID)
+			mode := currentPermissionMode(ag.Args)
+			provider, cmd, args, env := resolveLaunch("claude", ag.Cmd, ag.Args, resumeSessionID, model, mode)
+			if err := h.server.manager.RestartInPlace(agentID, provider, cmd, args, env); err != nil {
+				log.Printf("[providerSwitch] restart agent %s: %v", agentID, err)
+			} else {
+				srv := h.server
+				conn := h.conn
+				afterSend = func() {
+					srv.broadcast(event("agent.status_changed", map[string]any{
+						"agentId": agentID, "status": "idle",
+					}), conn)
+				}
+			}
+		}
+	}
+
+	return okResp(req.ID, map[string]any{
+		"ok":           true,
+		"providerId":   providerID,
+		"providerName": providerName,
+		"model":        model,
+	}), afterSend
+}
+
+func (h *handler) systemInfo(req RPCRequest) RPCResponse {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errResp(req.ID, -32000, "cannot get home dir: "+err.Error())
+	}
+	return okResp(req.ID, map[string]any{
+		"homeDir": home,
+	})
 }
 
 func (h *handler) providerAdd(req RPCRequest) RPCResponse {
@@ -1541,6 +1705,29 @@ func generateUUID() string {
 		binary.BigEndian.Uint16(b[6:8]),
 		binary.BigEndian.Uint16(b[8:10]),
 		b[10:16])
+}
+
+var (
+	clientIDCounter uint64
+	clientIDMu      sync.Mutex
+)
+
+// generateClientID generates a unique client ID for each connection.
+func generateClientID() string {
+	clientIDMu.Lock()
+	defer clientIDMu.Unlock()
+	clientIDCounter++
+	return fmt.Sprintf("client-%d-%d", time.Now().Unix(), clientIDCounter)
+}
+
+// base64Decode decodes a base64 string, handling both standard and URL-safe encoding,
+// and optional data URI prefix (e.g. "data:image/png;base64,...").
+func base64Decode(s string) ([]byte, error) {
+	// Strip data URI prefix if present
+	if idx := strings.Index(s, ","); idx >= 0 && strings.Contains(s[:idx], "base64") {
+		s = s[idx+1:]
+	}
+	return base64.StdEncoding.DecodeString(s)
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.

@@ -1,13 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
+import '../theme/agent_status_theme.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
 /// Handles complex sequences including claude-code specific output.
@@ -862,9 +867,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
   }
 
+  List<Map<String, String>> _pendingImages = [];
+
   Future<void> _sendMessage() async {
     final text = _inputCtrl.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty && _pendingImages.isEmpty) return;
     final nodeState0 = ref.read(nodesProvider);
     final agents0 = nodeState0.agentsFor(widget.nodeId);
     final agent0 = agents0.where((a) => a.id == widget.agentId).firstOrNull;
@@ -903,17 +910,23 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
 
     _inputCtrl.clear();
+    final images = List<Map<String, String>>.from(_pendingImages);
     setState(() {
       _loading = true;
       _lastError = null;
+      _pendingImages = [];
     });
     try {
-      final result = await client.call('conversation.send', {
+      final params = <String, dynamic>{
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
-        'message': text,
+        'message': text.isEmpty ? '请看这张图片' : text,
         'raw': _rawMode,
-      });
+      };
+      if (images.isNotEmpty) {
+        params['images'] = images;
+      }
+      final result = await client.call('conversation.send', params);
 
       final map = result is Map
           ? Map<String, dynamic>.from(result)
@@ -973,6 +986,44 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         });
       }
     }
+  }
+
+  void _showSpecialKeysPanel(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _KeyChip(label: 'ESC', onTap: () => _sendKeyAndClose(ctx, 'esc')),
+                _KeyChip(label: 'Ctrl+C', onTap: () => _sendKeyAndClose(ctx, 'ctrl_c')),
+                _KeyChip(label: 'Ctrl+D', onTap: () => _sendKeyAndClose(ctx, 'ctrl_d')),
+                _KeyChip(label: 'Ctrl+Z', onTap: () => _sendKeyAndClose(ctx, 'ctrl_z')),
+                _KeyChip(label: 'Ctrl+A', onTap: () => _sendKeyAndClose(ctx, 'ctrl_a')),
+                _KeyChip(label: 'Ctrl+E', onTap: () => _sendKeyAndClose(ctx, 'ctrl_e')),
+                _KeyChip(label: 'Tab', onTap: () => _sendKeyAndClose(ctx, 'tab')),
+                _KeyChip(label: '↑', onTap: () => _sendKeyAndClose(ctx, 'up')),
+                _KeyChip(label: '↓', onTap: () => _sendKeyAndClose(ctx, 'down')),
+                _KeyChip(label: '←', onTap: () => _sendKeyAndClose(ctx, 'left')),
+                _KeyChip(label: '→', onTap: () => _sendKeyAndClose(ctx, 'right')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _sendKeyAndClose(BuildContext ctx, String key) {
+    Navigator.pop(ctx);
+    _sendKey(key);
   }
 
   Future<void> _sendKey(String key) async {
@@ -1125,7 +1176,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         .label;
   }
 
-  Future<void> _switchProvider(String providerId) async {
+  Future<void> _switchProvider(String providerId, {VoidCallback? onSwitched}) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
@@ -1137,14 +1188,36 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     try {
       if (!isLegacyProvider) {
-        // Use provider.switch to update ~/.claude/settings.json via cc-switch
-        await client.call('provider.switch', {
+        // Use provider.switch to update settings.json, DB is_current, and restart agent
+        final result = await client.call('provider.switch', {
           'nodeId': widget.nodeId,
+          'agentId': widget.agentId,
           'providerId': providerId,
         });
+        final map = result is Map
+            ? Map<String, dynamic>.from(result)
+            : <String, dynamic>{};
+        final providerName = map['providerName'] as String? ?? providerId;
+        final model = map['model'] as String? ?? '';
+
+        // Refresh agent list
+        final listResult = await client.call('agent.list', {
+          'nodeId': widget.nodeId,
+        });
+        final agents = (listResult is List
+            ? listResult
+            : (listResult['agents'] as List?) ?? []);
+        ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
+
+        // Notify _ControlBar to refresh its provider dropdown
+        onSwitched?.call();
+
         if (mounted) {
+          final msg = model.isNotEmpty
+              ? '已切换到 $providerName ($model)'
+              : '已切换到 $providerName';
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('已切换到 $providerId')),
+            SnackBar(content: Text(msg)),
           );
         }
         return;
@@ -1242,6 +1315,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final showPermissionOverlay = hasPendingPermissionPrompt(_rawEvents);
     final provider = agent?.provider ?? '';
 
+    // Find the last assistant message index for highlighting
+    int lastAssistantIndex = -1;
+    for (int i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role == 'assistant') {
+        lastAssistantIndex = i;
+        break;
+      }
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -1253,7 +1335,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             ),
             if (agent != null)
               Text(
-                '${agent.provider} · ${_statusLabel(agent.status)}',
+                '\${_statusLabel(agent.status)}',
                 style: TextStyle(
                   fontSize: 12,
                   color: _statusColor(agent.status),
@@ -1262,12 +1344,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           ],
         ),
         actions: [
-          // Rename button
-          IconButton(
-            icon: const Icon(Icons.edit, size: 20),
-            tooltip: '重命名会话',
-            onPressed: () => _renameAgent(agent?.name ?? widget.agentId),
-          ),
+          // Interrupt button (shown when agent is working)
+          if (agent?.status == AgentStatus.working)
+            IconButton(
+              onPressed: () => _sendKey('ctrl_c'),
+              icon: const Icon(Icons.stop_circle),
+              tooltip: '中断 (Ctrl+C)',
+            ),
           // Permission mode toggle
           Tooltip(
             message: _autoResolvePermissions ? '权限模式: 自动' : '权限模式: 手动',
@@ -1284,52 +1367,49 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               },
             ),
           ),
-          // Refresh button
-          IconButton(
-            icon: const Icon(Icons.refresh, size: 20),
-            onPressed: () {
-              setState(() {
-                _rawEvents.clear();
-                _lastSeq = 0;
-                _oldestSeq = 0;
-                _hasMoreHistory = true;
-                _initialLoading = true;
-              });
-              _loadHistory();
-            },
-          ),
+
         ],
       ),
       body: Column(
         children: [
+          // Error status bar at top
           if (_lastError != null)
-            MaterialBanner(
-              backgroundColor: Theme.of(context).colorScheme.errorContainer,
-              content: Text(
-                _lastError!,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onErrorContainer,
-                ),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _lastError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _lastError = null;
+                      });
+                      _loadHistory();
+                    },
+                    child: const Text('重试'),
+                  ),
+                  IconButton(
+                    onPressed: () {
+                      setState(() {
+                        _lastError = null;
+                      });
+                    },
+                    icon: const Icon(Icons.close, size: 16),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
               ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _lastError = null;
-                    });
-                  },
-                  child: const Text('关闭'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _lastError = null;
-                    });
-                    _loadHistory();
-                  },
-                  child: const Text('重试'),
-                ),
-              ],
             ),
           if (_loading || _stopping)
             Container(
@@ -1400,6 +1480,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                             final idx = i - (_loadingOlder ? 1 : 0);
                             return _MessageBubble(
                               message: messages[idx],
+                              isLastAssistant: idx == lastAssistantIndex,
                               onResolvePermissionPrompt:
                                   messages[idx].isPermissionPrompt
                                   ? _resolvePermissionPrompt
@@ -1408,11 +1489,24 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           },
                         ),
                       ),
+                // Refresh button (above jump to bottom)
+                Positioned(
+                  right: 12,
+                  bottom: 72,
+                  child: FloatingActionButton.small(
+                    heroTag: "refreshBtn",
+                    onPressed: () {
+                      _loadHistory();
+                    },
+                    child: const Icon(Icons.refresh),
+                  ),
+                ),
                 if (_showJumpToLatest)
                   Positioned(
                     right: 12,
                     bottom: 12,
                     child: FloatingActionButton.small(
+                      heroTag: "jumpToBottom",
                       onPressed: () {
                         setState(() {
                           _stickToBottom = true;
@@ -1422,6 +1516,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                       },
                       child: const Icon(Icons.arrow_downward),
                     ),
+                  ),
+                // Refresh button
+                FloatingActionButton.small(
+                  heroTag: "refreshBtn",
+                  onPressed: () {
+                    _loadHistory();
+                  },
+                  child: const Icon(Icons.refresh),
                   ),
               ],
             ),
@@ -1440,26 +1542,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             onToggleRaw: (v) => setState(() => _rawMode = v),
             onSend: _sendMessage,
             onKey: _sendKey,
+            pendingImages: _pendingImages,
+            onImagesChanged: (imgs) => setState(() => _pendingImages = imgs),
           ),
         ],
       ),
     );
   }
 
-  Color _statusColor(AgentStatus s) {
-    switch (s) {
-      case AgentStatus.working:
-        return Colors.blue;
-      case AgentStatus.idle:
-        return Colors.green;
-      case AgentStatus.starting:
-        return Colors.orange;
-      case AgentStatus.stopped:
-        return Colors.grey;
-      case AgentStatus.crashed:
-        return Colors.red;
-    }
-  }
+  Color _statusColor(AgentStatus s) => AgentStatusTheme.getColor(s);
+
 
   String _statusLabel(AgentStatus s) {
     switch (s) {
@@ -1484,7 +1576,7 @@ class _ControlBar extends ConsumerStatefulWidget {
   final String currentMode;
   final Future<void> Function(String action) onControl;
   final Future<void> Function(String model) onSwitchModel;
-  final Future<void> Function(String providerId) onSwitchProvider;
+  final Future<void> Function(String providerId, {VoidCallback? onSwitched}) onSwitchProvider;
   final Future<void> Function(String mode) onSwitchMode;
 
   const _ControlBar({
@@ -1574,6 +1666,26 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
           .call('provider.list', {'nodeId': widget.nodeId})
           .then((r) => r is Map ? Map<String, dynamic>.from(r) : <String, dynamic>{});
     });
+  }
+
+  List<PopupMenuEntry<String>> _modelMenuItems(String provider) {
+    if (provider == 'opencode') {
+      return const [
+        PopupMenuItem(value: 'tb-api/claude-sonnet-4-6', child: Text('Sonnet 4.6')),
+        PopupMenuItem(value: 'tb-api/claude-opus-4-6', child: Text('Opus 4.6')),
+        PopupMenuItem(value: 'tb-api/claude-haiku-4-5-20251001', child: Text('Haiku 4.5')),
+        PopupMenuDivider(),
+        PopupMenuItem(value: 'moonshotai-cn/kimi-for-coding', child: Text('Kimi K2.5')),
+        PopupMenuItem(value: 'ADVibe/Kimi-K2.5', child: Text('Kimi K2.5 (ADVibe)')),
+        PopupMenuItem(value: 'newapi-gpt/gpt-5.4', child: Text('GPT 5.4')),
+      ];
+    }
+    // claude
+    return const [
+      PopupMenuItem(value: 'claude-sonnet-4-6', child: Text('Sonnet 4.6')),
+      PopupMenuItem(value: 'claude-opus-4-6', child: Text('Opus 4.6')),
+      PopupMenuItem(value: 'claude-haiku-4-5-20251001', child: Text('Haiku 4.5')),
+    ];
   }
 
   void _showAddProviderDialog(BuildContext context) {
@@ -1715,7 +1827,7 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                       if (id == '__add__') {
                         _showAddProviderDialog(context);
                       } else {
-                        widget.onSwitchProvider(id);
+                        widget.onSwitchProvider(id, onSwitched: _fetchProviders);
                       }
                     },
                     itemBuilder: (_) => [
@@ -1745,7 +1857,7 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                     if (id == '__add__') {
                       _showAddProviderDialog(context);
                     } else {
-                      widget.onSwitchProvider(id);
+                      widget.onSwitchProvider(id, onSwitched: _fetchProviders);
                     }
                   },
                   itemBuilder: (_) => [
@@ -1784,23 +1896,13 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                 );
               },
             ),
+          ],
+          // Model selector — works for both claude and opencode
+          if (widget.agent.provider == 'claude' || widget.agent.provider == 'opencode')
             PopupMenuButton<String>(
               tooltip: '切换模型',
               onSelected: widget.onSwitchModel,
-              itemBuilder: (_) => const [
-                PopupMenuItem(
-                  value: 'claude-sonnet-4-6',
-                  child: Text('Sonnet 4.6'),
-                ),
-                PopupMenuItem(
-                  value: 'claude-opus-4-6',
-                  child: Text('Opus 4.6'),
-                ),
-                PopupMenuItem(
-                  value: 'claude-haiku-4-5-20251001',
-                  child: Text('Haiku 4.5'),
-                ),
-              ],
+              itemBuilder: (_) => _modelMenuItems(widget.agent.provider),
               child: const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 4),
                 child: Row(
@@ -1813,7 +1915,6 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                 ),
               ),
             ),
-          ],
           const Spacer(),
           if (stopped)
             IconButton(
@@ -1985,9 +2086,14 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
 
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
+  final bool isLastAssistant;
   final Future<void> Function()? onResolvePermissionPrompt;
 
-  const _MessageBubble({required this.message, this.onResolvePermissionPrompt});
+  const _MessageBubble({
+    required this.message,
+    this.isLastAssistant = false,
+    this.onResolvePermissionPrompt,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2161,7 +2267,12 @@ class _MessageBubble extends StatelessWidget {
                         color: scheme.outlineVariant.withValues(alpha: 0.3),
                         width: 1,
                       )
-                    : null,
+                    : (isLastAssistant
+                        ? Border.all(
+                            color: scheme.primary.withValues(alpha: 0.5),
+                            width: 2,
+                          )
+                        : null),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -2326,6 +2437,19 @@ class _MarkdownContent extends StatelessWidget {
   }
 }
 
+class _KeyChip extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  const _KeyChip({required this.label, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    return ActionChip(
+      label: Text(label),
+      onPressed: onTap,
+    );
+  }
+}
+
 class _KeyButton extends StatelessWidget {
   final String label;
   final String displayLabel;
@@ -2404,6 +2528,16 @@ String keyToDisplay(String key) {
       return 'TAB';
     case 'backspace':
       return '⌫';
+    case 'ctrl_c':
+      return 'Ctrl+C';
+    case 'ctrl_d':
+      return 'Ctrl+D';
+    case 'ctrl_z':
+      return 'Ctrl+Z';
+    case 'ctrl_a':
+      return 'Ctrl+A';
+    case 'ctrl_e':
+      return 'Ctrl+E';
     default:
       return key;
   }
@@ -2577,6 +2711,8 @@ class _InputBar extends StatefulWidget {
   final ValueChanged<bool> onToggleRaw;
   final VoidCallback onSend;
   final Future<void> Function(String key) onKey;
+  final List<Map<String, String>> pendingImages;
+  final ValueChanged<List<Map<String, String>>> onImagesChanged;
 
   const _InputBar({
     required this.agent,
@@ -2588,6 +2724,8 @@ class _InputBar extends StatefulWidget {
     required this.onToggleRaw,
     required this.onSend,
     required this.onKey,
+    this.pendingImages = const [],
+    required this.onImagesChanged,
   });
 
   @override
@@ -2597,6 +2735,9 @@ class _InputBar extends StatefulWidget {
 class _InputBarState extends State<_InputBar> {
   bool _showSlashMenu = false;
   String _slashFilter = '';
+  final _imagePicker = ImagePicker();
+  final _speech = stt.SpeechToText();
+  bool _isListening = false;
 
   @override
   void initState() {
@@ -2641,6 +2782,87 @@ class _InputBarState extends State<_InputBar> {
     return kSlashCommands
         .where((c) => c.command.substring(1).contains(_slashFilter))
         .toList();
+  }
+
+  Future<void> _pickImage() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('从相册选择'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null) return;
+
+    final picked = await _imagePicker.pickImage(
+      source: source,
+      maxWidth: 1920,
+      maxHeight: 1920,
+      imageQuality: 85,
+    );
+    if (picked == null) return;
+
+    final bytes = await picked.readAsBytes();
+    final b64 = base64Encode(bytes);
+    final mime = picked.mimeType ?? (picked.path.endsWith('.png') ? 'image/png' : 'image/jpeg');
+
+    final updated = List<Map<String, String>>.from(widget.pendingImages)
+      ..add({'data': b64, 'mimeType': mime});
+    widget.onImagesChanged(updated);
+  }
+
+  Future<void> _toggleListening() async {
+    if (_isListening) {
+      await _speech.stop();
+      setState(() => _isListening = false);
+      return;
+    }
+
+    final available = await _speech.initialize(
+      onError: (e) {
+        debugPrint('STT error: $e');
+        setState(() => _isListening = false);
+      },
+    );
+    if (!available) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('语音识别不可用')),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isListening = true);
+    await _speech.listen(
+      onResult: (result) {
+        final current = widget.controller.text;
+        final recognized = result.recognizedWords;
+        if (recognized.isNotEmpty) {
+          widget.controller.text = current.isEmpty ? recognized : '$current $recognized';
+          widget.controller.selection = TextSelection.fromPosition(
+            TextPosition(offset: widget.controller.text.length),
+          );
+        }
+        if (result.finalResult) {
+          setState(() => _isListening = false);
+        }
+      },
+      localeId: 'zh_CN',
+    );
   }
 
   @override
@@ -2748,8 +2970,70 @@ class _InputBarState extends State<_InputBar> {
                     .toList(),
               ),
             ),
+          // Image preview strip
+          if (widget.pendingImages.isNotEmpty)
+            SizedBox(
+              height: 72,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.only(bottom: 6),
+                itemCount: widget.pendingImages.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                itemBuilder: (ctx, i) {
+                  final bytes = base64Decode(widget.pendingImages[i]['data']!);
+                  return Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.memory(bytes, width: 64, height: 64, fit: BoxFit.cover),
+                      ),
+                      Positioned(
+                        top: -4,
+                        right: -4,
+                        child: GestureDetector(
+                          onTap: () {
+                            final updated = List<Map<String, String>>.from(widget.pendingImages)..removeAt(i);
+                            widget.onImagesChanged(updated);
+                          },
+                          child: Container(
+                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                            padding: const EdgeInsets.all(2),
+                            child: const Icon(Icons.close, size: 14, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
           Row(
             children: [
+              // Image picker button
+              if (!isReadOnly)
+                IconButton(
+                  onPressed: effectiveLoading ? null : _pickImage,
+                  icon: const Icon(Icons.image, size: 22),
+                  tooltip: '添加图片',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(),
+                  padding: const EdgeInsets.all(6),
+                ),
+              // Voice input button
+              if (!isReadOnly)
+                IconButton(
+                  onPressed: effectiveLoading ? null : _toggleListening,
+                  icon: Icon(
+                    _isListening ? Icons.mic : Icons.mic_none,
+                    size: 22,
+                    color: _isListening ? Colors.red : null,
+                  ),
+                  tooltip: _isListening ? '停止录音' : '语音输入',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(),
+                  padding: const EdgeInsets.all(6),
+                ),
+              const SizedBox(width: 4),
               Expanded(
                 child: TextField(
                   controller: widget.controller,
@@ -2772,6 +3056,45 @@ class _InputBarState extends State<_InputBar> {
                 ),
               ),
               const SizedBox(width: 8),
+              // Special keys button
+              IconButton(
+                onPressed: isReadOnly ? null : () {
+                      // Show special keys bottom sheet
+                      showModalBottomSheet(
+                        context: context,
+                        builder: (ctx) => Container(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 16),
+                              Wrap(
+                                spacing: 8,
+                                runSpacing: 8,
+                                children: [
+                                  ActionChip(label: const Text('ESC'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('esc'); }),
+                                  ActionChip(label: const Text('Ctrl+C'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_c'); }),
+                                  ActionChip(label: const Text('Ctrl+D'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_d'); }),
+                                  ActionChip(label: const Text('Ctrl+Z'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_z'); }),
+                                  ActionChip(label: const Text('Ctrl+A'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_a'); }),
+                                  ActionChip(label: const Text('Ctrl+E'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_e'); }),
+                                  ActionChip(label: const Text('Tab'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('tab'); }),
+                                  ActionChip(label: const Text('↑'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('up'); }),
+                                  ActionChip(label: const Text('↓'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('down'); }),
+                                  ActionChip(label: const Text('←'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('left'); }),
+                                  ActionChip(label: const Text('→'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('right'); }),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                icon: const Icon(Icons.keyboard_hide),
+                tooltip: '特殊按键',
+              ),
+              const SizedBox(width: 4),
               effectiveLoading
                   ? const SizedBox(
                       width: 40,
