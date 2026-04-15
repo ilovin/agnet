@@ -61,18 +61,14 @@ func runServer() {
 		log.Printf("warning: failed to load agents from store: %v", err)
 	}
 
-	// Auto-attach to any Claude/OpenCode processes already running on this machine
-	procs, err := mgr.ScanExisting()
-	if err != nil {
-		log.Printf("warning: scan existing processes: %v", err)
-	}
-	for _, proc := range procs {
-		if ag, err := mgr.Attach(proc); err != nil {
-			log.Printf("warning: auto-attach pid %d: %v", proc.PID, err)
-		} else {
-			log.Printf("[AutoAttach] Attached to %s (pid %d) as agent %s", proc.Provider, proc.PID, ag.ID)
-		}
-	}
+	// Auto-attach to any Claude/OpenCode processes already running on this machine.
+	// The manager classifies candidates conservatively so ambiguous Claude
+	// processes (for example team sub-agents with no stable session id) are not
+	// promoted into app-visible sessions.
+	mgr.AutoAttachExisting()
+
+	// Start periodic scan goroutine to detect new processes
+	go mgr.PeriodicScanAndAttach()
 
 	srv := ws.New(mgr, cfg.Token)
 

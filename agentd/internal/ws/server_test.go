@@ -2,6 +2,7 @@ package ws_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,6 +42,102 @@ func dialWS(t *testing.T, ts *httptest.Server, token string) *websocket.Conn {
 	return conn
 }
 
+func readEvent(t *testing.T, conn *websocket.Conn, method string) map[string]any {
+	t.Helper()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		var resp map[string]any
+		if err := conn.ReadJSON(&resp); err != nil {
+			t.Fatalf("read event failed: %v", err)
+		}
+		gotMethod, _ := resp["method"].(string)
+		if gotMethod != method {
+			continue
+		}
+		return resp
+	}
+}
+
+func writeCCSwitchFixture(t *testing.T, home string, providers []string, currentProviderID, runtimeProviderID string) {
+	t.Helper()
+	ccDir := filepath.Join(home, ".cc-switch")
+	if err := os.MkdirAll(ccDir, 0o755); err != nil {
+		t.Fatalf("mkdir cc-switch dir: %v", err)
+	}
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("mkdir claude dir: %v", err)
+	}
+
+	dbPath := filepath.Join(ccDir, "cc-switch.db")
+	initSQL := `CREATE TABLE IF NOT EXISTS providers (
+		id TEXT NOT NULL,
+		app_type TEXT NOT NULL,
+		name TEXT NOT NULL,
+		settings_config TEXT NOT NULL,
+		website_url TEXT,
+		category TEXT,
+		created_at INTEGER,
+		sort_index INTEGER,
+		notes TEXT,
+		icon TEXT,
+		icon_color TEXT,
+		meta TEXT NOT NULL DEFAULT '{}',
+		is_current BOOLEAN NOT NULL DEFAULT 0,
+		in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+		cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+		limit_daily_usd TEXT,
+		limit_monthly_usd TEXT,
+		provider_type TEXT,
+		PRIMARY KEY (id, app_type)
+	)`
+	if out, err := exec.Command("sqlite3", dbPath, initSQL).CombinedOutput(); err != nil {
+		t.Fatalf("init cc-switch db: %v (%s)", err, out)
+	}
+
+	for i, id := range providers {
+		isCurrent := 0
+		if id == currentProviderID {
+			isCurrent = 1
+		}
+		baseURL := fmt.Sprintf("https://%s.example.com", id)
+		authToken := fmt.Sprintf("token-%s", id)
+		model := fmt.Sprintf("model-%s", id)
+		config := fmt.Sprintf(`{"env":{"ANTHROPIC_BASE_URL":"%s","ANTHROPIC_AUTH_TOKEN":"%s"},"model":"%s"}`,
+			baseURL, authToken, model,
+		)
+		insertSQL := fmt.Sprintf(
+			"INSERT INTO providers (id, app_type, name, settings_config, sort_index, is_current) VALUES ('%s', 'claude', '%s', '%s', %d, %d)",
+			id,
+			strings.ReplaceAll(id, "'", "''"),
+			strings.ReplaceAll(config, "'", "''"),
+			i,
+			isCurrent,
+		)
+		if out, err := exec.Command("sqlite3", dbPath, insertSQL).CombinedOutput(); err != nil {
+			t.Fatalf("insert provider %s: %v (%s)", id, err, out)
+		}
+	}
+
+	settings := map[string]any{}
+	if runtimeProviderID != "" {
+		settings = map[string]any{
+			"env": map[string]any{
+				"ANTHROPIC_BASE_URL":   fmt.Sprintf("https://%s.example.com", runtimeProviderID),
+				"ANTHROPIC_AUTH_TOKEN": fmt.Sprintf("token-%s", runtimeProviderID),
+			},
+			"model": fmt.Sprintf("model-%s", runtimeProviderID),
+		}
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+}
+
 var rpcIDCounter int
 
 func rpc(conn *websocket.Conn, method string, params any) map[string]any {
@@ -63,6 +160,38 @@ func rpc(conn *websocket.Conn, method string, params any) map[string]any {
 			return resp
 		}
 	}
+}
+
+func rpcWithEvent(t *testing.T, conn *websocket.Conn, method string, params any, eventMethod string) (map[string]any, map[string]any) {
+	t.Helper()
+	rpcIDCounter++
+	id := rpcIDCounter
+	req := map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+	if err := conn.WriteJSON(req); err != nil {
+		t.Fatalf("write rpc failed: %v", err)
+	}
+
+	var resp map[string]any
+	var event map[string]any
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for resp == nil || event == nil {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read rpc/event failed: %v", err)
+		}
+		if gotMethod, _ := msg["method"].(string); gotMethod == eventMethod {
+			event = msg
+			continue
+		}
+		respID, hasID := msg["id"]
+		if !hasID {
+			continue
+		}
+		if respFloat, ok := respID.(float64); ok && int(respFloat) == id {
+			resp = msg
+		}
+	}
+	return resp, event
 }
 
 func setupFakeClaude(t *testing.T) {
@@ -144,12 +273,70 @@ func TestAgentCreateAndList(t *testing.T) {
 	}
 }
 
+func TestAgentListIncludesDerivedStateFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a"}, "provider-a", "provider-a")
+
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.create", map[string]any{
+		"name":      "claude-agent",
+		"provider":  "claude",
+		"workDir":   t.TempDir(),
+		"sessionId": "sess-123",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("create error: %v", resp["error"])
+	}
+
+	listResp := rpc(conn, "agent.list", nil)
+	if listResp["error"] != nil {
+		t.Fatalf("agent.list error: %v", listResp["error"])
+	}
+	b, _ := json.Marshal(listResp["result"])
+	var agents []map[string]any
+	if err := json.Unmarshal(b, &agents); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+
+	ag := agents[0]
+	if got := ag["sessionId"]; got != "sess-123" {
+		t.Fatalf("expected sessionId sess-123, got %#v", got)
+	}
+	if got := ag["runtimeState"]; got != "exited" {
+		t.Fatalf("expected runtimeState=exited, got %#v", got)
+	}
+	if got := ag["sessionState"]; got != "resumable" {
+		t.Fatalf("expected sessionState=resumable, got %#v", got)
+	}
+	if got := ag["sessionControl"]; got != "rebindable" {
+		t.Fatalf("expected sessionControl=rebindable, got %#v", got)
+	}
+	if got := ag["providerState"]; got != "synced" {
+		t.Fatalf("expected providerState=synced, got %#v", got)
+	}
+	if got := ag["providerScope"]; got != "standalone" {
+		t.Fatalf("expected providerScope=standalone, got %#v", got)
+	}
+	if got := ag["providerWriteMode"]; got != "writable" {
+		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
+	}
+}
+
 func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	mgr := agent.NewManager(s, t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a"}, "provider-a", "provider-a")
 	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
 	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
@@ -187,37 +374,263 @@ func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
 	if got, _ := agents[0]["readOnly"].(bool); !got {
 		t.Fatalf("expected readOnly=true, got %#v", agents[0]["readOnly"])
 	}
+	if got := agents[0]["sessionControl"]; got != "read_only" {
+		t.Fatalf("expected sessionControl=read_only, got %#v", got)
+	}
+	if got := agents[0]["providerScope"]; got != "root" {
+		t.Fatalf("expected providerScope=root, got %#v", got)
+	}
+	if got := agents[0]["providerWriteMode"]; got != "read_only" {
+		t.Fatalf("expected providerWriteMode=read_only, got %#v", got)
+	}
+	if got := agents[0]["providerReadOnlyReason"]; got != "attached runtime cannot guarantee immediate provider switch" {
+		t.Fatalf("unexpected providerReadOnlyReason: %#v", got)
+	}
 }
 
-func TestConversationSend(t *testing.T) {
+func TestAgentStatusChangedEventIncludesDerivedFields(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a"}, "provider-a", "provider-a")
+
 	ts, _ := newTestServer(t)
 	conn := dialWS(t, ts, "testtoken")
 
-	workDir := t.TempDir()
 	createResp := rpc(conn, "agent.create", map[string]any{
-		"name": "cat-agent", "cmd": "cat", "args": []string{},
-		"workDir": workDir,
+		"name":      "claude-agent",
+		"provider":  "claude",
+		"workDir":   t.TempDir(),
+		"sessionId": "sess-evt",
 	})
 	if createResp["error"] != nil {
 		t.Fatalf("create error: %v", createResp["error"])
 	}
-	result := createResp["result"].(map[string]any)
-	agentID := result["id"].(string)
+	createResult, ok := createResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected create result map, got %T", createResp["result"])
+	}
+	agentID, _ := createResult["id"].(string)
+	_ = rpc(conn, "agent.list", nil)
 
-	sendResp := rpc(conn, "conversation.send", map[string]any{
+	resp, event := rpcWithEvent(t, conn, "agent.rename", map[string]any{
 		"agentId": agentID,
-		"message": "hello agent",
-	})
-	if sendResp["error"] != nil {
-		t.Fatalf("send error: %v", sendResp["error"])
+		"name":    "renamed-agent",
+	}, "agent.status_changed")
+	if resp["error"] != nil {
+		t.Fatalf("rename error: %v", resp["error"])
 	}
 
-	errResp := rpc(conn, "conversation.send", map[string]any{
-		"agentId": "nonexistent",
-		"message": "hello",
+	params, ok := event["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected params map, got %T", event["params"])
+	}
+	if got := params["agentId"]; got != agentID {
+		t.Fatalf("expected agentId %s, got %#v", agentID, got)
+	}
+	if got := params["name"]; got != "renamed-agent" {
+		t.Fatalf("expected name in event, got %#v", got)
+	}
+	if got := params["status"]; got != "idle" {
+		t.Fatalf("expected status=idle, got %#v", got)
+	}
+	if got := params["runtimeState"]; got != "exited" {
+		t.Fatalf("expected runtimeState=exited, got %#v", got)
+	}
+	if got := params["sessionState"]; got != "resumable" {
+		t.Fatalf("expected sessionState=resumable, got %#v", got)
+	}
+	if got := params["sessionControl"]; got != "rebindable" {
+		t.Fatalf("expected sessionControl=rebindable, got %#v", got)
+	}
+	if got := params["providerState"]; got != "synced" {
+		t.Fatalf("expected providerState=synced, got %#v", got)
+	}
+	if got := params["providerWriteMode"]; got != "writable" {
+		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
+	}
+}
+
+func TestProviderListIncludesStateSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a", "provider-b"}, "provider-a", "provider-b")
+
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	createResp := rpc(conn, "agent.create", map[string]any{
+		"name":      "claude-agent",
+		"provider":  "claude",
+		"workDir":   t.TempDir(),
+		"sessionId": "sess-provider",
 	})
-	if errResp["error"] == nil {
-		t.Error("expected error for non-existent agent")
+	if createResp["error"] != nil {
+		t.Fatalf("create error: %v", createResp["error"])
+	}
+	createResult, _ := createResp["result"].(map[string]any)
+	agentID, _ := createResult["id"].(string)
+
+	resp := rpc(conn, "provider.list", map[string]any{"agentId": agentID})
+	if resp["error"] != nil {
+		t.Fatalf("provider.list error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp["result"])
+	}
+	providers, ok := result["providers"].([]any)
+	if !ok || len(providers) != 2 {
+		t.Fatalf("expected 2 providers, got %#v", result["providers"])
+	}
+	if got := result["current"]; got != "provider-a" {
+		t.Fatalf("expected current provider-a, got %#v", got)
+	}
+	if got := result["runtimeProviderId"]; got != "provider-b" {
+		t.Fatalf("expected runtimeProviderId provider-b, got %#v", got)
+	}
+	if got := result["providerState"]; got != "drifted" {
+		t.Fatalf("expected providerState=drifted, got %#v", got)
+	}
+	if got := result["providerScope"]; got != "standalone" {
+		t.Fatalf("expected providerScope=standalone, got %#v", got)
+	}
+	if got := result["providerWriteMode"]; got != "writable" {
+		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
+	}
+}
+
+func TestProviderListWithoutAgentIDIsReadOnly(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a", "provider-b"}, "provider-a", "provider-b")
+
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	createResp := rpc(conn, "agent.create", map[string]any{
+		"name":      "claude-agent",
+		"provider":  "claude",
+		"workDir":   t.TempDir(),
+		"sessionId": "sess-provider",
+	})
+	if createResp["error"] != nil {
+		t.Fatalf("create error: %v", createResp["error"])
+	}
+
+	resp := rpc(conn, "provider.list", nil)
+	if resp["error"] != nil {
+		t.Fatalf("provider.list error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp["result"])
+	}
+	if got := result["providerWriteMode"]; got != "read_only" {
+		t.Fatalf("expected providerWriteMode=read_only, got %#v", got)
+	}
+	if got := result["providerReadOnlyReason"]; got != "agentId is required to determine safe provider switching" {
+		t.Fatalf("unexpected providerReadOnlyReason: %#v", got)
+	}
+}
+
+func TestProviderSwitchRejectsReadOnlyAttachedAgent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a", "provider-b"}, "provider-a", "provider-a")
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "provider.switch", map[string]any{
+		"agentId":    ag.ID,
+		"providerId": "provider-b",
+	})
+	if resp["error"] == nil {
+		t.Fatal("expected error for read-only attached agent")
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if got := int(errObj["code"].(float64)); got != -32000 {
+		t.Fatalf("expected -32000, got %d", got)
+	}
+	if got := errObj["message"]; got != "attached runtime cannot guarantee immediate provider switch" {
+		t.Fatalf("unexpected error message: %#v", got)
+	}
+}
+
+func TestProviderSwitchRejectsInheritedScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a", "provider-b"}, "provider-a", "provider-a")
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	workDir := t.TempDir()
+	rootSessionFile := filepath.Join(t.TempDir(), "root-attached.jsonl")
+	if err := os.WriteFile(rootSessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write root session file: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     workDir,
+		SessionFile: rootSessionFile,
+	}); err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	childID, err := mgr.Create("child", "claude", "claude", []string{"--permission-mode", "bypassPermissions"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create child agent: %v", err)
+	}
+	if err := mgr.UpdateResumeSessionID(childID, "root-attached"); err != nil {
+		t.Fatalf("update child resume session: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "provider.switch", map[string]any{
+		"agentId":    childID,
+		"providerId": "provider-b",
+	})
+	if resp["error"] == nil {
+		t.Fatal("expected error for inherited provider scope")
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if got := errObj["message"]; got != "provider scope is inherited from root session" {
+		t.Fatalf("unexpected error message: %#v", got)
 	}
 }
 
@@ -351,6 +764,87 @@ func TestSessionCreateAndList(t *testing.T) {
 	}
 }
 
+func TestConversationSendRejectsWatcherAttach(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "hello",
+	})
+	if resp["error"] == nil {
+		t.Fatal("expected error for read-only attached agent")
+	}
+	errObj := resp["error"].(map[string]any)
+	if got := int(errObj["code"].(float64)); got != -32000 {
+		t.Fatalf("expected -32000, got %d", got)
+	}
+}
+
+func TestAgentRestartRejectsWatcherAttach(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.restart", map[string]any{
+		"agentId": ag.ID,
+	})
+	if resp["error"] == nil {
+		t.Fatal("expected error for read-only attached agent")
+	}
+	errObj := resp["error"].(map[string]any)
+	if got := int(errObj["code"].(float64)); got != -32000 {
+		t.Fatalf("expected -32000, got %d", got)
+	}
+}
+
 func TestSessionAttachRequiresPidOrSessionID(t *testing.T) {
 	ts, _ := newTestServer(t)
 	conn := dialWS(t, ts, "testtoken")
@@ -379,6 +873,10 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	repoDir := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatalf("mkdir repo dir: %v", err)
+	}
+	fallbackRepoDir := filepath.Join(t.TempDir(), "fallback-repo")
+	if err := os.MkdirAll(fallbackRepoDir, 0o755); err != nil {
+		t.Fatalf("mkdir fallback repo dir: %v", err)
 	}
 	claudeBin := filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(claudeBin, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
@@ -412,6 +910,14 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(claudeProjectDir, "sess-archived.jsonl"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatalf("write archived claude file: %v", err)
 	}
+	fallbackProjectDir := filepath.Join(claudeProjectsDir, strings.ReplaceAll(fallbackRepoDir, "/", "-"))
+	if err := os.MkdirAll(fallbackProjectDir, 0o755); err != nil {
+		t.Fatalf("mkdir fallback claude project dir: %v", err)
+	}
+	fallbackSessionFile := filepath.Join(fallbackProjectDir, "sess-fallback.jsonl")
+	if err := os.WriteFile(fallbackSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write fallback claude file: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
 		t.Fatalf("mkdir claude sessions dir: %v", err)
 	}
@@ -420,18 +926,34 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		t.Fatalf("write live session pid map: %v", err)
 	}
 
-	ts, _ := newTestServer(t)
-	conn := dialWS(t, ts, "testtoken")
-
-	createResp := rpc(conn, "agent.create", map[string]any{
-		"name":    "managed-1",
-		"cmd":     "echo",
-		"args":    []string{"hello"},
-		"workDir": t.TempDir(),
-	})
-	if createResp["error"] != nil {
-		t.Fatalf("agent.create error: %v", createResp["error"])
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
 	}
+	mgr := agent.NewManager(s, t.TempDir())
+	managedSessionFile := filepath.Join(t.TempDir(), "managed-attached.jsonl")
+	if err := os.WriteFile(managedSessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write managed session file: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{PID: os.Getpid(), Provider: "claude", WorkDir: t.TempDir(), SessionFile: managedSessionFile}); err != nil {
+		t.Fatalf("attach managed agent: %v", err)
+	}
+	teamChildPID := liveCmd.Process.Pid + 1
+	fallbackPID := liveCmd.Process.Pid + 2
+	mgr.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{
+			{PID: liveCmd.Process.Pid, Provider: "claude", WorkDir: repoDir, SessionID: "sess-live", SessionFile: filepath.Join(claudeProjectDir, "sess-live.jsonl")},
+			{PID: fallbackPID, Provider: "claude", WorkDir: fallbackRepoDir},
+			{PID: teamChildPID, Provider: "claude", WorkDir: repoDir},
+		}, nil
+	})
+	server := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(server)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
 
 	resp := rpc(conn, "session.catalog", nil)
 	if resp["error"] != nil {
@@ -455,15 +977,26 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		t.Fatalf("expected attachable array, got %T", result["attachable"])
 	}
 	foundLiveAttachable := false
+	foundFallbackAttachable := false
 	for _, raw := range attachable {
 		entry, _ := raw.(map[string]any)
 		if entry["provider"] == "claude" && entry["sessionId"] == "sess-live" {
 			foundLiveAttachable = true
-			break
+		}
+		if entry["provider"] == "claude" && entry["sessionId"] == "sess-fallback" {
+			foundFallbackAttachable = true
+		}
+		if entry["provider"] == "claude" {
+			if pid, _ := entry["pid"].(float64); int(pid) == teamChildPID {
+				t.Fatalf("expected ambiguous child claude session to be hidden from attachable, got %v", attachable)
+			}
 		}
 	}
 	if !foundLiveAttachable {
 		t.Fatalf("expected live claude session in attachable, got %v", attachable)
+	}
+	if !foundFallbackAttachable {
+		t.Fatalf("expected fallback claude session in attachable, got %v", attachable)
 	}
 
 	files, ok := result["opencodeFiles"].([]any)
@@ -491,6 +1024,9 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		entry, _ := raw.(map[string]any)
 		if entry["id"] == "sess-live" {
 			t.Fatalf("expected live claude session to be excluded from claudeFiles, got %v", claudeFiles)
+		}
+		if entry["id"] == "sess-fallback" {
+			t.Fatalf("expected fallback live claude session to be excluded from claudeFiles, got %v", claudeFiles)
 		}
 		if entry["id"] == "sess-archived" {
 			foundArchivedClaude = true

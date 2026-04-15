@@ -1,13 +1,14 @@
 package watcher
 
 import (
-	"log"
 	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,10 +92,17 @@ func (w *ClaudeWatcher) loop() {
 	}
 }
 
-// refreshSessionFile finds the most recently modified .jsonl in the project
-// directory and switches to it if it differs from the current file.
-// After /clear, Claude creates a new session file — this detects it by mtime.
+// refreshSessionFile keeps the watcher bound to the live session file.
+// Prefer the exact session file from ~/.claude/sessions/<pid>.json when available,
+// which lets us follow real session transitions (for example after /clear)
+// without hopping to unrelated jsonl files that happen to get a newer mtime.
 func (w *ClaudeWatcher) refreshSessionFile() {
+	if mapped := w.pidMappedSessionFile(); mapped != "" {
+		if mapped != w.path {
+			w.switchToFile(mapped)
+		}
+		return
+	}
 	if w.workDir == "" {
 		return
 	}
@@ -104,10 +112,9 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	}
 	projectsDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
 
-	// Find the most recently modified .jsonl in the project directory.
-	// The active session is always the one being written to, so it has
-	// the latest mtime. After /clear, the new session file will quickly
-	// become the most recently modified.
+	// Fallback: find the most recently modified .jsonl in the project directory.
+	// This keeps older sessions without a pid map working, while exact pid mapping
+	// above protects the normal live-session attach path from rebinding.
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return
@@ -130,12 +137,36 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		}
 	}
 
-	// Switch only if we found a different file
 	if bestPath != "" && bestPath != w.path {
 		w.switchToFile(bestPath)
 	}
 }
 
+func (w *ClaudeWatcher) pidMappedSessionFile() string {
+	if w.pid <= 0 || w.workDir == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	pidFile := filepath.Join(home, ".claude", "sessions", strconv.Itoa(w.pid)+".json")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return ""
+	}
+	var pidInfo struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &pidInfo); err != nil || pidInfo.SessionID == "" {
+		return ""
+	}
+	candidate := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir), pidInfo.SessionID+".jsonl")
+	if _, err := os.Stat(candidate); err != nil {
+		return ""
+	}
+	return candidate
+}
 
 func (w *ClaudeWatcher) switchToFile(newPath string) {
 	oldPath := w.path

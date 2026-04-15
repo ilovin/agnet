@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/agent_model.dart';
@@ -103,6 +104,69 @@ String stripTerminalDrawing(String s) {
       .trim();
 }
 
+/// Optimizes raw speech-to-text result before inserting into the text field.
+/// [raw] is the final recognized words. [currentText] is the existing controller text.
+/// Optimizes voice input text (from system IME speech recognition).
+/// Can be called either as an inline insert ([raw] appended to [currentText])
+/// or as a full rewrite ([currentText] empty).
+String _optimizeVoiceInput(String raw, String currentText) {
+  var cleaned = raw.trim();
+  if (cleaned.isEmpty) return '';
+
+  // Remove repeated consecutive words (common STT stuttering artifact)
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'\b(\S+)(\s+\1)+\b', caseSensitive: false),
+    (m) => m.group(1)!,
+  );
+
+  // Remove common Chinese filler words
+  cleaned = cleaned
+      .replaceAllMapped(
+        RegExp(r'^(嗯|啊|呃|那个|就是|然后|所以|比如说)\s*[，,]?\s*', caseSensitive: false),
+        (_) => '',
+      )
+      .replaceAllMapped(
+        RegExp(r'\s+[，,]?\s*(嗯|啊|呃|那个|就是|然后|所以|比如说)\s*[，,]?\s*', caseSensitive: false),
+        (_) => '，',
+      );
+
+  // Fix Chinese punctuation spacing: remove spaces around CJK punctuation
+  cleaned = cleaned
+      .replaceAll(RegExp('\\s+([。，、；：？！""\'（）])'), r'$1')
+      .replaceAll(RegExp('([。，、；：？！""\'（）])\\s+'), r'$1')
+      // Collapse multiple Chinese commas
+      .replaceAll(RegExp(r'[，,]{2,}'), '，');
+
+  // Auto-append sentence-ending punctuation if missing
+  if (cleaned.isNotEmpty &&
+      !RegExp(r'[。，、；：？!.?!\n]$').hasMatch(cleaned[cleaned.length - 1])) {
+    cleaned += '。';
+  }
+
+  // Context-aware insertion
+  final current = currentText.trim();
+  if (current.isEmpty) return cleaned;
+
+  // If current already ends with the same text (or very similar), deduplicate
+  if (current.endsWith(cleaned)) {
+    return '';
+  }
+  // If cleaned starts with the tail of current, trim the overlap
+  for (int overlap = cleaned.length; overlap > 0; overlap--) {
+    if (current.toLowerCase().endsWith(cleaned.substring(0, overlap).toLowerCase())) {
+      cleaned = cleaned.substring(overlap).trimLeft();
+      break;
+    }
+  }
+  if (cleaned.isEmpty) return '';
+
+  // Decide separator: newline after sentence terminator, otherwise space
+  final lastChar = current.isNotEmpty ? current.substring(current.length - 1) : '';
+  final terminators = {'.', '?', '!', '。', '？', '！', '\n'};
+  final separator = terminators.contains(lastChar) ? '\n' : ' ';
+  return separator + cleaned;
+}
+
 /// Chat message model for display
 class ChatMessage {
   final String role;
@@ -111,6 +175,9 @@ class ChatMessage {
   final bool isRaw;
   final String kind;
   final bool isPermissionPrompt;
+  final int imageCount;
+  final List<Map<String, dynamic>> activities;
+  final List<String> images;
 
   /// true if this is a tool call (e.g. [Bash: git status])
   bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
@@ -126,7 +193,7 @@ class ChatMessage {
   }
 
   /// true if this message is a grouped assistant activity block.
-  bool get isActivityBlock => role == 'assistant' && kind == 'activity_block';
+  bool get isActivityBlock => role == 'assistant' && (kind == 'activity_block' || kind == 'activity_list');
 
   /// Matches tool call patterns: [Bash: cmd], [Agent], [SendMessage], [TaskList], etc.
   static final _toolCallPattern = RegExp(r'^\[[\w]+[:\]]');
@@ -143,6 +210,9 @@ class ChatMessage {
     this.isRaw = false,
     this.kind = '',
     this.isPermissionPrompt = false,
+    this.imageCount = 0,
+    this.activities = const [],
+    this.images = const [],
   });
 }
 
@@ -324,6 +394,9 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
     'raw': map['raw'] ?? false,
     'kind': map['kind'] ?? '',
     'awaitingPermission': map['awaitingPermission'] ?? false,
+    'imageCount': map['imageCount'] ?? 0,
+    'activities': map['activities'] ?? <Map<String, dynamic>>[],
+    'images': (map['images'] as List?)?.map((e) => e.toString()).toList() ?? <String>[],
     if (map.containsKey('permissionRequest'))
       'permissionRequest': map['permissionRequest'],
   };
@@ -333,6 +406,51 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
 /// Handles both structured stream-json events and legacy PTY raw output.
 /// Merges consecutive assistant text_delta fragments into complete messages.
 /// Collapses consecutive tool/read activity into a stable block.
+/// Builds a structured activity item from后端event data.
+Map<String, dynamic> _buildActivityItem(String text, String kind, Map<String, dynamic> rawEvent) {
+  final explicitToolName = (rawEvent['toolName'] as String?) ?? '';
+
+  if (kind == 'tool_result') {
+    return {
+      'kind': 'tool_result',
+      'toolName': explicitToolName,
+      'title': '',
+      'content': text,
+    };
+  }
+
+  if (text.startsWith('[') && text.endsWith(']')) {
+    final inner = text.substring(1, text.length - 1);
+    final colonIdx = inner.indexOf(': ');
+    final prefix = colonIdx >= 0 ? inner.substring(0, colonIdx) : inner;
+    final suffix = colonIdx >= 0 ? inner.substring(colonIdx + 2).trim() : '';
+
+    // Legacy "[Using tool: Read]" -> treat "Read" as the actual tool
+    if (prefix == 'Using tool') {
+      return {
+        'kind': 'tool_use',
+        'toolName': suffix,
+        'title': suffix,
+        'content': '',
+      };
+    }
+
+    return {
+      'kind': 'tool_use',
+      'toolName': explicitToolName.isNotEmpty ? explicitToolName : prefix,
+      'title': suffix,
+      'content': '',
+    };
+  }
+
+  return {
+    'kind': 'activity',
+    'toolName': explicitToolName,
+    'title': text,
+    'content': '',
+  };
+}
+
 List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final messages = <ChatMessage>[];
 
@@ -346,8 +464,12 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   // duplicating content that was already flushed from the delta buffer.
   bool hadTextDelta = false;
 
-  // Buffer for grouping consecutive tool activities into a single stable block
-  final activityBuf = StringBuffer();
+  // Accumulate text_delta content to detect extra text in 'result' events
+  // (e.g. btw addendum that isn't streamed as text_delta).
+  final deltaTextBuf = StringBuffer();
+
+  // Structured items for assistant activities (tools, reads, etc.)
+  final List<Map<String, dynamic>> activityItems = [];
   int activitySeq = 0;
 
   // Buffer for grouping consecutive thinking events into a single block
@@ -373,16 +495,17 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   }
 
   void flushActivityBuf() {
-    if (activityBuf.isEmpty) return;
-    final activityText = activityBuf.toString().trim();
-    activityBuf.clear();
-    if (activityText.isNotEmpty) {
+    if (activityItems.isEmpty) return;
+    final items = List<Map<String, dynamic>>.from(activityItems);
+    activityItems.clear();
+    if (items.isNotEmpty) {
       messages.add(
         ChatMessage(
           role: 'assistant',
-          text: activityText,
+          text: '',
           seq: activitySeq,
-          kind: 'activity_block',
+          kind: 'activity_list',
+          activities: items,
         ),
       );
     }
@@ -430,6 +553,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       flushActivityBuf();
       flushThinkingBuf();
       hadTextDelta = false;
+      deltaTextBuf.clear();
       if (!isNoiseOnlyText(cleaned)) {
         messages.add(
           ChatMessage(
@@ -438,27 +562,23 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
             seq: seq,
             isRaw: raw,
             kind: kind,
+            imageCount: (e['imageCount'] as num?)?.toInt() ?? 0,
+            images: (e['images'] as List?)?.map((i) => i.toString()).toList() ?? <String>[],
           ),
         );
       }
       continue;
     }
 
-    // Group consecutive tool/read/use activity events into one block.
+    // Group consecutive tool/read/use activity events into one structured block.
     if (_isToolActivityEvent(role: role, kind: kind, text: cleaned, raw: raw)) {
       flushMergeBuf();
       flushThinkingBuf();
       if (!isNoiseOnlyText(cleaned) && cleaned.isNotEmpty) {
-        if (activityBuf.isEmpty) {
+        if (activityItems.isEmpty) {
           activitySeq = seq;
-          activityBuf.write(cleaned);
-        } else {
-          final existing = activityBuf.toString();
-          if (!existing.endsWith(cleaned)) {
-            activityBuf.write('\n');
-            activityBuf.write(cleaned);
-          }
         }
+        activityItems.add(_buildActivityItem(cleaned, kind, e));
       }
       continue;
     }
@@ -480,10 +600,15 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     }
 
     // Assistant text_delta should not be mixed with activity block or thinking block.
+    // Only flush if the delta has real content — empty/newline deltas are common
+    // in stream-json and should not break consecutive tool activity grouping.
     if (kind == 'text_delta') {
-      flushActivityBuf();
-      flushThinkingBuf();
+      if (cleaned.isNotEmpty && !isNoiseOnlyText(cleaned)) {
+        flushActivityBuf();
+        flushThinkingBuf();
+      }
       hadTextDelta = true;
+      deltaTextBuf.write(cleaned);
     }
 
     // Determine if this is a fragment that should be merged
@@ -519,17 +644,52 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // If we already received text_delta fragments for this turn, the content
     // was already flushed via mergeBuf — skip to avoid duplicates.
     // Also handle legacy events where kind is empty.
+    // For 'result' events: extract extra content (e.g. btw addendum) that wasn't
+    // in text_deltas. Only skip if result text is fully covered by delta text.
     if (role == 'assistant' && !raw && hadTextDelta &&
-        (kind == 'text' || kind == '' || kind == 'assistant')) {
-      // Reset delta flag for the next turn; flush any remaining delta buffer
+        (kind == 'text' || kind == '' || kind == 'result')) {
       flushMergeBuf();
+      if (kind == 'result') {
+        // Check if result contains extra content beyond text_deltas (e.g. btw)
+        final deltaText = deltaTextBuf.toString().trim();
+        final resultText = cleaned.trim();
+        if (resultText.length > deltaText.length + 20) {
+          // Result has significant extra content — extract it
+          // Find where delta text ends in the result and take the remainder
+          String extra = '';
+          if (deltaText.isNotEmpty && resultText.contains(deltaText)) {
+            extra = resultText.substring(resultText.indexOf(deltaText) + deltaText.length).trim();
+          } else if (deltaText.isNotEmpty) {
+            // Fuzzy match: check if result starts with similar content
+            final deltaLen = deltaText.length;
+            if (resultText.length > deltaLen) {
+              extra = resultText.substring(deltaLen).trim();
+              // Skip leading separators (newlines, dashes, whitespace)
+              extra = extra.replaceFirst(RegExp(r'^[\s\-─═]+\s*'), '');
+            }
+          }
+          if (extra.isNotEmpty && !isNoiseOnlyText(extra)) {
+            messages.add(
+              ChatMessage(
+                role: 'assistant',
+                text: extra,
+                seq: seq,
+                isRaw: false,
+                kind: 'btw',
+              ),
+            );
+          }
+        }
+      }
       hadTextDelta = false;
+      deltaTextBuf.clear();
       continue;
     }
     flushMergeBuf();
     flushActivityBuf();
     flushThinkingBuf();
     hadTextDelta = false;
+    deltaTextBuf.clear();
     if (isNoiseOnlyText(cleaned)) continue;
     messages.add(
       ChatMessage(
@@ -540,6 +700,11 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
         kind: kind,
       ),
     );
+    // Mark that we've seen a complete assistant message so the
+    // subsequent result event (same content) can be skipped.
+    if (role == 'assistant' && !raw && kind == 'assistant') {
+      hadTextDelta = true;
+    }
   }
 
   // Flush any remaining buffers
@@ -548,6 +713,73 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   flushThinkingBuf();
 
   return messages;
+}
+
+List<Map<String, String>> normalizeOpencodeModels(dynamic rawModels) {
+  final models = ((rawModels as List?) ?? const [])
+      .whereType<Map>()
+      .map(
+        (m) => m.map(
+          (key, value) => MapEntry(key.toString(), (value ?? '').toString()),
+        ),
+      )
+      .toList();
+
+  models.sort((a, b) {
+    final providerCompare =
+        (a['provider'] ?? '').compareTo(b['provider'] ?? '');
+    if (providerCompare != 0) return providerCompare;
+
+    final nameCompare =
+        (a['name'] ?? a['id'] ?? '').compareTo(b['name'] ?? b['id'] ?? '');
+    if (nameCompare != 0) return nameCompare;
+
+    return (a['id'] ?? '').compareTo(b['id'] ?? '');
+  });
+
+  return models;
+}
+
+bool opencodeModelMatches(String candidateId, String currentModelId) {
+  if (candidateId == currentModelId) return true;
+  if (candidateId.isEmpty || currentModelId.isEmpty) return false;
+  if (!currentModelId.contains('/')) {
+    return candidateId.endsWith('/$currentModelId');
+  }
+  return false;
+}
+
+String currentOpencodeModelId(Map<String, dynamic> data) {
+  final current = (data['_opencodeCurrent'] ?? data['current'] ?? '')
+      .toString()
+      .trim();
+  if (current.isEmpty) return '';
+
+  final models = normalizeOpencodeModels(data['_opencodeModels']);
+  for (final model in models) {
+    final id = model['id'] ?? '';
+    if (opencodeModelMatches(id, current)) {
+      return id;
+    }
+  }
+
+  return current;
+}
+
+String currentOpencodeModelLabel(Map<String, dynamic> data) {
+  final current = currentOpencodeModelId(data);
+  if (current.isEmpty) return '模型';
+
+  final models = normalizeOpencodeModels(data['_opencodeModels']);
+  for (final model in models) {
+    final id = model['id'] ?? '';
+    if (opencodeModelMatches(id, current)) {
+      final name = (model['name'] ?? '').trim();
+      return name.isEmpty ? id : name;
+    }
+  }
+
+  return current;
 }
 
 class AgentDetailScreen extends ConsumerStatefulWidget {
@@ -575,8 +807,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   bool _stopping = false;
   bool _stickToBottom = true;
   bool _showJumpToLatest = false;
+  bool _isLoadingFreshData = false;
   String? _lastError;
   String? _agentName; // local override for renamed agent
+
+  // Static cache for messages
+  static final Map<String, List<Map<String, dynamic>>> _messageCache = {};
 
   // Raw events from EventBuffer
   List<Map<String, dynamic>> _rawEvents = [];
@@ -592,16 +828,52 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   // Current agent mode (e.g. bypassPermissions, plan)
   String _currentMode = 'bypassPermissions';
 
+  // Dynamic skills loaded from remote agentd
+  List<SlashCommand> _dynamicSkills = [];
+
+  // Connection state for banner display
+  bool _wsConnected = true;
+
+  // User interaction cooldown — prevents auto-scroll while user is reading
+  DateTime? _lastUserScroll;
+  DateTime? _lastUserTap; // track taps on expandable widgets
+
   @override
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_handleScroll);
+
+    // Load from cache if available
+    final cacheKey = '${widget.nodeId}:${widget.agentId}';
+    final cachedEvents = _messageCache[cacheKey];
+    if (cachedEvents != null && cachedEvents.isNotEmpty) {
+      setState(() {
+        _rawEvents = List.from(cachedEvents);
+        _initialLoading = false;
+      });
+    }
+
+    // Load fresh data in background
     _loadHistory();
+    _loadSkills();
+
     // Poll every 1s for new events
     _pollTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) => _pollNewEvents(),
     );
+    // Listen for connection state changes
+    final notifier = ref.read(connectionProvider.notifier);
+    notifier.onStateChanged.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _wsConnected = state == WsConnectionState.connected;
+      });
+      // Reconnected — reload history silently
+      if (state == WsConnectionState.connected && !_initialLoading) {
+        _pollNewEvents();
+      }
+    });
   }
 
   @override
@@ -615,6 +887,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   void _handleScroll() {
     if (!_scrollCtrl.hasClients) return;
+    _lastUserScroll = DateTime.now();
     final distance = _scrollCtrl.position.maxScrollExtent - _scrollCtrl.offset;
     final shouldStick = distance < 120;
     final showJump = !shouldStick;
@@ -627,8 +900,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   }
 
   Future<void> _loadHistory() async {
+    if (_isLoadingFreshData) return; // Prevent concurrent loads
     final client = ref.read(connectionProvider);
     if (client == null) return;
+
+    setState(() {
+      _isLoadingFreshData = true;
+    });
+
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -639,11 +918,31 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final firstSeqFromResp = (raw['firstSeq'] as num?)?.toInt() ?? 0;
+
+      // Update cache
+      final cacheKey = '${widget.nodeId}:${widget.agentId}';
+      _messageCache[cacheKey] = events
+          .map((e) => normalizeHistoryEvent(e as Map))
+          .toList();
+
       if (mounted) {
         setState(() {
-          _rawEvents = events
+          // Merge with existing events, avoiding duplicates
+          final existingSeqs = _rawEvents
+              .map((e) => (e['seq'] as num?)?.toInt() ?? 0)
+              .toSet();
+          final newEvents = events
               .map((e) => normalizeHistoryEvent(e as Map))
+              .where((e) => !existingSeqs.contains((e['seq'] as num?)?.toInt() ?? 0))
               .toList();
+
+          if (newEvents.isNotEmpty) {
+            _rawEvents.addAll(newEvents);
+            // Update cache
+            final cacheKey = '${widget.nodeId}:${widget.agentId}';
+            _messageCache[cacheKey] = List.from(_rawEvents);
+          }
+
           _lastSeq = lastSeq;
           if (_rawEvents.isNotEmpty) {
             _oldestSeq = firstSeqFromResp > 0
@@ -656,8 +955,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           }
           _initialLoading = false;
           _lastError = null;
+          _isLoadingFreshData = false;
         });
-        _scrollToBottom(force: true);
+
+        // Only scroll to bottom if we're not at the bottom
+        if (_stickToBottom) {
+          _scrollToBottom(force: true);
+        }
       }
     } catch (e) {
       debugPrint('loadHistory error: $e');
@@ -667,6 +971,32 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           _lastError = '加载历史失败，请重试';
         });
       }
+    }
+  }
+
+  Future<void> _loadSkills() async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    try {
+      final result = await client.call('system.skills', {
+        'nodeId': widget.nodeId,
+      });
+      final raw = result is Map ? result : <String, dynamic>{};
+      final skills = (raw['skills'] as List?) ?? [];
+      if (mounted && skills.isNotEmpty) {
+        setState(() {
+          _dynamicSkills = skills
+              .whereType<Map>()
+              .map((s) => SlashCommand(
+                    (s['command'] as String?) ?? '',
+                    (s['description'] as String?) ?? '',
+                  ))
+              .where((s) => s.command.isNotEmpty)
+              .toList();
+        });
+      }
+    } catch (_) {
+      // Skills are optional — silently ignore errors
     }
   }
 
@@ -780,6 +1110,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         if (newEvents.isNotEmpty) {
           setState(() {
             _rawEvents.addAll(newEvents);
+            // Update cache
+            final cacheKey = '${widget.nodeId}:${widget.agentId}';
+            _messageCache[cacheKey] = List.from(_rawEvents);
             _lastSeq = lastSeq;
             if (_oldestSeq == 0 && _rawEvents.isNotEmpty) {
               _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? 0);
@@ -826,6 +1159,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 'permissionRequest': perm,
               });
             }
+            // Update cache
+            final cacheKey = '${widget.nodeId}:${widget.agentId}';
+            _messageCache[cacheKey] = List.from(_rawEvents);
           });
         }
       }
@@ -877,7 +1213,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final agent0 = agents0.where((a) => a.id == widget.agentId).firstOrNull;
     // Claude -p mode doesn't support concurrent input; PTY/tmux modes do
     final isClaudePipe = (agent0?.provider ?? '') == 'claude';
-    if (_loading && isClaudePipe) return;
+    if (_loading && isClaudePipe) {
+      setState(() {
+        _lastError = '正在等待上一条消息回复，请稍后再试';
+      });
+      return;
+    }
     final client = ref.read(connectionProvider);
     if (client == null) {
       setState(() {
@@ -1180,60 +1521,17 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
-    // Check if this is a cc-switch provider ID (not a legacy 'claude'/'claude-bedrock' value).
-    // cc-switch provider IDs are typically numeric strings or UUIDs, not the legacy names.
-    final isLegacyProvider = providerId == 'claude' ||
-        providerId == 'claude-bedrock' ||
-        providerId == 'claude-vertex';
-
     try {
-      if (!isLegacyProvider) {
-        // Use provider.switch to update settings.json, DB is_current, and restart agent
-        final result = await client.call('provider.switch', {
-          'nodeId': widget.nodeId,
-          'agentId': widget.agentId,
-          'providerId': providerId,
-        });
-        final map = result is Map
-            ? Map<String, dynamic>.from(result)
-            : <String, dynamic>{};
-        final providerName = map['providerName'] as String? ?? providerId;
-        final model = map['model'] as String? ?? '';
-
-        // Refresh agent list
-        final listResult = await client.call('agent.list', {
-          'nodeId': widget.nodeId,
-        });
-        final agents = (listResult is List
-            ? listResult
-            : (listResult['agents'] as List?) ?? []);
-        ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
-
-        // Notify _ControlBar to refresh its provider dropdown
-        onSwitched?.call();
-
-        if (mounted) {
-          final msg = model.isNotEmpty
-              ? '已切换到 $providerName ($model)'
-              : '已切换到 $providerName';
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(msg)),
-          );
-        }
-        return;
-      }
-
-      // Legacy path: restart agent with provider env var
-      final result = await client.call('agent.restart', {
+      final result = await client.call('provider.switch', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
-        'provider': providerId,
+        'providerId': providerId,
       });
-
       final map = result is Map
           ? Map<String, dynamic>.from(result)
           : <String, dynamic>{};
-      final newId = map['id'] as String?;
+      final providerName = map['providerName'] as String? ?? providerId;
+      final model = map['model'] as String? ?? '';
 
       final listResult = await client.call('agent.list', {
         'nodeId': widget.nodeId,
@@ -1243,11 +1541,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           : (listResult['agents'] as List?) ?? []);
       ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
 
-      if (newId != null &&
-          newId.isNotEmpty &&
-          mounted &&
-          newId != widget.agentId) {
-        context.go('/agent/${widget.nodeId}/$newId');
+      onSwitched?.call();
+
+      if (mounted) {
+        final msg = model.isNotEmpty
+            ? '已切换到 $providerName ($model)'
+            : '已切换到 $providerName';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg)),
+        );
       }
     } catch (e) {
       debugPrint('switchProvider error: $e');
@@ -1258,6 +1560,18 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
       if (!force && !_stickToBottom) return;
+      // Don't auto-scroll if user scrolled or tapped recently
+      if (!force) {
+        final now = DateTime.now();
+        if (_lastUserScroll != null &&
+            now.difference(_lastUserScroll!) < const Duration(seconds: 5)) {
+          return;
+        }
+        if (_lastUserTap != null &&
+            now.difference(_lastUserTap!) < const Duration(seconds: 3)) {
+          return;
+        }
+      }
       _scrollCtrl.animateTo(
         _scrollCtrl.position.maxScrollExtent,
         duration: const Duration(milliseconds: 200),
@@ -1335,7 +1649,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             ),
             if (agent != null)
               Text(
-                '\${_statusLabel(agent.status)}',
+                _statusLabel(agent.status),
                 style: TextStyle(
                   fontSize: 12,
                   color: _statusColor(agent.status),
@@ -1411,6 +1725,32 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 ],
               ),
             ),
+          // Connection lost banner
+          if (!_wsConnected)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Row(
+                children: [
+                  Icon(Icons.cloud_off, size: 16, color: Theme.of(context).colorScheme.onErrorContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '连接已断开，正在自动重连…',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => context.go('/'),
+                    child: const Text('返回'),
+                  ),
+                ],
+              ),
+            ),
           if (_loading || _stopping)
             Container(
               width: double.infinity,
@@ -1424,6 +1764,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 ),
               ),
             ),
+          if (agent != null) _AgentStateSummary(agent: agent),
           // Control bar
           if (agent != null)
             _ControlBar(
@@ -1461,9 +1802,24 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                         child: ListView.builder(
                           controller: _scrollCtrl,
                           padding: const EdgeInsets.all(12),
-                          itemCount: messages.length + (_loadingOlder ? 1 : 0),
+                          itemCount: messages.length + (_loadingOlder ? 1 : 0) + (!_initialLoading && _isLoadingFreshData ? 1 : 0),
                           itemBuilder: (_, i) {
-                            if (_loadingOlder && i == 0) {
+                            if (!_initialLoading && _isLoadingFreshData && i == 0) {
+                              return const Padding(
+                                padding: EdgeInsets.only(bottom: 8),
+                                child: Center(
+                                  child: Text(
+                                    '· · ·',
+                                    style: TextStyle(
+                                      color: Colors.grey,
+                                      fontSize: 14,
+                                      fontStyle: FontStyle.italic,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+                            if (_loadingOlder && i == (!_initialLoading && _isLoadingFreshData ? 1 : 0)) {
                               return const Padding(
                                 padding: EdgeInsets.only(bottom: 8),
                                 child: Center(
@@ -1477,7 +1833,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                 ),
                               );
                             }
-                            final idx = i - (_loadingOlder ? 1 : 0);
+                            final idx = i - (!_initialLoading && _isLoadingFreshData ? 1 : 0) - (_loadingOlder ? 1 : 0);
                             return _MessageBubble(
                               message: messages[idx],
                               isLastAssistant: idx == lastAssistantIndex,
@@ -1485,6 +1841,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                   messages[idx].isPermissionPrompt
                                   ? _resolvePermissionPrompt
                                   : null,
+                              onToggleExpand: () {
+                                _lastUserTap = DateTime.now();
+                              },
                             );
                           },
                         ),
@@ -1517,14 +1876,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                       child: const Icon(Icons.arrow_downward),
                     ),
                   ),
-                // Refresh button
-                FloatingActionButton.small(
-                  heroTag: "refreshBtn",
-                  onPressed: () {
-                    _loadHistory();
-                  },
-                  child: const Icon(Icons.refresh),
-                  ),
               ],
             ),
           ),
@@ -1544,6 +1895,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             onKey: _sendKey,
             pendingImages: _pendingImages,
             onImagesChanged: (imgs) => setState(() => _pendingImages = imgs),
+            extraCommands: _dynamicSkills,
           ),
         ],
       ),
@@ -1566,6 +1918,124 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       case AgentStatus.crashed:
         return 'Crashed';
     }
+  }
+}
+
+class _AgentStateSummary extends StatelessWidget {
+  final AgentModel agent;
+
+  const _AgentStateSummary({required this.agent});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final chips = <Widget>[];
+
+    if ((agent.runtimeState ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: _runtimeStateLabel(agent.runtimeState),
+        color: Colors.green,
+      ));
+    }
+    if ((agent.sessionState ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: _sessionStateLabel(agent.sessionState),
+        color: Colors.blue,
+      ));
+    }
+    if ((agent.sessionControl ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: _sessionControlLabel(agent.sessionControl),
+        color: Colors.indigo,
+      ));
+    }
+    if ((agent.providerState ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: _providerStateLabel(agent.providerState),
+        color: agent.providerState == 'drifted' ? Colors.orange : Colors.teal,
+      ));
+    }
+    if ((agent.providerScope ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: _providerScopeLabel(agent.providerScope),
+        color: Colors.blueGrey,
+      ));
+    }
+    if ((agent.providerWriteMode ?? '').isNotEmpty) {
+      chips.add(_StateChip(
+        label: agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换',
+        color: agent.providerWriteMode == 'read_only' ? Colors.orange : Colors.green,
+      ));
+    }
+
+    final detailLines = <String>[];
+    if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
+      detailLines.add('Session: ${agent.sessionStateReason!.trim()}');
+    }
+    if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
+      detailLines.add('Provider: ${agent.providerReadOnlyReason!.trim()}');
+    }
+
+    if (chips.isEmpty && detailLines.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        border: Border(bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.35))),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (chips.isNotEmpty)
+            Wrap(spacing: 6, runSpacing: 6, children: chips),
+          if (detailLines.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            ...detailLines.map(
+              (line) => Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  line,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _StateChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _StateChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: color,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
   }
 }
 
@@ -1650,6 +2120,180 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
 
   Future<Map<String, dynamic>>? _providerListFuture;
 
+  Widget _buildConfigSelector(BuildContext context) {
+    if (widget.agent.provider != 'claude' && widget.agent.provider != 'opencode') {
+      return const SizedBox.shrink();
+    }
+    final scheme = Theme.of(context).colorScheme;
+
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _providerListFuture,
+      builder: (context, snapshot) {
+        final data = snapshot.data ?? {};
+        final providers = (data['providers'] as List?) ?? [];
+        final currentProviderId = data['current'] as String? ?? '';
+        final providerWriteMode = data['providerWriteMode'] as String? ?? '';
+        final providerReadOnlyReason =
+            (data['providerReadOnlyReason'] as String? ?? '').trim();
+        final isClaudeProvider = widget.agent.provider == 'claude';
+        final isProviderReadOnly = isClaudeProvider &&
+            (!snapshot.hasData || providerWriteMode == 'read_only');
+
+        String currentProviderName = 'Default';
+        if (!isClaudeProvider) {
+          currentProviderName = '模型';
+        } else if (currentProviderId.isNotEmpty) {
+          for (final p in providers) {
+            if ((p['id'] ?? '') == currentProviderId) {
+              currentProviderName = (p['name'] ?? currentProviderId).toString();
+              break;
+            }
+          }
+        }
+
+        Widget triggerChild = Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          margin: const EdgeInsets.only(left: 4),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isProviderReadOnly ? Icons.lock_outline : Icons.tune,
+                size: 14,
+                color: isProviderReadOnly ? Colors.orange : scheme.primary,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                widget.agent.provider == 'claude' ? currentProviderName : '模型',
+                style: TextStyle(fontSize: 12, color: scheme.onSurface),
+              ),
+              Icon(Icons.arrow_drop_down, size: 16, color: scheme.onSurfaceVariant),
+            ],
+          ),
+        );
+
+        if (isProviderReadOnly) {
+          return Tooltip(
+            message: providerReadOnlyReason.isEmpty
+                ? (snapshot.hasData ? '当前 Provider 仅支持只读展示' : '正在加载 Provider 状态')
+                : providerReadOnlyReason,
+            child: Opacity(
+              opacity: 0.8,
+              child: triggerChild,
+            ),
+          );
+        }
+
+        return PopupMenuButton<String>(
+          tooltip: '配置 Provider 和 模型',
+          onSelected: (value) {
+            if (value.startsWith('__provider__')) {
+              final id = value.substring('__provider__'.length);
+              widget.onSwitchProvider(id, onSwitched: _fetchProviders);
+            } else if (value == '__add_provider__') {
+              _showAddProviderDialog(context);
+            } else if (value.startsWith('__model__')) {
+              final model = value.substring('__model__'.length);
+              widget.onSwitchModel(model);
+            }
+          },
+          itemBuilder: (_) {
+            final items = <PopupMenuEntry<String>>[];
+            if (widget.agent.provider == 'claude') {
+              items.add(
+                const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('Provider', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                ),
+              );
+              if (providers.isEmpty) {
+                items.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('暂无可用 Provider', style: TextStyle(fontSize: 13)),
+                ));
+              } else {
+                for (final p in providers) {
+                  final id = (p['id'] ?? '').toString();
+                  final name = (p['name'] ?? id).toString();
+                  final isActive = id == currentProviderId;
+                  items.add(PopupMenuItem<String>(
+                    value: '__provider__$id',
+                    child: Row(
+                      children: [
+                        if (isActive) ...[
+                          const Icon(Icons.check, size: 16),
+                          const SizedBox(width: 4),
+                        ] else
+                          const SizedBox(width: 20),
+                        Text(name, style: const TextStyle(fontSize: 13)),
+                      ],
+                    ),
+                  ));
+                }
+              }
+              items.add(const PopupMenuDivider());
+              items.add(
+                const PopupMenuItem<String>(
+                  value: '__add_provider__',
+                  child: Row(
+                    children: [
+                      Icon(Icons.add, size: 16),
+                      SizedBox(width: 6),
+                      Text('新增 Provider', style: TextStyle(fontSize: 13)),
+                    ],
+                  ),
+                ),
+              );
+              return items;
+            }
+
+            items.add(
+              const PopupMenuItem<String>(
+                enabled: false,
+                child: Text('Model', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+              ),
+            );
+            if (widget.agent.provider == 'opencode') {
+              final opencodeModels = snapshot.data?['_opencodeModels'] as List<Map<String, String>>? ?? [];
+              if (opencodeModels.isNotEmpty) {
+                String? lastProvider;
+                for (final m in opencodeModels) {
+                  final prov = m['provider'] ?? '';
+                  if (prov != lastProvider && prov.isNotEmpty) {
+                    if (lastProvider != null) items.add(const PopupMenuDivider());
+                    items.add(PopupMenuItem<String>(
+                      enabled: false,
+                      child: Text(prov, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey)),
+                    ));
+                    lastProvider = prov;
+                  }
+                  final id = m['id'] ?? '';
+                  final name = m['name'] ?? id;
+                  items.add(PopupMenuItem<String>(
+                    value: '__model__$id',
+                    child: Text(name, style: const TextStyle(fontSize: 13)),
+                  ));
+                }
+              } else {
+                items.add(const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text('No models found', style: TextStyle(fontSize: 13)),
+                ));
+              }
+            }
+            return items;
+          },
+          child: triggerChild,
+        );
+      },
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1663,29 +2307,33 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
     if (client == null) return;
     setState(() {
       _providerListFuture = client
-          .call('provider.list', {'nodeId': widget.nodeId})
-          .then((r) => r is Map ? Map<String, dynamic>.from(r) : <String, dynamic>{});
-    });
-  }
+          .call('provider.list', {
+            'nodeId': widget.nodeId,
+            'agentId': widget.agent.id,
+          })
+          .then((r) {
+        final data = r is Map ? Map<String, dynamic>.from(r) : <String, dynamic>{};
 
-  List<PopupMenuEntry<String>> _modelMenuItems(String provider) {
-    if (provider == 'opencode') {
-      return const [
-        PopupMenuItem(value: 'tb-api/claude-sonnet-4-6', child: Text('Sonnet 4.6')),
-        PopupMenuItem(value: 'tb-api/claude-opus-4-6', child: Text('Opus 4.6')),
-        PopupMenuItem(value: 'tb-api/claude-haiku-4-5-20251001', child: Text('Haiku 4.5')),
-        PopupMenuDivider(),
-        PopupMenuItem(value: 'moonshotai-cn/kimi-for-coding', child: Text('Kimi K2.5')),
-        PopupMenuItem(value: 'ADVibe/Kimi-K2.5', child: Text('Kimi K2.5 (ADVibe)')),
-        PopupMenuItem(value: 'newapi-gpt/gpt-5.4', child: Text('GPT 5.4')),
-      ];
-    }
-    // claude
-    return const [
-      PopupMenuItem(value: 'claude-sonnet-4-6', child: Text('Sonnet 4.6')),
-      PopupMenuItem(value: 'claude-opus-4-6', child: Text('Opus 4.6')),
-      PopupMenuItem(value: 'claude-haiku-4-5-20251001', child: Text('Haiku 4.5')),
-    ];
+        // If not opencode, return data immediately
+        if (widget.agent.provider != 'opencode') {
+          return data;
+        }
+
+        // For opencode, fetch models and merge with data
+        return client.call('opencode.models', {'nodeId': widget.nodeId})
+          .then((mr) {
+            if (mr is Map) {
+              final models = (mr['models'] as List?) ?? [];
+              final modelList = models.map((m) => Map<String, String>.from(m as Map)).toList();
+              return {...data, '_opencodeModels': modelList};
+            }
+            return data; // Return original data if models fetch fails
+          })
+          .catchError((_) {
+            return data; // Return original data on error
+          });
+      });
+    });
   }
 
   void _showAddProviderDialog(BuildContext context) {
@@ -1799,122 +2447,8 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
         children: [
           // Mode selector dropdown
           ..._buildModeSelector(context),
-          if (widget.agent.provider == 'claude') ...[
-            // Dynamic provider selector from cc-switch
-            FutureBuilder<Map<String, dynamic>>(
-              future: _providerListFuture,
-              builder: (context, snapshot) {
-                final data = snapshot.data ?? {};
-                final providers = (data['providers'] as List?) ?? [];
-                final current = data['current'] as String? ?? '';
-
-                // Find current provider name for display
-                String currentName = 'Provider';
-                if (current.isNotEmpty) {
-                  for (final p in providers) {
-                    if ((p['id'] ?? '') == current) {
-                      currentName = (p['name'] ?? current).toString();
-                      break;
-                    }
-                  }
-                }
-
-                if (providers.isEmpty) {
-                  // Fallback to static list when cc-switch is not available
-                  return PopupMenuButton<String>(
-                    tooltip: '切换 Provider',
-                    onSelected: (id) {
-                      if (id == '__add__') {
-                        _showAddProviderDialog(context);
-                      } else {
-                        widget.onSwitchProvider(id, onSwitched: _fetchProviders);
-                      }
-                    },
-                    itemBuilder: (_) => [
-                      const PopupMenuItem(value: 'claude', child: Text('Anthropic (Default)')),
-                      const PopupMenuItem(value: 'claude-bedrock', child: Text('AWS Bedrock')),
-                      const PopupMenuItem(value: 'claude-vertex', child: Text('Google Vertex')),
-                      const PopupMenuDivider(),
-                      const PopupMenuItem(value: '__add__', child: Text('＋ 新增 Provider')),
-                    ],
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.cloud, size: 16),
-                          const SizedBox(width: 3),
-                          Text(currentName, style: const TextStyle(fontSize: 12)),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-
-                return PopupMenuButton<String>(
-                  tooltip: '切换 Provider',
-                  onSelected: (id) {
-                    if (id == '__add__') {
-                      _showAddProviderDialog(context);
-                    } else {
-                      widget.onSwitchProvider(id, onSwitched: _fetchProviders);
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    ...providers.map((p) {
-                      final id = (p['id'] ?? '').toString();
-                      final name = (p['name'] ?? id).toString();
-                      final isActive = id == current;
-                      return PopupMenuItem<String>(
-                        value: id,
-                        child: Row(
-                          children: [
-                            if (isActive) ...[
-                              const Icon(Icons.check, size: 16),
-                              const SizedBox(width: 4),
-                            ] else
-                              const SizedBox(width: 20),
-                            Text(name),
-                          ],
-                        ),
-                      );
-                    }),
-                    const PopupMenuDivider(),
-                    const PopupMenuItem(value: '__add__', child: Text('＋ 新增 Provider')),
-                  ],
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.cloud, size: 16),
-                        const SizedBox(width: 3),
-                        Text(currentName, style: const TextStyle(fontSize: 12)),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            ),
-          ],
-          // Model selector — works for both claude and opencode
-          if (widget.agent.provider == 'claude' || widget.agent.provider == 'opencode')
-            PopupMenuButton<String>(
-              tooltip: '切换模型',
-              onSelected: widget.onSwitchModel,
-              itemBuilder: (_) => _modelMenuItems(widget.agent.provider),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.psychology, size: 16),
-                    SizedBox(width: 3),
-                    Text('模型', style: TextStyle(fontSize: 12)),
-                  ],
-                ),
-              ),
-            ),
+          // Unified provider + model config selector
+          _buildConfigSelector(context),
           const Spacer(),
           if (stopped)
             IconButton(
@@ -1954,6 +2488,7 @@ class _CollapsibleBubble extends StatefulWidget {
   final String? collapsedPreview;
   final IconData icon;
   final Color color;
+  final VoidCallback? onToggle;
 
   const _CollapsibleBubble({
     required this.header,
@@ -1961,6 +2496,7 @@ class _CollapsibleBubble extends StatefulWidget {
     this.collapsedPreview,
     required this.icon,
     required this.color,
+    this.onToggle,
   });
 
   @override
@@ -1986,7 +2522,10 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
           const SizedBox(width: 8),
           Flexible(
             child: InkWell(
-              onTap: () => setState(() => _expanded = !_expanded),
+              onTap: () {
+                widget.onToggle?.call();
+                setState(() => _expanded = !_expanded);
+              },
               borderRadius: BorderRadius.circular(8),
               child: AnimatedCrossFade(
                 firstChild: _buildCollapsed(scheme),
@@ -2084,15 +2623,386 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
   }
 }
 
+
+class _ActivityCard extends StatelessWidget {
+  final String kind;
+  final String toolName;
+  final String title;
+  final String content;
+
+  const _ActivityCard({
+    required this.kind,
+    required this.toolName,
+    required this.title,
+    required this.content,
+  });
+
+  (IconData, Color) _iconAndColor() {
+    final name = toolName.isNotEmpty ? toolName : title;
+    switch (toolName) {
+      case 'Bash':
+        return (Icons.terminal, Colors.blue);
+      case 'Read':
+        return (Icons.insert_drive_file, Colors.indigo);
+      case 'Grep':
+        return (Icons.search, Colors.amber);
+      case 'Edit':
+      case 'Write':
+        return (Icons.edit, Colors.orange);
+      case 'Agent':
+        return (Icons.smart_toy, Colors.purple);
+      case 'SendMessage':
+        return (Icons.send, Colors.teal);
+      case 'TaskCreate':
+      case 'TaskUpdate':
+      case 'TaskList':
+        return (Icons.checklist, Colors.green);
+      case 'TodoWrite':
+        return (Icons.check_box, Colors.green);
+      case 'WebSearch':
+        return (Icons.public, Colors.cyan);
+      case 'WebFetch':
+        return (Icons.download, Colors.cyan);
+      case 'NotebookEdit':
+        return (Icons.note, Colors.pink);
+      case 'Skill':
+        return (Icons.auto_awesome, Colors.deepPurple);
+      default:
+        if (name.toLowerCase().contains('skill')) return (Icons.auto_awesome, Colors.deepPurple);
+        if (name.toLowerCase().contains('todo')) return (Icons.checklist, Colors.green);
+        return (Icons.build, Colors.grey);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color) = _iconAndColor();
+    // final isResult = kind == 'tool_result' || kind == 'result';
+    final scheme = Theme.of(context).colorScheme;
+
+    Widget? body;
+    if (content.isNotEmpty) {
+      body = _MarkdownContent(
+        text: content,
+        fontSize: 12,
+        textColor: scheme.onSurfaceVariant,
+      );
+    }
+
+    String headerText;
+    if (toolName.isNotEmpty && title.isNotEmpty) {
+      headerText = '$toolName: $title';
+    } else if (toolName.isNotEmpty) {
+      headerText = toolName;
+    } else if (title.isNotEmpty) {
+      headerText = title;
+    } else {
+      headerText = '助手活动';
+    }
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 14, color: color),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  headerText,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          if (body != null) ...[
+            const SizedBox(height: 6),
+            DefaultTextStyle(
+              style: TextStyle(color: scheme.onSurfaceVariant),
+              child: body,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ActivityBlock extends StatefulWidget {
+  final ChatMessage message;
+  final VoidCallback? onToggle;
+  const _ActivityBlock({required this.message, this.onToggle});
+
+  @override
+  State<_ActivityBlock> createState() => _ActivityBlockState();
+}
+
+class _ActivityBlockState extends State<_ActivityBlock> {
+  bool _expanded = false;
+
+  List<Map<String, dynamic>> _parseActivities() {
+    if (widget.message.kind == 'activity_list') {
+      return widget.message.activities;
+    }
+    // Legacy activity_block: split by newline and parse [Name: ...] lines
+    final items = <Map<String, dynamic>>[];
+    for (final line in widget.message.text.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      final match = RegExp(r'^\[(\w+)(?::\s*(.+?))?\]\$').firstMatch(trimmed);
+      if (match != null) {
+        items.add({
+          'kind': 'tool_use',
+          'toolName': match.group(1)!,
+          'title': (match.group(2) ?? '').trim(),
+          'content': '',
+        });
+      } else {
+        items.add({
+          'kind': 'activity',
+          'toolName': '',
+          'title': trimmed,
+          'content': '',
+        });
+      }
+    }
+    return items;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final items = _parseActivities();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.start,
+        children: [
+          CircleAvatar(
+            radius: 16,
+            backgroundColor: scheme.primaryContainer,
+            child: Icon(Icons.build, size: 18, color: scheme.onPrimaryContainer),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: InkWell(
+              onTap: () {
+                widget.onToggle?.call();
+                setState(() => _expanded = !_expanded);
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: AnimatedCrossFade(
+                firstChild: _buildCollapsed(scheme, items),
+                secondChild: _buildExpanded(scheme, items),
+                crossFadeState: _expanded
+                    ? CrossFadeState.showSecond
+                    : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 200),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCollapsed(ColorScheme scheme, List<Map<String, dynamic>> items) {
+    final latest = items.isNotEmpty ? items.last : null;
+    String preview = '助手活动';
+    if (latest != null) {
+      final tn = (latest['toolName'] as String?) ?? '';
+      final t = (latest['title'] as String?) ?? '';
+      preview = tn.isNotEmpty && t.isNotEmpty ? '$tn: $t' : (tn.isNotEmpty ? tn : t);
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.chevron_right, size: 16, color: scheme.primary),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              preview,
+              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildExpanded(ColorScheme scheme, List<Map<String, dynamic>> items) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.expand_more, size: 16, color: scheme.primary),
+              const SizedBox(width: 6),
+              Text(
+                '助手活动',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...items.map((item) => _ActivityCard(
+            kind: (item['kind'] as String?) ?? 'activity',
+            toolName: (item['toolName'] as String?) ?? '',
+            title: (item['title'] as String?) ?? '',
+            content: (item['content'] as String?) ?? '',
+          )),
+        ],
+      ),
+    );
+  }
+}
+
+class _UserImages extends StatefulWidget {
+  final List<String> paths;
+  const _UserImages({required this.paths});
+
+  @override
+  State<_UserImages> createState() => _UserImagesState();
+}
+
+class _UserImagesState extends State<_UserImages> {
+  final Map<String, Uint8List> _loaded = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadImages();
+  }
+
+  @override
+  void didUpdateWidget(_UserImages oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.paths != oldWidget.paths) {
+      _loaded.clear();
+      _loadImages();
+    }
+  }
+
+  Future<void> _loadImages() async {
+    final container = ProviderScope.containerOf(context);
+    final client = container.read(connectionProvider);
+    if (client == null) return;
+    for (final p in widget.paths) {
+      if (_loaded.containsKey(p)) continue;
+      try {
+        final result = await client.call('conversation.image', {'path': p});
+        if (result is Map && result['data'] is String) {
+          final bytes = base64Decode(result['data'] as String);
+          if (mounted) {
+            setState(() {
+              _loaded[p] = bytes;
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('load image error: \$e');
+      }
+    }
+  }
+
+  void _showPreview(BuildContext context, Uint8List bytes) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(12),
+        child: InteractiveViewer(
+          boundaryMargin: const EdgeInsets.all(20),
+          minScale: 0.5,
+          maxScale: 4.0,
+          child: Image.memory(bytes, fit: BoxFit.contain),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loaded.isEmpty) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.image, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(
+            widget.paths.length == 1 ? '图片附件' : '${widget.paths.length} 张图片',
+            style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+        ],
+      );
+    }
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: _loaded.entries.map((entry) {
+        return GestureDetector(
+          onTap: () => _showPreview(context, entry.value),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(
+              entry.value,
+              width: 64,
+              height: 64,
+              fit: BoxFit.cover,
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool isLastAssistant;
   final Future<void> Function()? onResolvePermissionPrompt;
+  final VoidCallback? onToggleExpand;
 
   const _MessageBubble({
     required this.message,
     this.isLastAssistant = false,
     this.onResolvePermissionPrompt,
+    this.onToggleExpand,
   });
 
   @override
@@ -2173,20 +3083,12 @@ class _MessageBubble extends StatelessWidget {
         collapsedPreview: '', // header 已包含预览，不需要重复
         icon: Icons.psychology,
         color: Colors.orange.shade700,
+        onToggle: onToggleExpand,
       );
     }
 
     if (message.isActivityBlock) {
-      final firstLine = message.text
-          .split('\n')
-          .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '助手活动');
-      return _CollapsibleBubble(
-        header: '助手活动',
-        content: message.text,
-        collapsedPreview: buildCollapsedPreview(firstLine, maxChars: 90),
-        icon: Icons.build,
-        color: scheme.primary,
-      );
+      return _ActivityBlock(message: message, onToggle: onToggleExpand);
     }
 
     // Collapsible tool call
@@ -2208,6 +3110,7 @@ class _MessageBubble extends StatelessWidget {
         collapsedPreview: '', // header 已包含参数预览
         icon: Icons.build,
         color: scheme.primary,
+        onToggle: onToggleExpand,
       );
     }
 
@@ -2287,6 +3190,29 @@ class _MessageBubble extends StatelessWidget {
                           color: scheme.onSurfaceVariant.withValues(alpha: 0.5),
                           fontStyle: FontStyle.italic,
                         ),
+                      ),
+                    ),
+                  if (isUser && message.images.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: _UserImages(paths: message.images),
+                    )
+                  else if (isUser && message.imageCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.image, size: 16, color: textColor.withValues(alpha: 0.8)),
+                          const SizedBox(width: 4),
+                          Text(
+                            message.imageCount == 1 ? '图片附件' : '${message.imageCount} 张图片',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: textColor.withValues(alpha: 0.8),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   _MarkdownContent(
@@ -2573,6 +3499,85 @@ List<AgentMode> modesForProvider(String provider) {
   }
 }
 
+String _runtimeStateLabel(String? value) {
+  switch (value) {
+    case 'live':
+      return '运行中';
+    case 'exited':
+      return '已退出';
+    case 'stopped':
+      return '已停止';
+    case 'crashed':
+      return '异常退出';
+    case 'starting':
+      return '启动中';
+    default:
+      return value ?? '';
+  }
+}
+
+String _sessionStateLabel(String? value) {
+  switch (value) {
+    case 'active':
+      return '会话活跃';
+    case 'standby':
+      return '会话待机';
+    case 'resumable':
+      return '可恢复';
+    case 'missing':
+      return '会话缺失';
+    case 'broken':
+      return '会话异常';
+    case 'none':
+      return '无会话';
+    default:
+      return value ?? '';
+  }
+}
+
+String _sessionControlLabel(String? value) {
+  switch (value) {
+    case 'managed':
+      return '已托管';
+    case 'attachable':
+      return '可附加';
+    case 'rebindable':
+      return '可重绑';
+    case 'read_only':
+      return '只读';
+    case 'unavailable':
+      return '不可接管';
+    default:
+      return value ?? '';
+  }
+}
+
+String _providerStateLabel(String? value) {
+  switch (value) {
+    case 'synced':
+      return 'Provider 已同步';
+    case 'drifted':
+      return 'Provider 漂移';
+    case 'unknown':
+      return 'Provider 未知';
+    default:
+      return value ?? '';
+  }
+}
+
+String _providerScopeLabel(String? value) {
+  switch (value) {
+    case 'root':
+      return 'Root Scope';
+    case 'inherited':
+      return '继承 Root';
+    case 'standalone':
+      return '独立 Scope';
+    default:
+      return value ?? '';
+  }
+}
+
 bool shouldShowTerminalControls(String provider) {
   return provider != 'claude';
 }
@@ -2692,13 +3697,24 @@ const kSlashCommands = [
   SlashCommand('/bug', '报告 bug'),
   SlashCommand('/login', '登录账户'),
   SlashCommand('/logout', '登出账户'),
-  SlashCommand('/skill', '调用内置技能'),
   SlashCommand('/fast', '切换快速模式'),
   SlashCommand('/commit', '生成 commit'),
   SlashCommand('/plan', '进入规划模式'),
   SlashCommand('/mcp', '管理 MCP 服务器'),
   SlashCommand('/permissions', '管理权限'),
   SlashCommand('/config', '查看/修改配置'),
+  SlashCommand('/btw', '快速补充说明 / by the way'),
+  SlashCommand('/undo', '撤销最后一次编辑'),
+  SlashCommand('/redo', '重做最后一次编辑'),
+  SlashCommand('/pr', '创建 Pull Request'),
+  SlashCommand('/search', '搜索代码库'),
+  SlashCommand('/explain', '解释选中代码'),
+  SlashCommand('/fix', '修复当前文件问题'),
+  SlashCommand('/test', '生成或运行测试'),
+  SlashCommand('/simplify', '审查并简化代码'),
+  SlashCommand('/loop', '循环执行命令'),
+  SlashCommand('/skill', '调用内置技能'),
+  SlashCommand('/keybindings-help', '键盘快捷键帮助'),
 ];
 
 class _InputBar extends StatefulWidget {
@@ -2713,6 +3729,7 @@ class _InputBar extends StatefulWidget {
   final Future<void> Function(String key) onKey;
   final List<Map<String, String>> pendingImages;
   final ValueChanged<List<Map<String, String>>> onImagesChanged;
+  final List<SlashCommand> extraCommands;
 
   const _InputBar({
     required this.agent,
@@ -2726,6 +3743,7 @@ class _InputBar extends StatefulWidget {
     required this.onKey,
     this.pendingImages = const [],
     required this.onImagesChanged,
+    this.extraCommands = const [],
   });
 
   @override
@@ -2736,8 +3754,8 @@ class _InputBarState extends State<_InputBar> {
   bool _showSlashMenu = false;
   String _slashFilter = '';
   final _imagePicker = ImagePicker();
-  final _speech = stt.SpeechToText();
   bool _isListening = false;
+  String _speechPreview = '';
 
   @override
   void initState() {
@@ -2752,6 +3770,22 @@ class _InputBarState extends State<_InputBar> {
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
     }
+  }
+
+  void _showImagePreview(BuildContext context, Uint8List bytes) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(12),
+        child: InteractiveViewer(
+          boundaryMargin: const EdgeInsets.all(20),
+          minScale: 0.5,
+          maxScale: 4.0,
+          child: Image.memory(bytes, fit: BoxFit.contain),
+        ),
+      ),
+    );
   }
 
   @override
@@ -2778,33 +3812,46 @@ class _InputBarState extends State<_InputBar> {
   }
 
   List<SlashCommand> get _filteredCommands {
-    if (_slashFilter.isEmpty) return kSlashCommands;
-    return kSlashCommands
+    final all = <SlashCommand>[...kSlashCommands];
+    final existing = kSlashCommands.map((c) => c.command).toSet();
+    for (final s in widget.extraCommands) {
+      if (!existing.contains(s.command)) {
+        all.add(s);
+        existing.add(s.command);
+      }
+    }
+    if (_slashFilter.isEmpty) return all;
+    return all
         .where((c) => c.command.substring(1).contains(_slashFilter))
         .toList();
   }
 
   Future<void> _pickImage() async {
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt),
-              title: const Text('拍照'),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library),
-              title: const Text('从相册选择'),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-            ),
-          ],
+    ImageSource? source;
+    if (kIsWeb) {
+      source = ImageSource.gallery;
+    } else {
+      source = await showModalBottomSheet<ImageSource>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('拍照'),
+                onTap: () => Navigator.pop(ctx, ImageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('从相册选择'),
+                onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+              ),
+            ],
+          ),
         ),
-      ),
-    );
+      );
+    }
     if (source == null) return;
 
     final picked = await _imagePicker.pickImage(
@@ -2817,52 +3864,77 @@ class _InputBarState extends State<_InputBar> {
 
     final bytes = await picked.readAsBytes();
     final b64 = base64Encode(bytes);
-    final mime = picked.mimeType ?? (picked.path.endsWith('.png') ? 'image/png' : 'image/jpeg');
+    String mime = picked.mimeType ?? '';
+    if (mime.isEmpty) {
+      mime = _detectMimeType(bytes);
+    }
 
     final updated = List<Map<String, String>>.from(widget.pendingImages)
       ..add({'data': b64, 'mimeType': mime});
     widget.onImagesChanged(updated);
   }
 
-  Future<void> _toggleListening() async {
-    if (_isListening) {
-      await _speech.stop();
-      setState(() => _isListening = false);
-      return;
+  String _detectMimeType(List<int> bytes) {
+    if (bytes.length >= 4) {
+      if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+        return 'image/png';
+      }
+      if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+        return 'image/jpeg';
+      }
+      if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) {
+        return 'image/gif';
+      }
+      if (bytes.length >= 12 &&
+          bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
+          bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) {
+        return 'image/webp';
+      }
     }
+    return 'image/jpeg';
+  }
 
-    final available = await _speech.initialize(
-      onError: (e) {
-        debugPrint('STT error: $e');
-        setState(() => _isListening = false);
-      },
-    );
-    if (!available) {
+  Future<void> _toggleListening() async {
+    // Mic button now works as an "AI optimize" trigger for voice text.
+    // Users should speak via the system keyboard IME first, then tap the mic
+    // to clean / punctuate / deduplicate the text.
+    final currentText = widget.controller.text.trim();
+
+    if (_isListening) return;
+
+    if (currentText.isEmpty) {
+      // Prompt user to use keyboard voice input
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('语音识别不可用')),
+          const SnackBar(content: Text('请使用键盘语音输入，完成后再次点击麦克风进行优化')),
         );
       }
       return;
     }
 
-    setState(() => _isListening = true);
-    await _speech.listen(
-      onResult: (result) {
-        final current = widget.controller.text;
-        final recognized = result.recognizedWords;
-        if (recognized.isNotEmpty) {
-          widget.controller.text = current.isEmpty ? recognized : '$current $recognized';
-          widget.controller.selection = TextSelection.fromPosition(
-            TextPosition(offset: widget.controller.text.length),
-          );
-        }
-        if (result.finalResult) {
-          setState(() => _isListening = false);
-        }
-      },
-      localeId: 'zh_CN',
-    );
+    setState(() {
+      _isListening = true;
+      _speechPreview = '';
+    });
+
+    // Give a tiny delay so the UI shows the loading state
+    await Future.delayed(const Duration(milliseconds: 80));
+
+    final optimized = _optimizeVoiceInput(currentText, '');
+
+    if (optimized.isNotEmpty && mounted) {
+      widget.controller.text = optimized;
+      widget.controller.selection = TextSelection.fromPosition(
+        TextPosition(offset: widget.controller.text.length),
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _isListening = false;
+        _speechPreview = '';
+      });
+    }
   }
 
   @override
@@ -2983,9 +4055,12 @@ class _InputBarState extends State<_InputBar> {
                   final bytes = base64Decode(widget.pendingImages[i]['data']!);
                   return Stack(
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.memory(bytes, width: 64, height: 64, fit: BoxFit.cover),
+                      GestureDetector(
+                        onTap: () => _showImagePreview(ctx, bytes),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: Image.memory(bytes, width: 64, height: 64, fit: BoxFit.cover),
+                        ),
                       ),
                       Positioned(
                         top: -4,
@@ -3007,33 +4082,50 @@ class _InputBarState extends State<_InputBar> {
                 },
               ),
             ),
+          // Speech preview chip
+          if (_isListening && _speechPreview.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: Colors.red.shade200),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.mic, size: 14, color: Colors.red.shade700),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          _speechPreview,
+                          style: TextStyle(fontSize: 13, color: Colors.red.shade900),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Image picker button
+              // Image button (left of text field)
               if (!isReadOnly)
                 IconButton(
                   onPressed: effectiveLoading ? null : _pickImage,
-                  icon: const Icon(Icons.image, size: 22),
+                  icon: const Icon(Icons.image, size: 20),
                   tooltip: '添加图片',
                   visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(),
-                  padding: const EdgeInsets.all(6),
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
                 ),
-              // Voice input button
-              if (!isReadOnly)
-                IconButton(
-                  onPressed: effectiveLoading ? null : _toggleListening,
-                  icon: Icon(
-                    _isListening ? Icons.mic : Icons.mic_none,
-                    size: 22,
-                    color: _isListening ? Colors.red : null,
-                  ),
-                  tooltip: _isListening ? '停止录音' : '语音输入',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(),
-                  padding: const EdgeInsets.all(6),
-                ),
-              const SizedBox(width: 4),
               Expanded(
                 child: TextField(
                   controller: widget.controller,
@@ -3055,61 +4147,72 @@ class _InputBarState extends State<_InputBar> {
                   minLines: 1,
                 ),
               ),
-              const SizedBox(width: 8),
-              // Special keys button
-              IconButton(
-                onPressed: isReadOnly ? null : () {
-                      // Show special keys bottom sheet
-                      showModalBottomSheet(
-                        context: context,
-                        builder: (ctx) => Container(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                              const SizedBox(height: 16),
-                              Wrap(
-                                spacing: 8,
-                                runSpacing: 8,
+              const SizedBox(width: 6),
+              // Right-side buttons
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: isReadOnly ? null : () {
+                          // Show special keys bottom sheet
+                          showModalBottomSheet(
+                            context: context,
+                            builder: (ctx) => Container(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  ActionChip(label: const Text('ESC'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('esc'); }),
-                                  ActionChip(label: const Text('Ctrl+C'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_c'); }),
-                                  ActionChip(label: const Text('Ctrl+D'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_d'); }),
-                                  ActionChip(label: const Text('Ctrl+Z'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_z'); }),
-                                  ActionChip(label: const Text('Ctrl+A'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_a'); }),
-                                  ActionChip(label: const Text('Ctrl+E'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_e'); }),
-                                  ActionChip(label: const Text('Tab'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('tab'); }),
-                                  ActionChip(label: const Text('↑'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('up'); }),
-                                  ActionChip(label: const Text('↓'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('down'); }),
-                                  ActionChip(label: const Text('←'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('left'); }),
-                                  ActionChip(label: const Text('→'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('right'); }),
+                                  const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                                  const SizedBox(height: 16),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: [
+                                      ActionChip(label: const Text('ESC'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('esc'); }),
+                                      ActionChip(label: const Text('Ctrl+C'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_c'); }),
+                                      ActionChip(label: const Text('Ctrl+D'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_d'); }),
+                                      ActionChip(label: const Text('Ctrl+Z'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_z'); }),
+                                      ActionChip(label: const Text('Ctrl+A'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_a'); }),
+                                      ActionChip(label: const Text('Ctrl+E'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_e'); }),
+                                      ActionChip(label: const Text('Tab'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('tab'); }),
+                                      ActionChip(label: const Text('↑'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('up'); }),
+                                      ActionChip(label: const Text('↓'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('down'); }),
+                                      ActionChip(label: const Text('←'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('left'); }),
+                                      ActionChip(label: const Text('→'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('right'); }),
+                                    ],
+                                  ),
                                 ],
                               ),
-                            ],
+                            ),
+                          );
+                        },
+                    icon: const Icon(Icons.keyboard_hide, size: 20),
+                    tooltip: '特殊按键',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                    padding: EdgeInsets.zero,
+                  ),
+                  const SizedBox(width: 4),
+                  effectiveLoading
+                      ? const SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: Padding(
+                            padding: EdgeInsets.all(4),
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
+                        )
+                      : IconButton(
+                          onPressed: isReadOnly ? null : widget.onSend,
+                          icon: const Icon(Icons.send, size: 20),
+                          visualDensity: VisualDensity.compact,
+                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                          padding: EdgeInsets.zero,
+                          color: isReadOnly ? null : Theme.of(context).colorScheme.primary,
                         ),
-                      );
-                    },
-                icon: const Icon(Icons.keyboard_hide),
-                tooltip: '特殊按键',
+                ],
               ),
-              const SizedBox(width: 4),
-              effectiveLoading
-                  ? const SizedBox(
-                      width: 40,
-                      height: 40,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : IconButton(
-                      onPressed: isReadOnly ? null : widget.onSend,
-                      icon: const Icon(Icons.send),
-                      style: IconButton.styleFrom(
-                        backgroundColor: Theme.of(context).colorScheme.primary,
-                        foregroundColor:
-                            Theme.of(context).colorScheme.onPrimary,
-                      ),
-                    ),
             ],
           ),
         ],

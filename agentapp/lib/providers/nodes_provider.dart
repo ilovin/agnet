@@ -13,17 +13,15 @@ class NodeState {
   NodeState copyWith({
     Map<String, NodeModel>? nodes,
     Map<String, List<AgentModel>>? agents,
-  }) =>
-      NodeState(
-        nodes: nodes ?? this.nodes,
-        agents: agents ?? this.agents,
-      );
+  }) => NodeState(nodes: nodes ?? this.nodes, agents: agents ?? this.agents);
 
   List<NodeModel> get nodeList => nodes.values.toList();
   List<AgentModel> agentsFor(String nodeId) => agents[nodeId] ?? [];
 }
 
 class NodesNotifier extends StateNotifier<NodeState> {
+  Future<void> Function(String nodeId)? onAgentsRefresh;
+
   NodesNotifier() : super(const NodeState());
 
   /// Load initial state from [node.list] response.
@@ -38,13 +36,11 @@ class NodesNotifier extends StateNotifier<NodeState> {
 
   /// Load agents for a given node from [agent.list] response.
   void loadAgents(String nodeId, List<dynamic> rawAgents) {
-    final list = rawAgents
-        .map((a) {
-          final json = a as Map<String, dynamic>;
-          json['nodeId'] = nodeId; // inject nodeId
-          return AgentModel.fromJson(json);
-        })
-        .toList();
+    final list = rawAgents.map((a) {
+      final json = a as Map<String, dynamic>;
+      json['nodeId'] = nodeId; // inject nodeId
+      return AgentModel.fromJson(json);
+    }).toList();
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = list;
     state = state.copyWith(agents: updated);
@@ -77,15 +73,31 @@ class NodesNotifier extends StateNotifier<NodeState> {
     if (nodeId.isEmpty || agentId == null || agentId.isEmpty) return;
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
-    if (idx == -1) return;
+    // New agent discovered — trigger full refresh so it appears in the list
+    if (idx == -1) {
+      _refreshAgents(nodeId);
+      return;
+    }
     final name = params['name'] as String?;
     agentList[idx] = agentList[idx].copyWith(
       status: _parseAgentStatus(params['status'] as String? ?? ''),
       name: name,
+      runtimeState: params['runtimeState'] as String?,
+      sessionState: params['sessionState'] as String?,
+      sessionStateReason: params['sessionStateReason'] as String?,
+      sessionControl: params['sessionControl'] as String?,
+      providerState: params['providerState'] as String?,
+      providerScope: params['providerScope'] as String?,
+      providerWriteMode: params['providerWriteMode'] as String?,
+      providerReadOnlyReason: params['providerReadOnlyReason'] as String?,
     );
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = agentList;
     state = state.copyWith(agents: updated);
+  }
+
+  void _refreshAgents(String nodeId) {
+    onAgentsRefresh?.call(nodeId);
   }
 
   /// Rename a node locally (after a successful node.rename RPC call).
@@ -103,6 +115,9 @@ class NodesNotifier extends StateNotifier<NodeState> {
         return NodeStatus.connected;
       case 'connecting':
         return NodeStatus.connecting;
+      case 'deploying':
+      case 'deployed':
+        return NodeStatus.deploying;
       case 'error':
         return NodeStatus.error;
       default:

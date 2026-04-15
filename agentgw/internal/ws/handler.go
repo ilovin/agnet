@@ -63,11 +63,14 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return h.nodeConnect(req)
 	case "node.deploy":
 		return h.nodeDeploy(req)
+	case "node.restart":
+		return h.nodeRestart(req)
 	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename",
 		"conversation.history", "conversation.send", "conversation.key",
 		"session.list", "session.create", "session.attach", "session.catalog",
 		"provider.list", "provider.switch", "provider.add",
-		"system.info":
+		"opencode.models",
+		"system.info", "system.skills":
 		return dispatchResult{resp: h.proxyToNode(req)}
 	case "node.rename":
 		return dispatchResult{resp: h.nodeRename(req)}
@@ -95,7 +98,7 @@ func (h *handler) nodeList(req RPCRequest) RPCResponse {
 
 	// Sort nodes: those with agents come first, then by status
 	type nodeWithCount struct {
-		node      *node.Node
+		node       *node.Node
 		agentCount int
 	}
 	wrapped := make([]nodeWithCount, 0, len(nodes))
@@ -356,6 +359,37 @@ func (h *handler) nodeDeploy(req RPCRequest) dispatchResult {
 	}
 	return dispatchResult{
 		resp:     okResp(req.ID, map[string]any{"ok": true, "message": "deploy started"}),
+		postSend: postSend,
+	}
+}
+
+func (h *handler) nodeRestart(req RPCRequest) dispatchResult {
+	nodeID, _ := req.Params["nodeId"].(string)
+	remoteDir, _ := req.Params["remoteDir"].(string)
+	if remoteDir == "" {
+		remoteDir = "/opt/agentd"
+	}
+	n := h.server.manager.Get(nodeID)
+	if n == nil {
+		return dispatchResult{resp: errResp(req.ID, -32000, fmt.Sprintf("node %q not found", nodeID))}
+	}
+	postSend := func() {
+		h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+			"nodeId": nodeID, "status": "deploying",
+		}))
+		if err := h.server.manager.Restart(nodeID, remoteDir); err != nil {
+			log.Printf("restart node %s: %v", nodeID, err)
+			h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+				"nodeId": nodeID, "status": "error", "error": err.Error(),
+			}))
+			return
+		}
+		h.server.Broadcast(newEvent("node.status_changed", map[string]any{
+			"nodeId": nodeID, "status": "connected",
+		}))
+	}
+	return dispatchResult{
+		resp:     okResp(req.ID, map[string]any{"ok": true, "message": "restart started"}),
 		postSend: postSend,
 	}
 }

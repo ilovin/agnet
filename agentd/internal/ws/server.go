@@ -73,6 +73,26 @@ func New(mgr *agent.Manager, token string) *Server {
 			Params:  params,
 		}, nil)
 	})
+
+	// Wire agent status changes → broadcast to all WS clients
+	mgr.SetOnStatusChange(func(agentID string, data map[string]any) {
+		params, _ := data["params"].(map[string]any)
+		status := any(nil)
+		if params != nil {
+			status = params["status"]
+		}
+		enriched := (&handler{server: srv}).statusChangedParams(agentID, status)
+		if params != nil {
+			if name, ok := params["name"]; ok {
+				enriched["name"] = name
+			}
+		}
+		srv.broadcast(RPCEvent{
+			JSONRPC: "2.0",
+			Method:  "agent.status_changed",
+			Params:  enriched,
+		}, nil)
+	})
 	return srv
 }
 

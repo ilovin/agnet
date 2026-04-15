@@ -71,6 +71,33 @@ void main() {
 
       expect(a.isReadOnly, isTrue);
     });
+
+    test('fromJson parses state machine fields', () {
+      final a = AgentModel.fromJson({
+        'id': 'a3',
+        'name': 'claude-root',
+        'status': 'idle',
+        'workDir': '/home/user/proj',
+        'nodeId': 'n1',
+        'runtimeState': 'exited',
+        'sessionState': 'resumable',
+        'sessionStateReason': 'watcher detached after process exit',
+        'sessionControl': 'rebindable',
+        'providerState': 'drifted',
+        'providerScope': 'inherited',
+        'providerWriteMode': 'read_only',
+        'providerReadOnlyReason': 'provider scope is inherited from root session',
+      });
+
+      expect(a.runtimeState, equals('exited'));
+      expect(a.sessionState, equals('resumable'));
+      expect(a.sessionStateReason, contains('watcher detached'));
+      expect(a.sessionControl, equals('rebindable'));
+      expect(a.providerState, equals('drifted'));
+      expect(a.providerScope, equals('inherited'));
+      expect(a.providerWriteMode, equals('read_only'));
+      expect(a.providerReadOnlyReason, contains('inherited'));
+    });
   });
 
   group('SessionCandidate', () {

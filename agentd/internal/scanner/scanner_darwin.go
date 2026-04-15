@@ -76,6 +76,18 @@ func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
 		return ProcessInfo{}, false
 	}
 
+	// Filter out claude -p sub-agents (child processes spawned by Claude Code's Agent tool).
+	// These are not independent sessions — they're tool invocations within a parent session.
+	argsStr := strings.Join(args, " ")
+	if provider == "claude" && (strings.Contains(argsStr, "-p ") || strings.Contains(argsStr, "--output-format")) {
+		return ProcessInfo{}, false
+	}
+
+	// Filter out processes whose parent is an already-tracked claude agent.
+	if ppid > 0 && s.isTrackedAgent(ppid) {
+		return ProcessInfo{}, false
+	}
+
 	// Get working directory using lsof
 	workDir := s.getDarwinCWD(pid)
 	if workDir == "" {
@@ -111,6 +123,35 @@ func (s *Scanner) isDarwinAgentd(pid int) bool {
 		return false
 	}
 	return strings.Contains(string(output), "agentd")
+}
+
+// isTrackedAgent walks up the parent process tree to check if any ancestor
+// is a claude/opencode process. This filters out sub-agents and tool-child
+// processes that should not be managed as independent agents.
+func (s *Scanner) isTrackedAgent(pid int) bool {
+	visited := map[int]bool{}
+	for p := pid; p > 1; {
+		if visited[p] {
+			return false
+		}
+		visited[p] = true
+		cmd := exec.Command("ps", "-p", strconv.Itoa(p), "-o", "ppid=,comm=")
+		output, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		fields := strings.Fields(strings.TrimSpace(string(output)))
+		if len(fields) < 2 {
+			return false
+		}
+		ppid, _ := strconv.Atoi(fields[0])
+		comm := fields[1]
+		if strings.HasPrefix(comm, "claude") || strings.HasPrefix(comm, "opencode") {
+			return true
+		}
+		p = ppid
+	}
+	return false
 }
 
 // getDarwinCWD gets the current working directory of a process on macOS.

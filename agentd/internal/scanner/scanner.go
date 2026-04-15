@@ -26,6 +26,7 @@ type ProcessInfo struct {
 	SessionFile string
 }
 
+
 const (
 	AttachModeWatcher = "watcher"
 	AttachModeTmux    = "tmux"
@@ -127,6 +128,7 @@ func (s *Scanner) Scan() ([]ProcessInfo, error) {
 	// Fallback to Darwin (macOS) implementation
 	return s.scanDarwin()
 }
+
 
 // FindSessionFile returns the exact JSONL session file for a live Claude/OpenCode process.
 func (p *ProcessInfo) FindSessionFile() string {

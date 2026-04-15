@@ -3,6 +3,7 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,43 @@ func TestAttachedAgentIsReadOnly(t *testing.T) {
 
 	if !ag.IsReadOnly() {
 		t.Fatal("expected attached agent to be read-only")
+	}
+}
+
+func TestClassifyAttachCandidateUsesUniqueWorkDirFallback(t *testing.T) {
+	m := newTestManager(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo dir: %v", err)
+	}
+	projectDirName := strings.ReplaceAll(repoDir, "/", "-")
+	projectDirName = strings.ReplaceAll(projectDirName, ".", "-")
+	projectDirName = strings.ReplaceAll(projectDirName, "_", "-")
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir claude project dir: %v", err)
+	}
+	sessionFile := filepath.Join(projectDir, "sess-live.jsonl")
+	if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
+		PID:      123,
+		Provider: "claude",
+		WorkDir:  repoDir,
+	})
+	if candidate.Decision != agent.AttachDecisionDisplay {
+		t.Fatalf("expected display decision, got %q", candidate.Decision)
+	}
+	if candidate.Process.SessionID != "sess-live" {
+		t.Fatalf("expected derived session id sess-live, got %q", candidate.Process.SessionID)
+	}
+	if candidate.Process.SessionFile != sessionFile {
+		t.Fatalf("expected session file %q, got %q", sessionFile, candidate.Process.SessionFile)
 	}
 }
 

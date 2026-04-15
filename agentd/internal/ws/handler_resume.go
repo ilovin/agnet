@@ -46,10 +46,7 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 	}), nil)
 
 	// Broadcast status change to working
-	h.server.broadcast(event("agent.status_changed", map[string]any{
-		"agentId": ag.ID,
-		"status":  "working",
-	}), nil)
+	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	// Extract model from agent args (set by resolveLaunch via -m flag)
 	currentModel := currentOpenCodeModel(ag.Args)
@@ -81,29 +78,20 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 		stdin, err := cmd.StdinPipe()
 		if err != nil {
 			log.Printf("[OpenCode] Failed to get stdin: %v", err)
-			h.server.broadcast(event("agent.status_changed", map[string]any{
-				"agentId": ag.ID,
-				"status":  "idle",
-			}), nil)
+			h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "idle")), nil)
 			return
 		}
 
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			log.Printf("[OpenCode] Failed to get stdout: %v", err)
-			h.server.broadcast(event("agent.status_changed", map[string]any{
-				"agentId": ag.ID,
-				"status":  "idle",
-			}), nil)
+			h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "idle")), nil)
 			return
 		}
 
 		if err := cmd.Start(); err != nil {
 			log.Printf("[OpenCode] Failed to start command: %v", err)
-			h.server.broadcast(event("agent.status_changed", map[string]any{
-				"agentId": ag.ID,
-				"status":  "idle",
-			}), nil)
+			h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "idle")), nil)
 			return
 		}
 
@@ -197,10 +185,7 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 		}
 
 		// Broadcast status change back to idle
-		h.server.broadcast(event("agent.status_changed", map[string]any{
-			"agentId": ag.ID,
-			"status":  "idle",
-		}), nil)
+		h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "idle")), nil)
 
 		log.Printf("[OpenCode] Resume process completed for agent %s", ag.ID)
 	}()

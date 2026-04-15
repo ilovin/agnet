@@ -34,6 +34,7 @@ type Agent struct {
 	WorkDir  string
 	Cmd      string   // original command used to spawn this agent
 	Args     []string // original args used to spawn this agent
+	PID      int      // process ID, only set for attached agents
 
 	mu                      sync.RWMutex
 	status                  Status

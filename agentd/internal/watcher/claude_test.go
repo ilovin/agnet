@@ -1,12 +1,11 @@
-package watcher_test
+package watcher
 
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
-
-	"github.com/phone-talk/agentd/internal/watcher"
 )
 
 func TestClaudeWatcherDetectsMessages(t *testing.T) {
@@ -19,8 +18,8 @@ func TestClaudeWatcherDetectsMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := make(chan watcher.ConversationEvent, 10)
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
+	events := make(chan ConversationEvent, 10)
+	w := NewClaudeWatcher(sessionFile, func(e ConversationEvent) {
 		events <- e
 	})
 
@@ -56,8 +55,8 @@ func TestClaudeWatcherDetectsWorking(t *testing.T) {
 	sessionFile := filepath.Join(dir, "xyz.jsonl")
 	os.WriteFile(sessionFile, []byte{}, 0644)
 
-	statuses := make(chan watcher.AgentStatus, 10)
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {
+	statuses := make(chan AgentStatus, 10)
+	w := NewClaudeWatcher(sessionFile, func(e ConversationEvent) {
 		if e.StatusChange != nil {
 			statuses <- *e.StatusChange
 		}
@@ -75,13 +74,13 @@ func TestClaudeWatcherDetectsWorking(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("expected a status change event")
 	}
-	if got[0] != watcher.StatusWorking {
+	if got[0] != StatusWorking {
 		t.Errorf("expected StatusWorking, got %v", got[0])
 	}
 }
 
-func collectEvents(ch <-chan watcher.ConversationEvent, count int, timeout time.Duration) []watcher.ConversationEvent {
-	var out []watcher.ConversationEvent
+func collectEvents(ch <-chan ConversationEvent, count int, timeout time.Duration) []ConversationEvent {
+	var out []ConversationEvent
 	deadline := time.After(timeout)
 	for {
 		select {
@@ -96,8 +95,8 @@ func collectEvents(ch <-chan watcher.ConversationEvent, count int, timeout time.
 	}
 }
 
-func collectStatuses(ch <-chan watcher.AgentStatus, count int, timeout time.Duration) []watcher.AgentStatus {
-	var out []watcher.AgentStatus
+func collectStatuses(ch <-chan AgentStatus, count int, timeout time.Duration) []AgentStatus {
+	var out []AgentStatus
 	deadline := time.After(timeout)
 	for {
 		select {
@@ -117,10 +116,106 @@ func TestClaudeWatcherStopIdempotent(t *testing.T) {
 	sessionFile := filepath.Join(dir, "test.jsonl")
 	os.WriteFile(sessionFile, []byte{}, 0644)
 
-	w := watcher.NewClaudeWatcher(sessionFile, func(e watcher.ConversationEvent) {})
+	w := NewClaudeWatcher(sessionFile, func(e ConversationEvent) {})
 	w.Start()
 
 	// Calling Stop twice must not panic
 	w.Stop()
 	w.Stop() // should be a no-op, not a panic
+}
+
+func TestClaudeWatcherRefreshKeepsPIDMappedSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	live := filepath.Join(projectDir, "sess-live.jsonl")
+	archived := filepath.Join(projectDir, "sess-archived.jsonl")
+	if err := os.WriteFile(live, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write live session: %v", err)
+	}
+	if err := os.WriteFile(archived, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write archived session: %v", err)
+	}
+	baseTime := time.Now()
+	if err := os.Chtimes(live, baseTime, baseTime); err != nil {
+		t.Fatalf("chtimes live: %v", err)
+	}
+	if err := os.Chtimes(archived, baseTime.Add(time.Second), baseTime.Add(time.Second)); err != nil {
+		t.Fatalf("chtimes archived: %v", err)
+	}
+
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	pidFile := filepath.Join(sessionsDir, strconv.Itoa(os.Getpid())+".json")
+	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-live"}`), 0o644); err != nil {
+		t.Fatalf("write pid map: %v", err)
+	}
+
+	w := NewClaudeWatcher(live, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(os.Getpid())
+	w.refreshSessionFile()
+
+	if w.path != live {
+		t.Fatalf("expected watcher to stay on %s, got %s", live, w.path)
+	}
+}
+
+func TestClaudeWatcherRefreshFollowsPIDMappedSessionChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	live := filepath.Join(projectDir, "sess-live.jsonl")
+	next := filepath.Join(projectDir, "sess-next.jsonl")
+	if err := os.WriteFile(live, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write live session: %v", err)
+	}
+	if err := os.WriteFile(next, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write next session: %v", err)
+	}
+	baseTime := time.Now()
+	if err := os.Chtimes(next, baseTime, baseTime); err != nil {
+		t.Fatalf("chtimes next: %v", err)
+	}
+	if err := os.Chtimes(live, baseTime.Add(time.Second), baseTime.Add(time.Second)); err != nil {
+		t.Fatalf("chtimes live: %v", err)
+	}
+
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions dir: %v", err)
+	}
+	pidFile := filepath.Join(sessionsDir, strconv.Itoa(os.Getpid())+".json")
+	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-next"}`), 0o644); err != nil {
+		t.Fatalf("write pid map: %v", err)
+	}
+
+	w := NewClaudeWatcher(live, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(os.Getpid())
+	w.refreshSessionFile()
+
+	if w.path != next {
+		t.Fatalf("expected watcher to switch to %s, got %s", next, w.path)
+	}
 }

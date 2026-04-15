@@ -26,6 +26,16 @@ type handler struct {
 	self   *client
 }
 
+type providerSnapshot struct {
+	CurrentProviderID      string
+	RuntimeProviderID      string
+	ProviderState          string
+	ProviderStateReason    string
+	ProviderScope          string
+	ProviderWriteMode      string
+	ProviderReadOnlyReason string
+}
+
 func (h *handler) loop() {
 	// Generate a unique client ID for this connection
 	clientID := generateClientID()
@@ -97,6 +107,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.conversationKey(req), nil
 	case "conversation.history":
 		return h.conversationHistory(req), nil
+	case "conversation.image":
+		return h.conversationImage(req), nil
 	case "conversation.permission_response":
 		return h.conversationPermissionResponse(req), nil
 	case "agent.rename":
@@ -107,8 +119,12 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.providerSwitch(req)
 	case "provider.add":
 		return h.providerAdd(req), nil
+	case "opencode.models":
+		return h.opencodeModels(req), nil
 	case "system.info":
 		return h.systemInfo(req), nil
+	case "system.skills":
+		return h.systemSkills(req), nil
 	case "rpc.ping":
 		return okResp(req.ID, map[string]any{"ok": true, "time": time.Now().Unix()}), nil
 	default:
@@ -119,17 +135,25 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 func (h *handler) agentList(req RPCRequest) RPCResponse {
 	agents := h.server.manager.List()
 	type agentInfo struct {
-		ID             string `json:"id"`
-		Name           string `json:"name"`
-		Provider       string `json:"provider"`
-		WorkDir        string `json:"workDir"`
-		ProjectName    string `json:"projectName,omitempty"`
-		Status         string `json:"status"`
-		HasHistory     bool   `json:"hasHistory"`
-		AttachMode     string `json:"attachMode,omitempty"`
-		ReadOnly       bool   `json:"readOnly"`
-		ReadOnlyReason string `json:"readOnlyReason,omitempty"`
-		SessionID      string `json:"sessionId,omitempty"`
+		ID                     string `json:"id"`
+		Name                   string `json:"name"`
+		Provider               string `json:"provider"`
+		WorkDir                string `json:"workDir"`
+		ProjectName            string `json:"projectName,omitempty"`
+		Status                 string `json:"status"`
+		HasHistory             bool   `json:"hasHistory"`
+		AttachMode             string `json:"attachMode,omitempty"`
+		ReadOnly               bool   `json:"readOnly"`
+		ReadOnlyReason         string `json:"readOnlyReason,omitempty"`
+		SessionID              string `json:"sessionId,omitempty"`
+		RuntimeState           string `json:"runtimeState,omitempty"`
+		SessionState           string `json:"sessionState,omitempty"`
+		SessionStateReason     string `json:"sessionStateReason,omitempty"`
+		SessionControl         string `json:"sessionControl,omitempty"`
+		ProviderState          string `json:"providerState,omitempty"`
+		ProviderScope          string `json:"providerScope,omitempty"`
+		ProviderWriteMode      string `json:"providerWriteMode,omitempty"`
+		ProviderReadOnlyReason string `json:"providerReadOnlyReason,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
@@ -139,18 +163,28 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		derived := h.server.manager.DeriveAgentState(ag.ID)
+		provider := h.deriveProviderSnapshot(ag)
 		result = append(result, agentInfo{
-			ID:             ag.ID,
-			Name:           ag.Name,
-			Provider:       ag.Provider,
-			WorkDir:        ag.WorkDir,
-			ProjectName:    projectName,
-			Status:         string(ag.Status()),
-			HasHistory:     lastSeq > 0,
-			AttachMode:     ag.AttachMode(),
-			ReadOnly:       ag.AttachReadOnly(),
-			ReadOnlyReason: ag.AttachReadOnlyReason(),
-			SessionID:      resumeID,
+			ID:                     ag.ID,
+			Name:                   ag.Name,
+			Provider:               ag.Provider,
+			WorkDir:                ag.WorkDir,
+			ProjectName:            projectName,
+			Status:                 string(ag.Status()),
+			HasHistory:             lastSeq > 0,
+			AttachMode:             ag.AttachMode(),
+			ReadOnly:               ag.AttachReadOnly(),
+			ReadOnlyReason:         ag.AttachReadOnlyReason(),
+			SessionID:              resumeID,
+			RuntimeState:           derived.RuntimeState,
+			SessionState:           derived.SessionState,
+			SessionStateReason:     derived.SessionStateReason,
+			SessionControl:         derived.SessionControl,
+			ProviderState:          provider.ProviderState,
+			ProviderScope:          provider.ProviderScope,
+			ProviderWriteMode:      provider.ProviderWriteMode,
+			ProviderReadOnlyReason: provider.ProviderReadOnlyReason,
 		})
 	}
 	return okResp(req.ID, result)
@@ -165,9 +199,7 @@ func (h *handler) agentCreate(req RPCRequest) (RPCResponse, func()) {
 	srv := h.server
 	conn := h.conn
 	return okResp(req.ID, map[string]any{"id": id}), func() {
-		srv.broadcast(event("agent.status_changed", map[string]any{
-			"agentId": id, "status": "idle",
-		}), conn)
+		srv.broadcast(event("agent.status_changed", h.statusChangedParams(id, "idle")), conn)
 	}
 }
 
@@ -480,12 +512,28 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	claudeFiles, _ := claudeResp.Result.(map[string]any)
 
 	attachableProcesses := toAnySlice(attachable["processes"])
+	filteredAttachable := make([]any, 0, len(attachableProcesses))
+	for _, raw := range attachableProcesses {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		provider, _ := entry["provider"].(string)
+		if strings.EqualFold(provider, "claude") {
+			sessionID := catalogSessionID(entry)
+			if sessionID == "" {
+				log.Printf("[session.catalog] hiding ambiguous live claude candidate: pid=%v workDir=%v", entry["pid"], entry["workDir"])
+				continue
+			}
+		}
+		filteredAttachable = append(filteredAttachable, raw)
+	}
 	files := toAnySlice(opencodeFiles["sessions"])
-	claude := filterLiveClaudeFileSessions(attachableProcesses, toAnySlice(claudeFiles["sessions"]))
+	claude := filterLiveClaudeFileSessions(filteredAttachable, toAnySlice(claudeFiles["sessions"]))
 
 	return okResp(req.ID, map[string]any{
 		"managed":       managed,
-		"attachable":    attachableProcesses,
+		"attachable":    filteredAttachable,
 		"opencodeFiles": files,
 		"claudeFiles":   claude,
 	})
@@ -509,9 +557,7 @@ func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
 					srv := h.server
 					conn := h.conn
 					return okResp(req.ID, map[string]any{"id": agentID}), func() {
-						srv.broadcast(event("agent.status_changed", map[string]any{
-							"agentId": agentID, "status": "idle",
-						}), conn)
+						srv.broadcast(event("agent.status_changed", h.statusChangedParams(agentID, "idle")), conn)
 					}
 				}
 			}
@@ -529,9 +575,7 @@ func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
 		srv := h.server
 		conn := h.conn
 		return okResp(req.ID, map[string]any{"id": id}), func() {
-			srv.broadcast(event("agent.status_changed", map[string]any{
-				"agentId": id, "status": "idle",
-			}), conn)
+			srv.broadcast(event("agent.status_changed", h.statusChangedParams(id, "idle")), conn)
 		}
 	}
 
@@ -550,9 +594,7 @@ func (h *handler) agentStop(req RPCRequest) (RPCResponse, func()) {
 	srv := h.server
 	conn := h.conn
 	return okResp(req.ID, map[string]any{"ok": true}), func() {
-		srv.broadcast(event("agent.status_changed", map[string]any{
-			"agentId": id, "status": "stopped",
-		}), conn)
+		srv.broadcast(event("agent.status_changed", h.statusChangedParams(id, "stopped")), conn)
 	}
 }
 
@@ -562,12 +604,49 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found"), nil
 	}
-
 	_, modelSpecified := req.Params["model"]
 	_, providerSpecified := req.Params["provider"]
 	permissionMode, _ := req.Params["permissionMode"].(string)
 	model, _ := req.Params["model"].(string)
 	apiProvider, _ := req.Params["provider"].(string)
+
+	// For attached agents with a model change, update settings.json without
+	// restarting the process. Claude reads settings dynamically.
+	if ag.AttachMode() != "" && modelSpecified && !providerSpecified && permissionMode == "" {
+		settingsPath := findClaudeSettings()
+		if settingsPath == "" {
+			return errResp(req.ID, -32000, "settings.json not found"), nil
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			return errResp(req.ID, -32000, "read settings: "+err.Error()), nil
+		}
+		var settings map[string]any
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return errResp(req.ID, -32000, "parse settings: "+err.Error()), nil
+		}
+		settings["model"] = model
+		if envMap, ok := settings["env"].(map[string]any); ok {
+			envMap["ANTHROPIC_MODEL"] = model
+		}
+		newData, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return errResp(req.ID, -32000, "marshal settings: "+err.Error()), nil
+		}
+		if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+			return errResp(req.ID, -32000, "write settings: "+err.Error()), nil
+		}
+		log.Printf("[Restart] Updated model to %q in settings.json for attached agent %s", model, id)
+		return okResp(req.ID, map[string]any{"id": id}), nil
+	}
+
+	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
+		reason := ag.AttachReadOnlyReason()
+		if reason == "" {
+			reason = "attached session is read-only"
+		}
+		return errResp(req.ID, -32000, reason), nil
+	}
 
 	// For tmux-attached agents, switch mode via Shift+Tab (no restart needed).
 	// Only applies when ONLY permissionMode is specified (no model/provider change).
@@ -611,9 +690,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	resp := okResp(req.ID, map[string]any{"id": id})
 	conn := h.conn
 	return resp, func() {
-		h.server.broadcast(event("agent.status_changed", map[string]any{
-			"agentId": id, "status": "idle",
-		}), conn)
+		h.server.broadcast(event("agent.status_changed", h.statusChangedParams(id, "idle")), conn)
 	}
 }
 
@@ -627,8 +704,11 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	// Extract image attachments (base64-encoded)
 	var imageFiles []string // temp file paths to pass via --file
+	var imagePaths []string // persisted paths stored in event history
 	if rawImages, ok := req.Params["images"]; ok {
 		if images, ok := rawImages.([]any); ok {
+			dataDir := h.server.manager.DataDir()
+			imgDir := filepath.Join(dataDir, "images", agentID, fmt.Sprintf("%d", time.Now().Unix()))
 			for i, img := range images {
 				imgMap, ok := img.(map[string]any)
 				if !ok {
@@ -653,9 +733,19 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 					log.Printf("[conversationSend] decode image %d: %v", i, err)
 					continue
 				}
+				// Persist to dataDir so history can retrieve it later
+				persistedFile := filepath.Join(imgDir, fmt.Sprintf("img%d%s", i, ext))
+				if err := os.MkdirAll(filepath.Dir(persistedFile), 0755); err == nil {
+					if err := os.WriteFile(persistedFile, decoded, 0644); err == nil {
+						imagePaths = append(imagePaths, persistedFile)
+					} else {
+						log.Printf("[conversationSend] persist image %d: %v", i, err)
+					}
+				}
+				// Also write a temp file for --file CLI argument
 				tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("agentd-img-%s-%d%s", agentID[:8], i, ext))
 				if err := os.WriteFile(tmpFile, decoded, 0644); err != nil {
-					log.Printf("[conversationSend] write image %d: %v", i, err)
+					log.Printf("[conversationSend] write temp image %d: %v", i, err)
 					continue
 				}
 				imageFiles = append(imageFiles, tmpFile)
@@ -670,6 +760,14 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	attachMode := ag.AttachMode()
 	isTmuxAttached := attachMode == "tmux"
+	// Guard againstRestart/Start on attached non-tmux agents (read-only watcher attach)
+	if attachMode != "" && !isTmuxAttached {
+		reason := ag.AttachReadOnlyReason()
+		if reason == "" {
+			reason = "attached session is read-only"
+		}
+		return errResp(req.ID, -32000, reason)
+	}
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
 	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
 	isOpenCode := ag.Provider == "opencode"
@@ -677,17 +775,24 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	// For tmux-attached Claude sessions, write directly to PTY (don't restart)
 	if isTmuxAttached {
 		// Same as the generic PTY path below, but skip the opencode/fresh checks
-		if _, err := h.server.manager.RecordConversationEvent(agentID, map[string]any{
-			"role": "user",
-			"text": message,
-			"raw":  false,
-		}); err != nil {
+		eventData := map[string]any{
+			"role":       "user",
+			"text":       message,
+			"raw":        false,
+			"imageCount": len(imageFiles),
+		}
+		if len(imagePaths) > 0 {
+			eventData["images"] = imagePaths
+		}
+		if _, err := h.server.manager.RecordConversationEvent(agentID, eventData); err != nil {
 			return errResp(req.ID, -32000, "record user message: "+err.Error())
 		}
 		h.server.broadcast(event("conversation.message", map[string]any{
-			"agentId": agentID,
-			"role":    "user",
-			"text":    message,
+			"agentId":    agentID,
+			"role":       "user",
+			"text":       message,
+			"imageCount": len(imageFiles),
+			"images":     imagePaths,
 		}), nil)
 		input := message
 		if !raw {
@@ -715,20 +820,30 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	}
 
 	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
-	if _, err := h.server.manager.RecordConversationEvent(agentID, map[string]any{
-		"role": "user",
-		"text": message,
-		"raw":  false,
-	}); err != nil {
+	ptyEventData := map[string]any{
+		"role":       "user",
+		"text":       message,
+		"raw":        false,
+		"imageCount": len(imageFiles),
+	}
+	if len(imagePaths) > 0 {
+		ptyEventData["images"] = imagePaths
+	}
+	if _, err := h.server.manager.RecordConversationEvent(agentID, ptyEventData); err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
 	// Broadcast user message to all clients
-	h.server.broadcast(event("conversation.message", map[string]any{
-		"agentId": agentID,
-		"role":    "user",
-		"text":    message,
-	}), nil)
+	broadcastData := map[string]any{
+		"agentId":    agentID,
+		"role":       "user",
+		"text":       message,
+		"imageCount": len(imageFiles),
+	}
+	if len(imagePaths) > 0 {
+		broadcastData["images"] = imagePaths
+	}
+	h.server.broadcast(event("conversation.message", broadcastData), nil)
 
 	input := message
 	if !raw {
@@ -782,6 +897,13 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 // agentRestartWithMessage restarts a Claude agent with a new message written to stdin.
 // Used for -p mode where Claude exits after each response and reads prompt from stdin.
 func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
+	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
+		reason := ag.AttachReadOnlyReason()
+		if reason == "" {
+			reason = "attached session is read-only"
+		}
+		return errResp(req.ID, -32000, reason)
+	}
 	// Get the stored resume session ID for conversation continuity
 	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 	if resumeSessionID != "" {
@@ -816,23 +938,22 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 
 	// Record user message first, then broadcast for deterministic history/view sync.
 	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
-		"role": "user",
-		"text": message,
-		"raw":  false,
+		"role":       "user",
+		"text":       message,
+		"raw":        false,
+		"imageCount": len(imageFiles),
 	}); err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
 	h.server.broadcast(event("conversation.message", map[string]any{
-		"agentId": ag.ID,
-		"role":    "user",
-		"text":    message,
+		"agentId":    ag.ID,
+		"role":       "user",
+		"text":       message,
+		"imageCount": len(imageFiles),
 	}), nil)
 
-	h.server.broadcast(event("agent.status_changed", map[string]any{
-		"agentId": ag.ID,
-		"status":  "working",
-	}), nil)
+	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	return okResp(req.ID, map[string]any{"id": ag.ID})
 }
@@ -840,6 +961,13 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 // agentStartWithMessage starts a fresh Claude agent with the first message.
 // Used when a Claude agent was created without starting a process.
 func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
+	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
+		reason := ag.AttachReadOnlyReason()
+		if reason == "" {
+			reason = "attached session is read-only"
+		}
+		return errResp(req.ID, -32000, reason)
+	}
 	log.Printf("[Start] Starting fresh Claude agent %s with message", ag.ID)
 
 	// Get the stored resume session ID if any
@@ -857,17 +985,19 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 
 	// Record user message first
 	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
-		"role": "user",
-		"text": message,
-		"raw":  false,
+		"role":       "user",
+		"text":       message,
+		"raw":        false,
+		"imageCount": len(imageFiles),
 	}); err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
 	h.server.broadcast(event("conversation.message", map[string]any{
-		"agentId": ag.ID,
-		"role":    "user",
-		"text":    message,
+		"agentId":    ag.ID,
+		"role":       "user",
+		"text":       message,
+		"imageCount": len(imageFiles),
 	}), nil)
 
 	// Start the agent with the message
@@ -875,10 +1005,7 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 		return errResp(req.ID, -32000, "start with message: "+err.Error())
 	}
 
-	h.server.broadcast(event("agent.status_changed", map[string]any{
-		"agentId": ag.ID,
-		"status":  "working",
-	}), nil)
+	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	return okResp(req.ID, map[string]any{"id": ag.ID})
 }
@@ -951,6 +1078,24 @@ func (h *handler) conversationKey(req RPCRequest) RPCResponse {
 		ag.SetPermissionPromptActive(false)
 	}
 	return okResp(req.ID, map[string]any{"ok": true})
+}
+
+func (h *handler) conversationImage(req RPCRequest) RPCResponse {
+	imagePath, _ := req.Params["path"].(string)
+	if imagePath == "" {
+		return errResp(req.ID, -32602, "path is required")
+	}
+	dataDir := h.server.manager.DataDir()
+	// Security: only allow reading files under dataDir/images
+	if !strings.HasPrefix(filepath.Clean(imagePath), filepath.Join(dataDir, "images")) {
+		return errResp(req.ID, -32000, "invalid image path")
+	}
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return errResp(req.ID, -32000, "read image: "+err.Error())
+	}
+	b64 := base64.StdEncoding.EncodeToString(data)
+	return okResp(req.ID, map[string]any{"data": b64})
 }
 
 func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
@@ -1362,7 +1507,13 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 	}
 
 	result := make([]processInfo, 0, len(processes))
-	for _, p := range processes {
+	for _, proc := range processes {
+		candidate := h.server.manager.ClassifyAttachCandidate(proc)
+		if candidate.Decision == agent.AttachDecisionSkip || candidate.Decision == agent.AttachDecisionAmbiguous {
+			log.Printf("[agent.scan] hiding %s pid %d: %s", proc.Provider, proc.PID, candidate.Reason)
+			continue
+		}
+		p := candidate.Process
 		projectName := ""
 		if p.WorkDir != "" {
 			projectName = filepath.Base(strings.TrimRight(p.WorkDir, "/"))
@@ -1398,10 +1549,9 @@ func (h *handler) agentRename(req RPCRequest) RPCResponse {
 	if err := h.server.manager.Rename(agentID, name); err != nil {
 		return errResp(req.ID, -32000, err.Error())
 	}
-	h.server.broadcast(event("agent.status_changed", map[string]any{
-		"agentId": agentID,
-		"name":    name,
-	}), nil)
+	params := h.statusChangedParams(agentID, nil)
+	params["name"] = name
+	h.server.broadcast(event("agent.status_changed", params), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
@@ -1441,34 +1591,247 @@ func findClaudeSettings() string {
 	return ""
 }
 
-func (h *handler) providerList(req RPCRequest) RPCResponse {
-	dbPath := findCCSwitchDB()
-	if dbPath == "" {
-		return okResp(req.ID, map[string]any{"providers": []any{}, "current": ""})
+func providerIDFromConfig(configJSON string, runtimeEnv map[string]any, runtimeModel string) string {
+	if configJSON == "" {
+		return ""
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return ""
+	}
+	cfgEnv, _ := cfg["env"].(map[string]any)
+	providerURL, _ := cfgEnv["ANTHROPIC_BASE_URL"].(string)
+	providerToken, _ := cfgEnv["ANTHROPIC_AUTH_TOKEN"].(string)
+	providerModel, _ := cfg["model"].(string)
+	if providerModel == "" {
+		providerModel, _ = cfgEnv["ANTHROPIC_MODEL"].(string)
 	}
 
+	actualURL, _ := runtimeEnv["ANTHROPIC_BASE_URL"].(string)
+	actualToken, _ := runtimeEnv["ANTHROPIC_AUTH_TOKEN"].(string)
+	actualModel := runtimeModel
+	if actualModel == "" {
+		actualModel, _ = runtimeEnv["ANTHROPIC_MODEL"].(string)
+	}
+
+	if providerURL != "" && providerURL != actualURL {
+		return ""
+	}
+	if providerToken != "" && providerToken != actualToken {
+		return ""
+	}
+	if providerModel != "" && providerModel != actualModel {
+		return ""
+	}
+	id, _ := cfg["id"].(string)
+	return id
+}
+
+func runtimeProviderFromRows(rows []map[string]any) (string, string) {
+	settingsPath := findClaudeSettings()
+	if settingsPath == "" {
+		return "", "settings.json not found"
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return "", "read settings.json failed"
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return "", "parse settings.json failed"
+	}
+	runtimeEnv, _ := settings["env"].(map[string]any)
+	runtimeModel, _ := settings["model"].(string)
+	for _, r := range rows {
+		configJSON, _ := r["settings_config"].(string)
+		if configJSON == "" {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+			continue
+		}
+		cfg["id"] = r["id"]
+		mergedConfig, _ := json.Marshal(cfg)
+		if id := providerIDFromConfig(string(mergedConfig), runtimeEnv, runtimeModel); id != "" {
+			return id, "matched by settings.json env"
+		}
+	}
+	return "", "runtime settings did not match any provider"
+}
+
+func currentProviderFromRows(rows []map[string]any) (string, string) {
+	for _, r := range rows {
+		if r["is_current"] == 1.0 || r["is_current"] == "1" || r["is_current"] == true {
+			if id, ok := r["id"].(string); ok {
+				return id, "derived from cc-switch is_current"
+			}
+		}
+	}
+	return "", "cc-switch current provider not set"
+}
+
+func (h *handler) providerRows() ([]map[string]any, RPCResponse, bool) {
+	dbPath := findCCSwitchDB()
+	if dbPath == "" {
+		return nil, okResp(nil, map[string]any{"providers": []any{}, "current": ""}), false
+	}
 	cmd := exec.Command("sqlite3", "-json", dbPath,
 		"SELECT id, name, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index, name")
 	out, err := cmd.Output()
 	if err != nil {
-		return errResp(req.ID, -32000, "read cc-switch db: "+err.Error())
+		return nil, errResp(nil, -32000, "read cc-switch db: "+err.Error()), false
 	}
-
 	var rows []map[string]any
 	if err := json.Unmarshal(out, &rows); err != nil || rows == nil {
 		rows = []map[string]any{}
 	}
+	return rows, RPCResponse{}, true
+}
 
-	current := ""
-	for _, r := range rows {
-		if r["is_current"] == 1.0 || r["is_current"] == "1" || r["is_current"] == true {
-			if id, ok := r["id"].(string); ok {
-				current = id
+func (h *handler) deriveProviderScope(ag *agent.Agent) string {
+	if ag == nil {
+		return "standalone"
+	}
+	if ag.AttachMode() != "" {
+		return "root"
+	}
+	for _, candidate := range h.server.manager.List() {
+		if candidate == nil || candidate.ID == ag.ID {
+			continue
+		}
+		resumeID, _ := h.server.manager.GetResumeSessionID(candidate.ID)
+		agResumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		if resumeID != "" && agResumeID != "" && resumeID == agResumeID {
+			if candidate.AttachMode() != "" || candidate.PID > 0 {
+				return "inherited"
 			}
 		}
 	}
+	return "standalone"
+}
 
-	return okResp(req.ID, map[string]any{"providers": rows, "current": current})
+func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
+	rows, _, ok := h.providerRows()
+	scope := h.deriveProviderScope(ag)
+	if !ok {
+		return providerSnapshot{
+			ProviderScope:          scope,
+			ProviderState:          "unknown",
+			ProviderStateReason:    "provider state unavailable",
+			ProviderWriteMode:      "read_only",
+			ProviderReadOnlyReason: "provider state unavailable",
+		}
+	}
+	currentProviderID, currentReason := currentProviderFromRows(rows)
+	runtimeProviderID, runtimeReason := runtimeProviderFromRows(rows)
+	snapshot := providerSnapshot{
+		CurrentProviderID: currentProviderID,
+		RuntimeProviderID: runtimeProviderID,
+		ProviderScope:     scope,
+	}
+	switch {
+	case currentProviderID == "" || runtimeProviderID == "":
+		snapshot.ProviderState = "unknown"
+		if runtimeProviderID == "" {
+			snapshot.ProviderStateReason = runtimeReason
+		} else {
+			snapshot.ProviderStateReason = currentReason
+		}
+	case currentProviderID == runtimeProviderID:
+		snapshot.ProviderState = "synced"
+		snapshot.ProviderStateReason = runtimeReason
+	default:
+		snapshot.ProviderState = "drifted"
+		snapshot.ProviderStateReason = fmt.Sprintf("runtime provider %s differs from selected provider %s", runtimeProviderID, currentProviderID)
+	}
+	snapshot.ProviderWriteMode = "writable"
+	switch {
+	case scope == "inherited":
+		snapshot.ProviderWriteMode = "read_only"
+		snapshot.ProviderReadOnlyReason = "provider scope is inherited from root session"
+	case snapshot.ProviderState == "unknown":
+		snapshot.ProviderWriteMode = "read_only"
+		snapshot.ProviderReadOnlyReason = "provider runtime state is unknown"
+	case ag != nil && ag.AttachMode() != "":
+		snapshot.ProviderWriteMode = "read_only"
+		snapshot.ProviderReadOnlyReason = "attached runtime cannot guarantee immediate provider switch"
+	}
+	return snapshot
+}
+
+func (h *handler) statusChangedParams(agentID string, status any) map[string]any {
+	params := map[string]any{"agentId": agentID}
+	ag := h.server.manager.Get(agentID)
+	if status != nil {
+		switch v := status.(type) {
+		case string:
+			params["status"] = v
+		case agent.Status:
+			params["status"] = string(v)
+		}
+	} else if ag != nil {
+		params["status"] = string(ag.Status())
+	}
+	derived := h.server.manager.DeriveAgentState(agentID)
+	params["runtimeState"] = derived.RuntimeState
+	params["sessionState"] = derived.SessionState
+	params["sessionStateReason"] = derived.SessionStateReason
+	params["sessionControl"] = derived.SessionControl
+	if ag != nil {
+		provider := h.deriveProviderSnapshot(ag)
+		params["providerState"] = provider.ProviderState
+		params["providerScope"] = provider.ProviderScope
+		params["providerWriteMode"] = provider.ProviderWriteMode
+		params["providerReadOnlyReason"] = provider.ProviderReadOnlyReason
+	}
+	return params
+}
+
+func (h *handler) providerList(req RPCRequest) RPCResponse {
+	rows, resp, ok := h.providerRows()
+	if !ok {
+		if resp.Error == nil {
+			return okResp(req.ID, map[string]any{
+				"providers":              []any{},
+				"current":                "",
+				"runtimeProviderId":      "",
+				"providerState":          "unknown",
+				"providerStateReason":    "provider state unavailable",
+				"providerScope":          "standalone",
+				"providerWriteMode":      "read_only",
+				"providerReadOnlyReason": "provider state unavailable",
+			})
+		}
+		resp.ID = req.ID
+		return resp
+	}
+
+	agentID, _ := req.Params["agentId"].(string)
+	var targetAgent *agent.Agent
+	if agentID != "" {
+		targetAgent = h.server.manager.Get(agentID)
+	}
+	snapshot := h.deriveProviderSnapshot(targetAgent)
+	switch {
+	case agentID == "":
+		snapshot.ProviderWriteMode = "read_only"
+		snapshot.ProviderReadOnlyReason = "agentId is required to determine safe provider switching"
+	case targetAgent == nil:
+		snapshot.ProviderWriteMode = "read_only"
+		snapshot.ProviderReadOnlyReason = "agent not found"
+	}
+
+	return okResp(req.ID, map[string]any{
+		"providers":              rows,
+		"current":                snapshot.CurrentProviderID,
+		"runtimeProviderId":      snapshot.RuntimeProviderID,
+		"providerState":          snapshot.ProviderState,
+		"providerStateReason":    snapshot.ProviderStateReason,
+		"providerScope":          snapshot.ProviderScope,
+		"providerWriteMode":      snapshot.ProviderWriteMode,
+		"providerReadOnlyReason": snapshot.ProviderReadOnlyReason,
+	})
 }
 
 func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
@@ -1478,6 +1841,21 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 	}
 
 	agentID, _ := req.Params["agentId"].(string)
+	var targetAgent *agent.Agent
+	if agentID != "" {
+		targetAgent = h.server.manager.Get(agentID)
+		if targetAgent == nil {
+			return errResp(req.ID, -32000, "agent not found"), nil
+		}
+		snapshot := h.deriveProviderSnapshot(targetAgent)
+		if snapshot.ProviderWriteMode == "read_only" {
+			msg := snapshot.ProviderReadOnlyReason
+			if msg == "" {
+				msg = "provider switch is read-only for this session"
+			}
+			return errResp(req.ID, -32000, msg), nil
+		}
+	}
 
 	dbPath := findCCSwitchDB()
 	if dbPath == "" {
@@ -1557,6 +1935,21 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 	)
 	_ = exec.Command("sqlite3", dbPath, updateSQL).Run()
 
+	// Sync selected provider to cc-switch settings.json so the standalone CC Switch UI
+	// stays consistent with the in-app switch.
+	ccSwitchSettingsPath := filepath.Join(filepath.Dir(dbPath), "settings.json")
+	if data, err := os.ReadFile(ccSwitchSettingsPath); err == nil {
+		var ccSettings map[string]any
+		if err := json.Unmarshal(data, &ccSettings); err == nil {
+			ccSettings["currentProviderClaude"] = providerID
+			if newCCData, err := json.MarshalIndent(ccSettings, "", "  "); err == nil {
+				if writeErr := os.WriteFile(ccSwitchSettingsPath, newCCData, 0644); writeErr != nil {
+					log.Printf("[providerSwitch] update cc-switch settings.json: %v", writeErr)
+				}
+			}
+		}
+	}
+
 	// Extract model from provider config for the response and restart
 	model, _ := providerConfig["model"].(string)
 	if model == "" {
@@ -1566,26 +1959,18 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 		}
 	}
 
-	// Restart the agent so the new provider config takes effect immediately.
-	// Keep agent.provider as "claude" — it's still a claude process, just with
-	// different env/model via settings.json.
 	var afterSend func()
-	if agentID != "" {
-		ag := h.server.manager.Get(agentID)
-		if ag != nil {
-			resumeSessionID, _ := h.server.manager.GetResumeSessionID(agentID)
-			mode := currentPermissionMode(ag.Args)
-			provider, cmd, args, env := resolveLaunch("claude", ag.Cmd, ag.Args, resumeSessionID, model, mode)
-			if err := h.server.manager.RestartInPlace(agentID, provider, cmd, args, env); err != nil {
-				log.Printf("[providerSwitch] restart agent %s: %v", agentID, err)
-			} else {
-				srv := h.server
-				conn := h.conn
-				afterSend = func() {
-					srv.broadcast(event("agent.status_changed", map[string]any{
-						"agentId": agentID, "status": "idle",
-					}), conn)
-				}
+	if targetAgent != nil {
+		resumeSessionID, _ := h.server.manager.GetResumeSessionID(agentID)
+		mode := currentPermissionMode(targetAgent.Args)
+		provider, cmd, args, env := resolveLaunch("claude", targetAgent.Cmd, targetAgent.Args, resumeSessionID, model, mode)
+		if err := h.server.manager.RestartInPlace(agentID, provider, cmd, args, env); err != nil {
+			log.Printf("[providerSwitch] restart agent %s: %v", agentID, err)
+		} else {
+			srv := h.server
+			conn := h.conn
+			afterSend = func() {
+				srv.broadcast(event("agent.status_changed", h.statusChangedParams(agentID, "idle")), conn)
 			}
 		}
 	}
@@ -1605,6 +1990,74 @@ func (h *handler) systemInfo(req RPCRequest) RPCResponse {
 	}
 	return okResp(req.ID, map[string]any{
 		"homeDir": home,
+	})
+}
+
+func (h *handler) systemSkills(req RPCRequest) RPCResponse {
+	type skillEntry struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Command     string `json:"command"`
+	}
+
+	skills := []skillEntry{}
+	seen := map[string]bool{}
+
+	// Scan all candidate home directories for .claude/skills/
+	var homes []string
+	if home, err := os.UserHomeDir(); err == nil {
+		homes = append(homes, home)
+	}
+	if entries, err := os.ReadDir("/home"); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				homes = append(homes, filepath.Join("/home", e.Name()))
+			}
+		}
+	}
+
+	for _, home := range homes {
+		skillsDir := filepath.Join(home, ".claude", "skills")
+		entries, err := os.ReadDir(skillsDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			cmd := "/" + name
+			desc := ""
+			// Try to read description from skill.md or first .md file
+			for _, candidate := range []string{"skill.md", "index.md"} {
+				p := filepath.Join(skillsDir, name, candidate)
+				if data, err := os.ReadFile(p); err == nil {
+					lines := strings.Split(string(data), "\n")
+					for _, line := range lines {
+						line = strings.TrimSpace(line)
+						if line != "" && !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "---") {
+							desc = line
+							break
+						}
+					}
+					break
+				}
+			}
+			skills = append(skills, skillEntry{
+				Name:        name,
+				Description: desc,
+				Command:     cmd,
+			})
+		}
+	}
+
+	return okResp(req.ID, map[string]any{
+		"skills": skills,
 	})
 }
 
@@ -1773,9 +2226,84 @@ func (h *handler) agentAttach(req RPCRequest) (RPCResponse, func()) {
 			"readOnly":       agent.AttachReadOnly(),
 			"readOnlyReason": agent.AttachReadOnlyReason(),
 		}), func() {
-			srv.broadcast(event("agent.status_changed", map[string]any{
-				"agentId": agent.ID,
-				"status":  agent.Status(),
-			}), conn)
+			srv.broadcast(event("agent.status_changed", h.statusChangedParams(agent.ID, agent.Status())), conn)
 		}
+}
+
+// opencodeModels reads the opencode.json config and returns available models.
+func (h *handler) opencodeModels(req RPCRequest) RPCResponse {
+	candidates := []string{}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".config", "opencode", "opencode.json"),
+		)
+	}
+	if os.Getuid() == 0 {
+		entries, _ := os.ReadDir("/home")
+		for _, e := range entries {
+			if e.IsDir() {
+				candidates = append(candidates,
+					filepath.Join("/home", e.Name(), ".config", "opencode", "opencode.json"),
+				)
+			}
+		}
+	}
+
+	var configPath string
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			configPath = p
+			break
+		}
+	}
+	if configPath == "" {
+		return okResp(req.ID, map[string]any{"models": []any{}, "current": ""})
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return errResp(req.ID, -32000, "read opencode.json: "+err.Error())
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		return errResp(req.ID, -32000, "parse opencode.json: "+err.Error())
+	}
+
+	currentModel, _ := config["model"].(string)
+	providers, _ := config["provider"].(map[string]any)
+
+	type modelEntry struct {
+		ID       string `json:"id"`
+		Name     string `json:"name"`
+		Provider string `json:"provider"`
+	}
+
+	var models []modelEntry
+	for provName, provVal := range providers {
+		provMap, ok := provVal.(map[string]any)
+		if !ok {
+			continue
+		}
+		modelsMap, _ := provMap["models"].(map[string]any)
+		for modelName, modelVal := range modelsMap {
+			displayName := modelName
+			if m, ok := modelVal.(map[string]any); ok {
+				if name, ok := m["name"].(string); ok && name != "" {
+					displayName = name
+				}
+			}
+			models = append(models, modelEntry{
+				ID:       provName + "/" + modelName,
+				Name:     displayName,
+				Provider: provName,
+			})
+		}
+	}
+
+	return okResp(req.ID, map[string]any{
+		"models":  models,
+		"current": currentModel,
+	})
 }

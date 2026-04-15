@@ -28,6 +28,14 @@ class AgentModel {
   final String attachMode;
   final String? projectName;
   final String? sessionId;
+  final String? runtimeState;
+  final String? sessionState;
+  final String? sessionStateReason;
+  final String? sessionControl;
+  final String? providerState;
+  final String? providerScope;
+  final String? providerWriteMode;
+  final String? providerReadOnlyReason;
 
   const AgentModel({
     required this.id,
@@ -42,6 +50,14 @@ class AgentModel {
     this.attachMode = '',
     this.projectName,
     this.sessionId,
+    this.runtimeState,
+    this.sessionState,
+    this.sessionStateReason,
+    this.sessionControl,
+    this.providerState,
+    this.providerScope,
+    this.providerWriteMode,
+    this.providerReadOnlyReason,
   });
 
   factory AgentModel.fromJson(Map<String, dynamic> json) => AgentModel(
@@ -57,6 +73,14 @@ class AgentModel {
         attachMode: json['attachMode'] as String? ?? '',
         projectName: json['projectName'] as String?,
         sessionId: json['sessionId'] as String?,
+        runtimeState: json['runtimeState'] as String?,
+        sessionState: json['sessionState'] as String?,
+        sessionStateReason: json['sessionStateReason'] as String?,
+        sessionControl: json['sessionControl'] as String?,
+        providerState: json['providerState'] as String?,
+        providerScope: json['providerScope'] as String?,
+        providerWriteMode: json['providerWriteMode'] as String?,
+        providerReadOnlyReason: json['providerReadOnlyReason'] as String?,
       );
 
   AgentModel copyWith({
@@ -72,6 +96,14 @@ class AgentModel {
     String? attachMode,
     String? projectName,
     String? sessionId,
+    String? runtimeState,
+    String? sessionState,
+    String? sessionStateReason,
+    String? sessionControl,
+    String? providerState,
+    String? providerScope,
+    String? providerWriteMode,
+    String? providerReadOnlyReason,
   }) =>
       AgentModel(
         id: id ?? this.id,
@@ -86,5 +118,14 @@ class AgentModel {
         attachMode: attachMode ?? this.attachMode,
         projectName: projectName ?? this.projectName,
         sessionId: sessionId ?? this.sessionId,
+        runtimeState: runtimeState ?? this.runtimeState,
+        sessionState: sessionState ?? this.sessionState,
+        sessionStateReason: sessionStateReason ?? this.sessionStateReason,
+        sessionControl: sessionControl ?? this.sessionControl,
+        providerState: providerState ?? this.providerState,
+        providerScope: providerScope ?? this.providerScope,
+        providerWriteMode: providerWriteMode ?? this.providerWriteMode,
+        providerReadOnlyReason:
+            providerReadOnlyReason ?? this.providerReadOnlyReason,
       );
 }

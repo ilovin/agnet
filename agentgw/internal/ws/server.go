@@ -13,9 +13,9 @@ import (
 
 const (
 	// pingInterval is how often the server sends a WebSocket ping to clients.
-	pingInterval = 25 * time.Second
+	pingInterval = 30 * time.Second
 	// pongTimeout is how long the server waits for a pong before closing.
-	pongTimeout = 60 * time.Second
+	pongTimeout = 90 * time.Second
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
