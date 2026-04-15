@@ -35,5 +35,12 @@ void main() {
       final loaded = await store.load();
       expect(loaded, isEmpty);
     });
+
+    test('last used url round-trips', () async {
+      final store = ConnectionStore();
+      expect(await store.getLastUsedUrl(), isNull);
+      await store.setLastUsedUrl('ws://a/ws');
+      expect(await store.getLastUsedUrl(), equals('ws://a/ws'));
+    });
   });
 }

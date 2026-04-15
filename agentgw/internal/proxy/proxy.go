@@ -37,8 +37,11 @@ type Proxy struct {
 	pending map[float64]*pending
 	nextID  float64
 
-	eventMu sync.RWMutex
-	onEvent func(map[string]any)
+	eventMu      sync.RWMutex
+	onEvent      func(map[string]any)
+	disconnectMu sync.RWMutex
+	onDisconnect func()
+	closeOnce    sync.Once
 
 	// Reconnection fields
 	url       string
@@ -120,6 +123,13 @@ func (p *Proxy) readLoop() {
 					continue // Successfully reconnected, continue reading
 				}
 			}
+
+			p.disconnectMu.RLock()
+			cb := p.onDisconnect
+			p.disconnectMu.RUnlock()
+			if cb != nil {
+				cb()
+			}
 			return
 		}
 		var msg rpcMsg
@@ -159,6 +169,14 @@ func (p *Proxy) OnEvent(fn func(map[string]any)) {
 	p.eventMu.Lock()
 	defer p.eventMu.Unlock()
 	p.onEvent = fn
+}
+
+// OnDisconnect registers a callback that fires when the proxy read loop exits
+// after the connection cannot be recovered.
+func (p *Proxy) OnDisconnect(fn func()) {
+	p.disconnectMu.Lock()
+	defer p.disconnectMu.Unlock()
+	p.onDisconnect = fn
 }
 
 // Call sends a JSON-RPC request and waits for a response.
@@ -247,6 +265,10 @@ func (p *Proxy) tryReconnect() error {
 
 // Close closes the underlying WebSocket connection.
 func (p *Proxy) Close() error {
-	close(p.quit)
-	return p.conn.Close()
+	var err error
+	p.closeOnce.Do(func() {
+		close(p.quit)
+		err = p.conn.Close()
+	})
+	return err
 }

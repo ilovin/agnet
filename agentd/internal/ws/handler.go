@@ -113,6 +113,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.conversationPermissionResponse(req), nil
 	case "agent.rename":
 		return h.agentRename(req), nil
+	case "agent.remove":
+		return h.agentRemove(req), nil
 	case "provider.list":
 		return h.providerList(req), nil
 	case "provider.switch":
@@ -154,6 +156,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		ProviderScope          string `json:"providerScope,omitempty"`
 		ProviderWriteMode      string `json:"providerWriteMode,omitempty"`
 		ProviderReadOnlyReason string `json:"providerReadOnlyReason,omitempty"`
+		PermissionMode         string `json:"permissionMode,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
@@ -185,6 +188,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			ProviderScope:          provider.ProviderScope,
 			ProviderWriteMode:      provider.ProviderWriteMode,
 			ProviderReadOnlyReason: provider.ProviderReadOnlyReason,
+			PermissionMode:         currentPermissionMode(ag.Args),
 		})
 	}
 	return okResp(req.ID, result)
@@ -273,6 +277,9 @@ func currentPermissionMode(args []string) string {
 	for i, a := range args {
 		if a == "--permission-mode" && i+1 < len(args) {
 			return args[i+1]
+		}
+		if a == "--dangerously-skip-permissions" {
+			return "bypassPermissions"
 		}
 	}
 	return ""
@@ -1555,6 +1562,20 @@ func (h *handler) agentRename(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
+func (h *handler) agentRemove(req RPCRequest) RPCResponse {
+	agentID, _ := req.Params["agentId"].(string)
+	if agentID == "" {
+		return errResp(req.ID, -32602, "agentId is required")
+	}
+	if err := h.server.manager.Remove(agentID); err != nil {
+		return errResp(req.ID, -32000, err.Error())
+	}
+	params := h.statusChangedParams(agentID, nil)
+	params["status"] = "removed"
+	h.server.broadcast(event("agent.status_changed", params), nil)
+	return okResp(req.ID, map[string]any{"ok": true})
+}
+
 func findCCSwitchDB() string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{filepath.Join(home, ".cc-switch", "cc-switch.db")}
@@ -1712,16 +1733,32 @@ func (h *handler) deriveProviderScope(ag *agent.Agent) string {
 }
 
 func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
-	rows, _, ok := h.providerRows()
 	scope := h.deriveProviderScope(ag)
-	if !ok {
+
+	// opencode does not use cc-switch provider switching.
+	if ag != nil && ag.Provider == "opencode" {
 		return providerSnapshot{
-			ProviderScope:          scope,
-			ProviderState:          "unknown",
-			ProviderStateReason:    "provider state unavailable",
-			ProviderWriteMode:      "read_only",
-			ProviderReadOnlyReason: "provider state unavailable",
+			ProviderScope: scope,
 		}
+	}
+
+	rows, _, ok := h.providerRows()
+	if !ok {
+		snapshot := providerSnapshot{
+			ProviderScope:       scope,
+			ProviderState:       "unknown",
+			ProviderStateReason: "provider state unavailable",
+			ProviderWriteMode:   "writable",
+		}
+		switch {
+		case scope == "inherited":
+			snapshot.ProviderWriteMode = "read_only"
+			snapshot.ProviderReadOnlyReason = "provider scope is inherited from root session"
+		case ag != nil && ag.AttachMode() != "":
+			snapshot.ProviderWriteMode = "read_only"
+			snapshot.ProviderReadOnlyReason = "attached runtime cannot guarantee immediate provider switch"
+		}
+		return snapshot
 	}
 	currentProviderID, currentReason := currentProviderFromRows(rows)
 	runtimeProviderID, runtimeReason := runtimeProviderFromRows(rows)
@@ -1750,9 +1787,6 @@ func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
 	case scope == "inherited":
 		snapshot.ProviderWriteMode = "read_only"
 		snapshot.ProviderReadOnlyReason = "provider scope is inherited from root session"
-	case snapshot.ProviderState == "unknown":
-		snapshot.ProviderWriteMode = "read_only"
-		snapshot.ProviderReadOnlyReason = "provider runtime state is unknown"
 	case ag != nil && ag.AttachMode() != "":
 		snapshot.ProviderWriteMode = "read_only"
 		snapshot.ProviderReadOnlyReason = "attached runtime cannot guarantee immediate provider switch"
@@ -1779,6 +1813,7 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 	params["sessionStateReason"] = derived.SessionStateReason
 	params["sessionControl"] = derived.SessionControl
 	if ag != nil {
+		params["permissionMode"] = currentPermissionMode(ag.Args)
 		provider := h.deriveProviderSnapshot(ag)
 		params["providerState"] = provider.ProviderState
 		params["providerScope"] = provider.ProviderScope

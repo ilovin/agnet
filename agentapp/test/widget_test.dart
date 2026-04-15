@@ -3,10 +3,100 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:agentapp/models/agent_model.dart';
+import 'package:agentapp/models/node_model.dart';
+import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
+import 'package:agentapp/screens/dashboard_screen.dart';
+
+Future<void> pumpNodeCard(
+  WidgetTester tester,
+  NodeModel node, {
+  List<Map<String, dynamic>> agents = const [],
+}) async {
+  final container = ProviderContainer();
+  container.read(nodesProvider.notifier).loadNodes([
+    {
+      'id': node.id,
+      'name': node.name,
+      'host': node.host,
+      'status': switch (node.status) {
+        NodeStatus.connected => 'connected',
+        NodeStatus.disconnected => 'disconnected',
+        NodeStatus.connecting => 'connecting',
+        NodeStatus.deploying => 'deploying',
+        NodeStatus.error => 'error',
+      },
+      'location': node.location.toJson(),
+      'agentCount': node.agentCount,
+    },
+  ]);
+  if (agents.isNotEmpty) {
+    container.read(nodesProvider.notifier).loadAgents(node.id, agents);
+  }
+  addTearDown(container.dispose);
+
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp(
+        home: Scaffold(body: NodeCard(node: node)),
+      ),
+    ),
+  );
+  await tester.pump();
+}
 
 void main() {
+  test('currentOpencodeModelLabel shows active model name', () {
+    final data = {
+      '_opencodeCurrent': 'tb-api/claude-sonnet-4-6',
+      '_opencodeModels': [
+        {
+          'id': 'tb-api/claude-sonnet-4-6',
+          'name': 'Claude Sonnet 4.6',
+          'provider': 'tb-api',
+        },
+      ],
+    };
+
+    expect(currentOpencodeModelId(data), equals('tb-api/claude-sonnet-4-6'));
+    expect(currentOpencodeModelLabel(data), equals('Claude Sonnet 4.6'));
+  });
+
+  test('currentOpencodeModelLabel falls back to bare current model id', () {
+    final data = {
+      '_opencodeCurrent': 'claude-sonnet-4-6',
+      '_opencodeModels': [
+        {
+          'id': 'tb-api/claude-sonnet-4-6',
+          'name': 'Claude Sonnet 4.6',
+          'provider': 'tb-api',
+        },
+      ],
+    };
+
+    expect(currentOpencodeModelId(data), equals('tb-api/claude-sonnet-4-6'));
+    expect(currentOpencodeModelLabel(data), equals('Claude Sonnet 4.6'));
+    expect(
+      opencodeModelMatches('tb-api/claude-sonnet-4-6', 'claude-sonnet-4-6'),
+      isTrue,
+    );
+  });
+
+  test('normalizeOpencodeModels sorts by provider then name', () {
+    final models = normalizeOpencodeModels([
+      {'id': 'z-api/model-b', 'name': 'Model B', 'provider': 'z-api'},
+      {'id': 'a-api/model-c', 'name': 'Model C', 'provider': 'a-api'},
+      {'id': 'a-api/model-a', 'name': 'Model A', 'provider': 'a-api'},
+    ]);
+
+    expect(
+      models.map((m) => m['id']).toList(),
+      equals(['a-api/model-a', 'a-api/model-c', 'z-api/model-b']),
+    );
+  });
+
   test('merged text_delta assistant output is not treated as thinking', () {
     final messages = convertEventsToMessages([
       {
@@ -31,18 +121,101 @@ void main() {
     expect(messages.first.isThinking, isFalse);
   });
 
-  test('history normalization preserves kind metadata', () {
-    final normalized = normalizeHistoryEvent({
-      'seq': 7,
-      'role': 'assistant',
-      'text': '让我',
-      'raw': false,
-      'kind': 'text_delta',
-    });
+  test(
+    'mergeConversationEvents preserves order and refreshes duplicate seqs',
+    () {
+      final merged = mergeConversationEvents(
+        [
+          normalizeHistoryEvent({
+            'seq': 1,
+            'role': 'user',
+            'text': 'old user',
+            'raw': false,
+          }),
+          normalizeHistoryEvent({
+            'seq': 2,
+            'role': 'assistant',
+            'text': 'stale assistant',
+            'raw': false,
+          }),
+        ],
+        [
+          {
+            'seq': 2,
+            'role': 'assistant',
+            'text': 'fresh assistant',
+            'raw': false,
+          },
+          {
+            'seq': 3,
+            'role': 'assistant',
+            'text': 'latest assistant',
+            'raw': false,
+          },
+        ],
+      );
 
-    expect(normalized['kind'], equals('text_delta'));
-    expect(normalized['raw'], isFalse);
-  });
+      expect(merged.map((event) => event['seq']), equals([1, 2, 3]));
+      expect(merged[1]['text'], equals('fresh assistant'));
+      expect(latestConversationSeq(merged), equals(3));
+      expect(oldestConversationSeq(merged), equals(1));
+    },
+  );
+
+  test(
+    'pruneConversationCache removes stale entries and keeps newest sessions',
+    () {
+      final now = DateTime(2026, 4, 15, 12);
+      final pruned = pruneConversationCache(
+        {
+          'stale': ConversationEventCacheEntry(
+            events: [
+              normalizeHistoryEvent({
+                'seq': 1,
+                'role': 'assistant',
+                'text': 'old',
+              }),
+            ],
+            touchedAt: now.subtract(const Duration(hours: 13)),
+          ),
+          'recent-a': ConversationEventCacheEntry(
+            events: [
+              normalizeHistoryEvent({
+                'seq': 10,
+                'role': 'assistant',
+                'text': 'A',
+              }),
+            ],
+            touchedAt: now.subtract(const Duration(minutes: 10)),
+          ),
+          'recent-b': ConversationEventCacheEntry(
+            events: [
+              normalizeHistoryEvent({
+                'seq': 20,
+                'role': 'assistant',
+                'text': 'B',
+              }),
+            ],
+            touchedAt: now.subtract(const Duration(minutes: 5)),
+          ),
+          'recent-c': ConversationEventCacheEntry(
+            events: [
+              normalizeHistoryEvent({
+                'seq': 30,
+                'role': 'assistant',
+                'text': 'C',
+              }),
+            ],
+            touchedAt: now.subtract(const Duration(minutes: 1)),
+          ),
+        },
+        now: now,
+        maxEntries: 2,
+      );
+
+      expect(pruned.keys, equals(['recent-c', 'recent-b']));
+    },
+  );
 
   test('complete assistant message can still be treated as thinking', () {
     final message = ChatMessage(
@@ -56,38 +229,51 @@ void main() {
   });
 
   test('buildCollapsedPreview returns concise single-line preview', () {
-    final preview = buildCollapsedPreview('Line 1\nLine 2\nLine 3', maxChars: 13);
+    final preview = buildCollapsedPreview(
+      'Line 1\nLine 2\nLine 3',
+      maxChars: 13,
+    );
 
     expect(preview, 'Line 1 Line 2…');
   });
 
-  test('convertEventsToMessages groups tool activity into one stable block', () {
-    final messages = convertEventsToMessages([
-      {'seq': 1, 'role': 'user', 'text': '查一下文件', 'raw': false},
-      {
-        'seq': 2,
-        'role': 'assistant',
-        'text': '[Using tool: Read]',
-        'raw': false,
-        'kind': 'tool_use',
-      },
-      {'seq': 3, 'role': 'assistant', 'text': '[Read: /tmp/a.txt]', 'raw': false},
-      {
-        'seq': 4,
-        'role': 'assistant',
-        'text': '{"ok":true}',
-        'raw': false,
-        'kind': 'tool_result',
-      },
-      {'seq': 5, 'role': 'assistant', 'text': '文件读取完成。', 'raw': false},
-    ]);
+  test(
+    'convertEventsToMessages groups tool activity into one stable block',
+    () {
+      final messages = convertEventsToMessages([
+        {'seq': 1, 'role': 'user', 'text': '查一下文件', 'raw': false},
+        {
+          'seq': 2,
+          'role': 'assistant',
+          'text': '[Using tool: Read]',
+          'raw': false,
+          'kind': 'tool_use',
+        },
+        {
+          'seq': 3,
+          'role': 'assistant',
+          'text': '[Read: /tmp/a.txt]',
+          'raw': false,
+        },
+        {
+          'seq': 4,
+          'role': 'assistant',
+          'text': '{"ok":true}',
+          'raw': false,
+          'kind': 'tool_result',
+        },
+        {'seq': 5, 'role': 'assistant', 'text': '文件读取完成。', 'raw': false},
+      ]);
 
-    expect(messages, hasLength(3));
-    expect(messages[1].isActivityBlock, isTrue);
-    expect(messages[1].text, contains('[Using tool: Read]'));
-    expect(messages[1].text, contains('[Read: /tmp/a.txt]'));
-    expect(messages[2].text, equals('文件读取完成。'));
-  });
+      expect(messages, hasLength(3));
+      expect(messages[1].isActivityBlock, isTrue);
+      expect(messages[1].kind, equals('activity_list'));
+      expect(messages[1].activities, hasLength(3));
+      expect(messages[1].activities[0]['toolName'], equals('Read'));
+      expect(messages[1].activities[2]['content'], equals('{"ok":true}'));
+      expect(messages[2].text, equals('文件读取完成。'));
+    },
+  );
 
   test('read-only Claude sessions return clear input hint', () {
     const agent = AgentModel(
@@ -102,6 +288,71 @@ void main() {
 
     expect(isReadOnlyAgent(agent), isTrue);
     expect(readOnlyHintText(agent), equals('只读会话：请回到原 Claude 终端继续输入'));
+  });
+
+  test('provider write mode alone does not force chat input read-only', () {
+    const agent = AgentModel(
+      id: 'a3',
+      name: 'claude-child',
+      workDir: '/tmp',
+      nodeId: 'n1',
+      provider: 'claude',
+      status: AgentStatus.idle,
+      providerScope: 'inherited',
+      providerWriteMode: 'read_only',
+      providerReadOnlyReason: 'provider scope is inherited from root session',
+    );
+
+    expect(isReadOnlyAgent(agent), isFalse);
+    expect(readOnlyHintText(agent), equals('输入消息…'));
+  });
+
+  test('effectiveModeForAgent prefers backend permission mode', () {
+    const agent = AgentModel(
+      id: 'a4',
+      name: 'claude-live',
+      workDir: '/tmp',
+      nodeId: 'n1',
+      provider: 'claude',
+      status: AgentStatus.idle,
+      permissionMode: 'plan',
+    );
+
+    expect(effectiveModeForAgent(agent), equals('plan'));
+  });
+
+  test('effectiveModeForAgent prefers pending mode over backend state', () {
+    const agent = AgentModel(
+      id: 'a5',
+      name: 'claude-live',
+      workDir: '/tmp',
+      nodeId: 'n1',
+      provider: 'claude',
+      status: AgentStatus.idle,
+      permissionMode: 'plan',
+    );
+
+    expect(effectiveModeForAgent(agent, pendingMode: 'auto'), equals('auto'));
+  });
+
+  test('effectiveModeForAgent falls back to provider default mode', () {
+    const agent = AgentModel(
+      id: 'a6',
+      name: 'claude-live',
+      workDir: '/tmp',
+      nodeId: 'n1',
+      provider: 'claude',
+      status: AgentStatus.idle,
+    );
+
+    expect(effectiveModeForAgent(agent), equals('bypassPermissions'));
+  });
+
+  test('Claude bypass mode label no longer says Build', () {
+    expect(
+      kClaudeModes.firstWhere((m) => m.id == 'bypassPermissions').label,
+      equals('Bypass'),
+    );
   });
 
   test('writable sessions keep normal input hint', () {
@@ -126,6 +377,128 @@ void main() {
     );
     await tester.pump();
     expect(find.text('Agent Manager'), findsOneWidget);
+  });
+
+  testWidgets('remote disconnected node shows connect action', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.disconnected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+    );
+
+    expect(find.text('连接'), findsOneWidget);
+  });
+
+  testWidgets('remote connected node shows restart action', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.connected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+    );
+
+    expect(find.text('重启节点'), findsOneWidget);
+  });
+
+  testWidgets('NodeCard keeps same-name sessions with different session IDs', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.connected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+      agents: [
+        {
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+        {
+          'id': 'a2',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-b',
+          'projectName': 'phone-talk',
+        },
+      ],
+    );
+
+    expect(find.byType(AgentRow), findsNWidgets(2));
+  });
+
+  test('btw assistant message is not skipped after text_delta stream', () {
+    final messages = convertEventsToMessages([
+      {
+        'seq': 1,
+        'role': 'assistant',
+        'text': 'Hello',
+        'raw': false,
+        'kind': 'text_delta',
+      },
+      {
+        'seq': 2,
+        'role': 'assistant',
+        'text': ' world',
+        'raw': false,
+        'kind': 'text_delta',
+      },
+      {
+        'seq': 3,
+        'role': 'assistant',
+        'text': 'Main response complete.',
+        'raw': false,
+        'kind': 'result',
+      },
+      {
+        'seq': 4,
+        'role': 'assistant',
+        'text': 'By the way, here is an extra note.',
+        'raw': false,
+        'kind': 'assistant',
+      },
+    ]);
+
+    expect(messages, hasLength(2));
+    expect(messages[0].text, equals('Helloworld'));
+    expect(messages[0].kind, equals('text_delta'));
+    expect(messages[1].text, equals('By the way, here is an extra note.'));
+    expect(messages[1].kind, equals('assistant'));
   });
 
   test('Claude sessions hide terminal controls', () {

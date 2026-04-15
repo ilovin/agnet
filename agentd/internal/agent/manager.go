@@ -567,6 +567,18 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			}
 		}
 
+		// Deduplicate user messages against the EventBuffer so conversation.send
+		// recordings don't clash with stream-json events, while still preserving
+		// messages typed directly in the CLI.
+		if role == "user" {
+			last := ag.EventBuf().LastEvent()
+			if lastEventRole, _ := last.Data["role"].(string); lastEventRole == "user" {
+				if lastEventText, _ := last.Data["text"].(string); lastEventText == text {
+					return
+				}
+			}
+		}
+
 		if role == "assistant" {
 			ag.setStatus(StatusWorking)
 		}
@@ -1939,6 +1951,17 @@ func getString(m map[string]any, key string) string {
 // makeWatcherCallback builds the standard callback used by all session watchers.
 func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
 	return func(e watcher.ConversationEvent) {
+		// Deduplicate user messages: if the last event in the buffer is an identical
+		// user message (already recorded by conversation.send), skip it. Otherwise,
+		// record it so CLI-originated messages are not lost.
+		if e.Role == "user" {
+			last := ag.EventBuf().LastEvent()
+			if lastEventRole, _ := last.Data["role"].(string); lastEventRole == "user" {
+				if lastEventText, _ := last.Data["text"].(string); lastEventText == e.Text {
+					return
+				}
+			}
+		}
 		data := map[string]any{
 			"role": e.Role,
 			"text": e.Text,

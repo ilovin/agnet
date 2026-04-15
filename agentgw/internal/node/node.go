@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/phone-talk/agentgw/internal/proxy"
+	"github.com/phone-talk/agentgw/internal/tunnel"
 )
 
 type Status string
@@ -30,6 +31,7 @@ type Node struct {
 	mu     sync.RWMutex
 	status Status // private — use GetStatus()/SetStatus()
 	proxy  *proxy.Proxy
+	tunnel *tunnel.Tunnel
 }
 
 // SetStatus updates status under the write lock.
@@ -58,6 +60,20 @@ func (n *Node) SetProxy(p *proxy.Proxy) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.proxy = p
+}
+
+// GetTunnel returns the node's SSH tunnel under the read lock.
+func (n *Node) GetTunnel() *tunnel.Tunnel {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.tunnel
+}
+
+// SetTunnel stores the node's SSH tunnel under the write lock.
+func (n *Node) SetTunnel(t *tunnel.Tunnel) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.tunnel = t
 }
 
 // IsLocal returns true if the node is on localhost.

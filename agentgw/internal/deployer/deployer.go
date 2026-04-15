@@ -84,7 +84,12 @@ func New(client *gossh.Client) *Deployer {
 
 // Deploy executes all deploy steps on the remote machine.
 func (d *Deployer) Deploy(remoteDir string, binaryData []byte) error {
-	steps := PlanSteps(remoteDir, binaryData)
+	return d.DeployWithToken(remoteDir, binaryData, "")
+}
+
+// DeployWithToken executes deploy steps and provisions the given token into agentd config.
+func (d *Deployer) DeployWithToken(remoteDir string, binaryData []byte, token string) error {
+	steps := PlanStepsWithToken(remoteDir, binaryData, token)
 	for _, step := range steps {
 		if err := d.execStep(step); err != nil {
 			return fmt.Errorf("step %s %q: %w", step.Kind, step.Command, err)

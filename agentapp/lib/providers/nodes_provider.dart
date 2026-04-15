@@ -90,6 +90,7 @@ class NodesNotifier extends StateNotifier<NodeState> {
       providerScope: params['providerScope'] as String?,
       providerWriteMode: params['providerWriteMode'] as String?,
       providerReadOnlyReason: params['providerReadOnlyReason'] as String?,
+      permissionMode: params['permissionMode'] as String?,
     );
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = agentList;
@@ -107,6 +108,19 @@ class NodesNotifier extends StateNotifier<NodeState> {
     final updated = Map<String, NodeModel>.from(state.nodes);
     updated[nodeId] = existing.copyWith(name: name);
     state = state.copyWith(nodes: updated);
+  }
+
+  /// Rename an agent locally (after a successful agent.rename RPC call).
+  void renameAgent(String nodeId, String agentId, String name) {
+    final agentList = state.agents[nodeId];
+    if (agentList == null) return;
+    final updated = agentList.map((a) {
+      if (a.id == agentId) return a.copyWith(name: name);
+      return a;
+    }).toList();
+    final agentsMap = Map<String, List<AgentModel>>.from(state.agents);
+    agentsMap[nodeId] = updated;
+    state = state.copyWith(agents: agentsMap);
   }
 
   NodeStatus _parseNodeStatus(String s) {

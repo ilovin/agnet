@@ -326,6 +326,9 @@ func TestAgentListIncludesDerivedStateFields(t *testing.T) {
 	if got := ag["providerWriteMode"]; got != "writable" {
 		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
 	}
+	if got := ag["permissionMode"]; got != "bypassPermissions" {
+		t.Fatalf("expected permissionMode=bypassPermissions, got %#v", got)
+	}
 }
 
 func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
@@ -346,6 +349,7 @@ func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
 		Provider:    "claude",
 		WorkDir:     t.TempDir(),
 		SessionFile: sessionFile,
+		Args:        []string{"--dangerously-skip-permissions"},
 	}); err != nil {
 		t.Fatalf("attach failed: %v", err)
 	}
@@ -385,6 +389,9 @@ func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
 	}
 	if got := agents[0]["providerReadOnlyReason"]; got != "attached runtime cannot guarantee immediate provider switch" {
 		t.Fatalf("unexpected providerReadOnlyReason: %#v", got)
+	}
+	if got := agents[0]["permissionMode"]; got != "bypassPermissions" {
+		t.Fatalf("expected permissionMode=bypassPermissions, got %#v", got)
 	}
 }
 
@@ -447,6 +454,9 @@ func TestAgentStatusChangedEventIncludesDerivedFields(t *testing.T) {
 	}
 	if got := params["providerWriteMode"]; got != "writable" {
 		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
+	}
+	if got := params["permissionMode"]; got != "bypassPermissions" {
+		t.Fatalf("expected permissionMode=bypassPermissions, got %#v", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -32,7 +33,7 @@ type Prober struct {
 // NewProber creates a new prober with default settings.
 func NewProber() *Prober {
 	return &Prober{
-		timeout:    5 * time.Second,
+		timeout:    3 * time.Second,
 		agentdPort: 7373,
 	}
 }
@@ -44,6 +45,9 @@ func (p *Prober) Discover(hosts []nodecfg.SSHHost) []Result {
 	if len(hosts) > 20 {
 		hosts = hosts[:20]
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, 5) // Max 5 concurrent probes
@@ -67,7 +71,17 @@ func (p *Prober) Discover(hosts []nodecfg.SSHHost) []Result {
 		}(i, host)
 	}
 
-	wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+
 	return results
 }
 
@@ -96,8 +110,25 @@ func (p *Prober) probe(host nodecfg.SSHHost) Result {
 	}
 	defer client.Close()
 
-	// Try to dial agentd port through SSH tunnel
-	conn, err := client.Dial("tcp", fmt.Sprintf("localhost:%d", p.agentdPort))
+	// Try to dial agentd port through SSH tunnel with timeout
+	agentdAddr := fmt.Sprintf("localhost:%d", p.agentdPort)
+	type dialRes struct {
+		conn net.Conn
+		err  error
+	}
+	dialCh := make(chan dialRes, 1)
+	go func() {
+		c, err := client.Dial("tcp", agentdAddr)
+		dialCh <- dialRes{c, err}
+	}()
+	var conn net.Conn
+	select {
+	case r := <-dialCh:
+		conn = r.conn
+		err = r.err
+	case <-time.After(2 * time.Second):
+		err = fmt.Errorf("agentd dial timeout")
+	}
 	if err != nil {
 		result.Error = fmt.Sprintf("agentd not reachable: %v", err)
 		return result
@@ -217,7 +248,11 @@ func (c *proxyConn) Close() error {
 	c.stdin.Close()
 	c.stdout.Close()
 	if c.stderr != nil {
-		c.stderr.Close()
+		// Drain stderr in background so cmd.Wait() doesn't block on full pipe.
+		go func() {
+			io.Copy(io.Discard, c.stderr)
+			c.stderr.Close()
+		}()
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
 		c.cmd.Process.Kill()

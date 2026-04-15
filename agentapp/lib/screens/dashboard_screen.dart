@@ -7,8 +7,29 @@ import '../models/node_model.dart';
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
+import '../providers/conversation_provider.dart';
 import '../providers/health_provider.dart';
 import '../theme/agent_status_theme.dart';
+
+List<Map<String, String>> getDefaultModels(String provider) {
+  final defaultModels = {
+    'claude': [
+      {'id': 'claude-sonnet-4-6', 'name': 'Sonnet 4.6'},
+      {'id': 'claude-opus-4-6', 'name': 'Opus 4.6'},
+      {'id': 'claude-haiku-4-5-20251001', 'name': 'Haiku 4.5'},
+    ],
+    'claude-bedrock': [
+      {'id': 'anthropic.claude-3-5-sonnet-20241022-v2:0', 'name': 'Claude 3.5 Sonnet (Bedrock)'},
+      {'id': 'anthropic.claude-3-5-haiku-20241022-v1:0', 'name': 'Claude 3.5 Haiku (Bedrock)'},
+    ],
+    'claude-vertex': [
+      {'id': 'claude-3-5-sonnet@20241022', 'name': 'Claude 3.5 Sonnet (Vertex)'},
+      {'id': 'claude-3-5-haiku@20241022', 'name': 'Claude 3.5 Haiku (Vertex)'},
+    ],
+  };
+
+  return defaultModels[provider] ?? defaultModels['claude']!;
+}
 
 class SessionCandidate {
   final int? pid;
@@ -136,6 +157,15 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
   return [...attachable, ...claudeFiles, ...opencodeFiles];
 }
 
+String managedVisibilityKey(AgentModel agent) {
+  final provider = agent.provider.toLowerCase();
+  final sessionId = (agent.sessionId ?? '').trim().toLowerCase();
+  if (sessionId.isNotEmpty) {
+    return '$provider|session:$sessionId';
+  }
+  return '$provider|agent:${agent.id.toLowerCase()}';
+}
+
 class OpencodeFileCandidate {
   final String id;
   final String name;
@@ -172,12 +202,41 @@ class DashboardScreen extends ConsumerStatefulWidget {
 
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Timer? _refreshTimer;
+  bool _wsConnected = true;
 
   @override
   void initState() {
     super.initState();
     _setupEventListener();
     _startAutoRefresh();
+    // Listen for connection state changes
+    final notifier = ref.read(connectionProvider.notifier);
+    notifier.onStateChanged.listen((state) {
+      if (!mounted) return;
+      setState(() {
+        _wsConnected = state == WsConnectionState.connected;
+      });
+      // Reconnect successful — refresh all data immediately
+      if (state == WsConnectionState.connected) {
+        _refreshAllNodes();
+        // Re-subscribe to events on the new connection
+        final client = ref.read(connectionProvider);
+        if (client != null) {
+          client.onEvent((event) {
+            ref.read(nodesProvider.notifier).handleEvent(event);
+            ref.read(conversationProvider.notifier).handleEvent(event);
+          });
+          // Register auto-refresh for newly discovered agents
+          ref.read(nodesProvider.notifier).onAgentsRefresh = (nodeId) async {
+            try {
+              final ar = await client.call('agent.list', {'nodeId': nodeId});
+              final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
+              ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
+            } catch (_) {}
+          };
+        }
+      }
+    });
   }
 
   @override
@@ -204,6 +263,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       final nodes = (result is List
           ? result
           : (result['nodes'] as List?) ?? []);
+      ref.read(nodesProvider.notifier).loadNodes(nodes);
 
       for (final n in nodes) {
         final nodeId = (n as Map<String, dynamic>)['id'] as String;
@@ -273,7 +333,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
 
     try {
-      final result = await client.call('node.discover', {});
+      final result = await client.call(
+        'node.discover',
+        {},
+        timeout: const Duration(seconds: 15),
+      );
       if (!context.mounted) return;
       Navigator.pop(context);
 
@@ -391,6 +455,161 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
+  Future<void> _restartGateway(WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重启 Gateway'),
+        content: const Text('确定要重启 Gateway 吗？WebSocket 连接将会断开并在重启完成后自动恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    try {
+      await client.call('gateway.restart', {});
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Gateway 正在重启…')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('重启 Gateway 失败: $e')),
+      );
+    }
+  }
+
+  Future<void> _showAddNodeDialog(WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final nameCtrl = TextEditingController();
+    final hostCtrl = TextEditingController();
+    final aliasCtrl = TextEditingController();
+    final tokenCtrl = TextEditingController();
+    final dirCtrl = TextEditingController(text: r'$HOME/bin');
+    bool deployNow = true;
+
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    // Default token to the current connection token for convenience
+    tokenCtrl.text = client.token;
+
+    final added = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('添加远程节点'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '名称',
+                    hintText: 'ws',
+                  ),
+                ),
+                TextField(
+                  controller: hostCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Host',
+                    hintText: '192.168.1.10',
+                  ),
+                ),
+                TextField(
+                  controller: aliasCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'SSH 别名 (可选)',
+                    hintText: 'ssh config 中的别名',
+                  ),
+                ),
+                TextField(
+                  controller: tokenCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Token',
+                    hintText: 'agentd 认证 token',
+                  ),
+                ),
+                TextField(
+                  controller: dirCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '远程目录',
+                    hintText: r'$HOME/bin',
+                  ),
+                ),
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  title: const Text('立即部署 agentd'),
+                  value: deployNow,
+                  onChanged: (v) => setState(() => deployNow = v ?? true),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('添加'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (added != true) return;
+    final name = nameCtrl.text.trim();
+    final host = hostCtrl.text.trim();
+    if (host.isEmpty) return;
+
+    try {
+      final addResult = await client.call('node.add', {
+        'name': name.isEmpty ? host : name,
+        'host': host,
+        'sshAlias': aliasCtrl.text.trim(),
+        'token': tokenCtrl.text.trim(),
+      });
+      final nodeId = (addResult is Map<String, dynamic>
+          ? addResult['nodeId'] as String?
+          : null);
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('节点已添加: ${name.isEmpty ? host : name}')),
+      );
+      if (deployNow && nodeId != null) {
+        await client.call('node.deploy', {
+          'nodeId': nodeId,
+          'remoteDir': dirCtrl.text.trim(),
+        });
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(content: Text('部署已启动')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('添加/部署失败: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final nodeState = ref.watch(nodesProvider);
@@ -398,7 +617,23 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('仪表盘'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('仪表盘'),
+            if (!_wsConnected) ...[
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ],
+        ),
         actions: [
           // Health status indicator
           const _HealthIndicator(),
@@ -408,20 +643,36 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             onPressed: () => _discoverNodes(context, ref),
           ),
           IconButton(
+            icon: const Icon(Icons.add_circle_outline),
+            tooltip: '添加节点',
+            onPressed: () => _showAddNodeDialog(ref),
+          ),
+          IconButton(
+            icon: const Icon(Icons.restart_alt),
+            tooltip: '重启网关',
+            onPressed: _wsConnected ? () => _restartGateway(ref) : null,
+          ),
+          IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
           ),
         ],
       ),
-      body: nodes.isEmpty
-          ? const Center(
-              child: Text('暂无节点', style: TextStyle(color: Colors.grey)),
-            )
-          : ListView.builder(
-              itemCount: nodes.length,
-              padding: const EdgeInsets.all(12),
-              itemBuilder: (_, i) => NodeCard(node: nodes[i]),
-            ),
+      body: Column(
+        children: [
+          Expanded(
+            child: nodes.isEmpty
+                ? const Center(
+                    child: Text('暂无节点', style: TextStyle(color: Colors.grey)),
+                  )
+                : ListView.builder(
+                    itemCount: nodes.length,
+                    padding: const EdgeInsets.all(12),
+                    itemBuilder: (_, i) => NodeCard(node: nodes[i]),
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -469,6 +720,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
   Widget build(BuildContext context) {
     final agents = ref.watch(nodesProvider).agentsFor(widget.node.id);
     final nodeDisplay = widget.node.isLocal ? widget.node.name : widget.node.name;
+    final isRemote = !widget.node.isLocal;
+    final nodeReady = widget.node.status == NodeStatus.connected;
 
     // Choose icon based on local/remote status
     final nodeIcon = widget.node.isLocal ? Icons.computer : Icons.cloud;
@@ -488,18 +741,15 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       }
     }
 
-    // Only show active agents and stopped agents with both history and resume capability.
-    // crashed agents are hidden from the main list entirely.
+    // Only show active agents. Stopped/crashed agents are hidden from the main list
+    // and should be managed through the session manager instead.
     final bySignature = <String, AgentModel>{};
     for (final a in agents) {
-      final hasResumeCapability = a.sessionId != null && a.sessionId!.isNotEmpty;
       final isActive = a.status == AgentStatus.working ||
           a.status == AgentStatus.starting ||
           a.status == AgentStatus.idle;
-      final isResumableStopped = a.status == AgentStatus.stopped &&
-          a.hasHistory && hasResumeCapability;
-      if (!isActive && !isResumableStopped) continue;
-      final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}';
+      if (!isActive) continue;
+      final key = managedVisibilityKey(a);
       final existing = bySignature[key];
       if (existing == null ||
           statusPriority(a.status) < statusPriority(existing.status)) {
@@ -554,13 +804,49 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               spacing: 8,
               runSpacing: 4,
               children: [
+                if (isRemote &&
+                    (widget.node.status == NodeStatus.disconnected ||
+                        widget.node.status == NodeStatus.error)) ...[
+                  TextButton.icon(
+                    onPressed: () => _connectNode(context, ref),
+                    icon: const Icon(Icons.link, size: 18),
+                    label: const Text('连接'),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => _deployNode(ref),
+                    icon: const Icon(Icons.cloud_upload, size: 18),
+                    label: const Text('部署'),
+                  ),
+                ],
+                if (isRemote && widget.node.status == NodeStatus.connecting)
+                  TextButton.icon(
+                    onPressed: null,
+                    icon: const Icon(Icons.sync, size: 18),
+                    label: const Text('连接中…'),
+                  ),
+                if (isRemote && widget.node.status == NodeStatus.connected)
+                  TextButton.icon(
+                    onPressed: () => _restartNode(context, ref),
+                    icon: const Icon(Icons.restart_alt, size: 18),
+                    label: const Text('重启节点'),
+                  ),
+                if (isRemote && widget.node.status == NodeStatus.deploying)
+                  TextButton.icon(
+                    onPressed: null,
+                    icon: const Icon(Icons.sync, size: 18),
+                    label: const Text('重启中…'),
+                  ),
                 TextButton.icon(
-                  onPressed: () => _showCreateAgentDialog(context, ref),
+                  onPressed: nodeReady
+                      ? () => _showCreateAgentDialog(context, ref)
+                      : null,
                   icon: const Icon(Icons.add, size: 18),
                   label: const Text('新建 Agent'),
                 ),
                 TextButton.icon(
-                  onPressed: () => _showSessionManager(context, ref),
+                  onPressed: nodeReady
+                      ? () => _showSessionManager(context, ref)
+                      : null,
                   icon: const Icon(Icons.manage_search, size: 18),
                   label: const Text('管理会话'),
                 ),
@@ -570,6 +856,88 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         ],
       ),
     );
+  }
+
+  Future<void> _connectNode(BuildContext context, WidgetRef ref) async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+
+    try {
+      await client.call('node.connect', {'nodeId': widget.node.id});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在连接 ${widget.node.name}…')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('连接节点失败: $e')),
+      );
+    }
+  }
+
+  Future<void> _restartNode(BuildContext context, WidgetRef ref) async {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+
+    try {
+      await client.call('node.restart', {'nodeId': widget.node.id});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('正在重启 ${widget.node.name}…')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('重启节点失败: $e')),
+      );
+    }
+  }
+
+  Future<void> _deployNode(WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    final dirCtrl = TextEditingController(text: r'$HOME/bin');
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('部署 ${widget.node.name}'),
+        content: TextField(
+          controller: dirCtrl,
+          decoration: const InputDecoration(
+            labelText: '远程目录',
+            hintText: r'$HOME/bin',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('部署'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await client.call('node.deploy', {
+        'nodeId': widget.node.id,
+        'remoteDir': dirCtrl.text.trim(),
+      });
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('正在部署 ${widget.node.name}…')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(content: Text('部署失败: $e')),
+      );
+    }
   }
 
   Future<void> _refreshAgents(WidgetRef ref) async {
@@ -626,6 +994,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     final sessionCtrl = TextEditingController();
     final modelCtrl = TextEditingController();
     String provider = 'claude';
+    final defaultModels = getDefaultModels(provider);
+    if (defaultModels.isNotEmpty) {
+      modelCtrl.text = defaultModels.first['id'] ?? '';
+    }
 
     // Fetch home directory from agentd
     Future<void> fetchHomeDir() async {
@@ -679,7 +1051,11 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                     ButtonSegment(value: 'opencode', label: Text('OpenCode')),
                   ],
                   selected: {provider},
-                  onSelectionChanged: (s) => setState(() => provider = s.first),
+                  onSelectionChanged: (s) => setState(() {
+                    provider = s.first;
+                    final models = getDefaultModels(provider);
+                    modelCtrl.text = models.first['id'] ?? '';
+                  }),
                 ),
                 const SizedBox(height: 8),
                 TextField(
@@ -694,9 +1070,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                   const SizedBox(height: 8),
                   TextField(
                     controller: modelCtrl,
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: 'Model (可选)',
-                      hintText: 'claude-sonnet-4-6',
+                      hintText: defaultModels.first['name'] ?? defaultModels.first['id'] ?? '',
                     ),
                   ),
                 ],
@@ -782,7 +1158,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         if (!isActive && !isResumableStopped) {
           continue;
         }
-        final key = '${a.provider.toLowerCase()}|${a.name.toLowerCase()}';
+        final key = managedVisibilityKey(a);
         final existing = byName[key];
         if (existing == null ||
             managedPriority(a) < managedPriority(existing)) {
@@ -1382,16 +1758,20 @@ class _NodeCardState extends ConsumerState<NodeCard> {
   }
 }
 
-class AgentRow extends ConsumerWidget {
+class AgentRow extends ConsumerStatefulWidget {
   final AgentModel agent;
   final String nodeId;
   const AgentRow({super.key, required this.agent, required this.nodeId});
 
-  Color get _statusColor => AgentStatusTheme.getColor(agent.status);
+  @override
+  ConsumerState<AgentRow> createState() => _AgentRowState();
+}
 
+class _AgentRowState extends ConsumerState<AgentRow> {
+  Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
   String get _statusLabel {
-    switch (agent.status) {
+    switch (widget.agent.status) {
       case AgentStatus.working:
         return 'Working';
       case AgentStatus.idle:
@@ -1405,39 +1785,291 @@ class AgentRow extends ConsumerWidget {
     }
   }
 
+  Future<void> _renameAgent() async {
+    final controller = TextEditingController(text: widget.agent.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名 Agent'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '输入新名称'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty) return;
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    try {
+      await client.call('agent.rename', {
+        'nodeId': widget.nodeId,
+        'agentId': widget.agent.id,
+        'name': newName,
+      });
+      ref.read(nodesProvider.notifier).renameAgent(widget.nodeId, widget.agent.id, newName);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已重命名为 $newName')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('重命名失败: $e')),
+        );
+      }
+    }
+  }
+
+  PopupMenuItem<String> _detailMenuItem(IconData icon, String text) {
+    return PopupMenuItem<String>(
+      enabled: false,
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 12,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // 优先使用 projectName 作为标题，fallback 到 name
+  Widget build(BuildContext context) {
+    final agent = widget.agent;
     final displayTitle = agent.projectName != null && agent.projectName!.isNotEmpty
         ? '${agent.projectName} (${agent.provider})'
         : agent.name;
-    // 副标题显示 PID/sessionId 等信息
-    final subtitleParts = <String>[];
-    if (agent.name.isNotEmpty && agent.projectName != null && agent.projectName!.isNotEmpty) {
-      subtitleParts.add(agent.name);
+
+    final subtitleText = '${agent.provider} · ${_statusLabel}';
+
+    final attentionChips = <Widget>[];
+    if ((agent.providerWriteMode ?? '') == 'read_only') {
+      attentionChips.add(_InfoChip(label: '只读', color: Colors.orange));
     }
-    subtitleParts.add(agent.provider);
-    subtitleParts.add(_statusLabel);
-    final subtitleText = subtitleParts.join(' · ');
+    if (agent.status == AgentStatus.crashed) {
+      attentionChips.add(_InfoChip(label: '异常', color: Colors.red));
+    }
 
     return ListTile(
       dense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 24),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
       leading: Icon(Icons.smart_toy, color: _statusColor, size: 20),
       title: Text(displayTitle),
-      subtitle: Text(
-        subtitleText,
-        style: TextStyle(color: _statusColor, fontSize: 12),
+      subtitle: Row(
+        children: [
+          Expanded(
+            child: Text(
+              subtitleText,
+              style: TextStyle(color: _statusColor, fontSize: 12),
+            ),
+          ),
+          if (attentionChips.isNotEmpty)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: attentionChips,
+            ),
+        ],
       ),
-      trailing: agent.status == AgentStatus.working
-          ? const SizedBox(
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (agent.status == AgentStatus.working)
+            const SizedBox(
               width: 16,
               height: 16,
               child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : null,
-      onTap: () => context.push('/agent/$nodeId/${agent.id}'),
+            ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, size: 18),
+            onSelected: (value) {
+              if (value == 'rename') _renameAgent();
+            },
+            itemBuilder: (_) {
+              final items = <PopupMenuEntry<String>>[
+                const PopupMenuItem(
+                  value: 'rename',
+                  child: Row(
+                    children: [
+                      Icon(Icons.edit, size: 18),
+                      SizedBox(width: 8),
+                      Text('重命名'),
+                    ],
+                  ),
+                ),
+              ];
+
+              final details = <PopupMenuEntry<String>>[];
+              if ((agent.runtimeState ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.memory,
+                  'Runtime: ${_runtimeStateLabel(agent.runtimeState)}',
+                ));
+              }
+              if ((agent.sessionState ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.chat_bubble_outline,
+                  'Session: ${_sessionStateLabel(agent.sessionState)}',
+                ));
+              }
+              if ((agent.sessionControl ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.gamepad_outlined,
+                  'Control: ${_sessionControlLabel(agent.sessionControl)}',
+                ));
+              }
+              if ((agent.providerState ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.settings,
+                  'Provider: ${_providerStateLabel(agent.providerState)}',
+                ));
+              }
+              if ((agent.providerScope ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.account_tree,
+                  'Scope: ${agent.providerScope == 'inherited' ? '继承 Root' : agent.providerScope!}',
+                ));
+              }
+              if ((agent.providerWriteMode ?? '').isNotEmpty) {
+                details.add(_detailMenuItem(
+                  agent.providerWriteMode == 'read_only'
+                      ? Icons.lock_outline
+                      : Icons.edit_note,
+                  'Mode: ${agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换'}',
+                ));
+              }
+              if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.info_outline,
+                  agent.sessionStateReason!.trim(),
+                ));
+              }
+              if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
+                details.add(_detailMenuItem(
+                  Icons.info_outline,
+                  agent.providerReadOnlyReason!.trim(),
+                ));
+              }
+
+              if (details.isNotEmpty) {
+                items.add(const PopupMenuDivider());
+                items.addAll(details);
+              }
+
+              return items;
+            },
+          ),
+        ],
+      ),
+      onTap: () => context.push('/agent/${widget.nodeId}/${agent.id}'),
     );
+  }
+}
+
+class _InfoChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _InfoChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+String _runtimeStateLabel(String? value) {
+  switch (value) {
+    case 'live':
+      return '运行中';
+    case 'exited':
+      return '已退出';
+    case 'stopped':
+      return '已停止';
+    case 'crashed':
+      return '异常退出';
+    case 'starting':
+      return '启动中';
+    default:
+      return value ?? '';
+  }
+}
+
+String _sessionStateLabel(String? value) {
+  switch (value) {
+    case 'active':
+      return '会话活跃';
+    case 'standby':
+      return '会话待机';
+    case 'resumable':
+      return '可恢复';
+    case 'missing':
+      return '会话缺失';
+    case 'broken':
+      return '会话异常';
+    case 'none':
+      return '无会话';
+    default:
+      return value ?? '';
+  }
+}
+
+String _providerStateLabel(String? value) {
+  switch (value) {
+    case 'synced':
+      return 'Provider 已同步';
+    case 'drifted':
+      return 'Provider 漂移';
+    case 'unknown':
+      return 'Provider 未知';
+    default:
+      return value ?? '';
+  }
+}
+
+String _sessionControlLabel(String? value) {
+  switch (value) {
+    case 'managed':
+      return '已托管';
+    case 'attachable':
+      return '可附加';
+    case 'rebindable':
+      return '可重绑';
+    case 'read_only':
+      return '只读';
+    case 'unavailable':
+      return '不可接管';
+    default:
+      return value ?? '';
   }
 }
 

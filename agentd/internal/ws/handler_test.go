@@ -144,6 +144,18 @@ func TestResolveLaunchOpencodeModelWithoutSession(t *testing.T) {
 	}
 }
 
+func TestCurrentPermissionMode(t *testing.T) {
+	if got := currentPermissionMode([]string{"--permission-mode", "plan"}); got != "plan" {
+		t.Fatalf("got %q, want plan", got)
+	}
+	if got := currentPermissionMode([]string{"--dangerously-skip-permissions"}); got != "bypassPermissions" {
+		t.Fatalf("got %q, want bypassPermissions", got)
+	}
+	if got := currentPermissionMode([]string{"--model", "claude-sonnet-4-6"}); got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}
+
 func TestCurrentOpenCodeModel(t *testing.T) {
 	if got := currentOpenCodeModel([]string{"-s", "ses_123", "-m", "tb-api/claude-sonnet-4-6"}); got != "tb-api/claude-sonnet-4-6" {
 		t.Fatalf("got %q, want tb-api/claude-sonnet-4-6", got)

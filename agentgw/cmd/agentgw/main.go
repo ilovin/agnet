@@ -2,11 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,17 +36,10 @@ func main() {
 	}
 }
 
-// staticHandler wraps a http.FileServer and handles token auth for index.html
-func staticHandler(root string, token string) http.Handler {
+// staticHandler wraps a http.FileServer and serves static files without auth.
+func staticHandler(root string) http.Handler {
 	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// For index.html, check token
-		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			if !checkToken(r, token) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
 		fs.ServeHTTP(w, r)
 	})
 }
@@ -92,6 +89,16 @@ func runServer() {
 
 	srv := ws.New(mgr, cfg.Token)
 
+	addr := fmt.Sprintf(":%d", cfg.Port)
+	ln, err := listenWithInherit(addr)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+
+	srv.SetGatewayRestartFunc(func() error {
+		return restartWithListener(ln)
+	})
+
 	mgr.OnEvent(func(nodeID string, ev map[string]any) {
 		method, _ := ev["method"].(string)
 		params := ev["params"]
@@ -104,7 +111,7 @@ func runServer() {
 	staticDir := findStaticDir()
 	if staticDir != "" {
 		log.Printf("Serving static files from: %s", staticDir)
-		http.Handle("/", staticHandler(staticDir, cfg.Token))
+		http.Handle("/", staticHandler(staticDir))
 	} else {
 		log.Printf("Warning: static directory not found")
 		http.Handle("/", srv)
@@ -159,15 +166,76 @@ func runServer() {
 		http.Error(w, "APK not found", http.StatusNotFound)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
 	tokenPreview := cfg.Token
 	if len(tokenPreview) > 8 {
 		tokenPreview = tokenPreview[:8]
 	}
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("listen: %v", err)
+	err = http.Serve(ln, nil)
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		log.Fatalf("serve: %v", err)
 	}
+
+	// Graceful shutdown: keep existing connections alive for a while.
+	log.Printf("agentgw listener closed, draining connections...")
+	time.Sleep(30 * time.Second)
+	os.Exit(0)
+}
+
+// listenWithInherit creates a TCP listener, reusing a file descriptor passed
+// by a parent process during hot restart if available.
+func listenWithInherit(addr string) (net.Listener, error) {
+	if fdStr := os.Getenv("AGENTGW_INHERIT_FD"); fdStr != "" {
+		fd, err := strconv.Atoi(fdStr)
+		if err == nil {
+			file := os.NewFile(uintptr(fd), "inherited-listener")
+			if file != nil {
+				ln, err := net.FileListener(file)
+				file.Close()
+				if err == nil {
+					return ln, nil
+				}
+				log.Printf("failed to inherit listener: %v", err)
+			}
+		}
+		os.Unsetenv("AGENTGW_INHERIT_FD")
+	}
+	return net.Listen("tcp", addr)
+}
+
+// restartWithListener starts a new agentgw process inheriting the current
+// TCP listener so the port remains bound without interruption.
+func restartWithListener(ln net.Listener) error {
+	ex, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("os.Executable: %w", err)
+	}
+
+	tcpLn, ok := ln.(*net.TCPListener)
+	if !ok {
+		return fmt.Errorf("listener is not TCP")
+	}
+
+	f, err := tcpLn.File()
+	if err != nil {
+		return fmt.Errorf("get listener file: %w", err)
+	}
+
+	cmd := exec.Command(ex, os.Args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "AGENTGW_INHERIT_FD=3")
+	cmd.ExtraFiles = []*os.File{f}
+
+	if err := cmd.Start(); err != nil {
+		f.Close()
+		return fmt.Errorf("start child: %w", err)
+	}
+
+	// Close the listener so http.Serve returns in this process.
+	// Existing connections remain alive because they have their own FDs.
+	ln.Close()
+	return nil
 }
 
 func agentdBinCandidates() []string {

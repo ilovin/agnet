@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/connection_config.dart';
 
 const _kKey = 'saved_connections';
+const _kLastUsedUrl = 'last_used_connection_url';
 
 /// Persists a list of [ConnectionConfig] to SharedPreferences.
 class ConnectionStore {
@@ -26,5 +27,17 @@ class ConnectionStore {
   Future<void> clear() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kKey);
+    await prefs.remove(_kLastUsedUrl);
+  }
+
+  Future<String?> getLastUsedUrl() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString(_kLastUsedUrl);
+    return url?.isEmpty == true ? null : url;
+  }
+
+  Future<void> setLastUsedUrl(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kLastUsedUrl, url);
   }
 }

@@ -16,44 +16,68 @@ class WsMessage {
   const WsMessage({this.id, this.method, this.result, this.error, this.params});
 }
 
-/// Exponential backoff calculator, doubles delay each call, capped at [maxSeconds].
+/// Exponential backoff calculator with jitter.
+/// Sequence: 1s, 2s, 4s, 8s, 16s, 30s, 30s...
 class ReconnectBackoff {
   final int maxSeconds;
-  int _current = 1;
+  final int initialSeconds;
+  final int maxJitterMs;
+  int _current;
 
-  ReconnectBackoff({this.maxSeconds = 30});
+  ReconnectBackoff({
+    this.maxSeconds = 30,
+    this.initialSeconds = 1,
+    this.maxJitterMs = 500,
+  }) : _current = initialSeconds;
 
   Duration next() {
-    final d = Duration(seconds: _current);
-    _current = min(_current * 2, maxSeconds);
-    return d;
+    final base = Duration(seconds: _current);
+    _current = _current == 0 ? 0 : min(_current * 2, maxSeconds);
+    final jitter = maxJitterMs <= 0
+        ? Duration.zero
+        : Duration(milliseconds: Random().nextInt(maxJitterMs + 1));
+    return base + jitter;
   }
 
-  void reset() => _current = 1;
+  void reset() => _current = initialSeconds;
 }
 
 typedef EventCallback = void Function(WsMessage event);
+typedef ChannelConnector = WebSocketChannel Function(Uri uri);
+typedef ReconnectTimerFactory = Timer Function(
+  Duration delay,
+  void Function() callback,
+);
+
+Timer _defaultReconnectTimerFactory(
+  Duration delay,
+  void Function() callback,
+) => Timer(delay, callback);
 
 /// JSON-RPC 2.0 WebSocket client with automatic exponential-backoff reconnection.
 class WsClient {
   final String url;
   final String token;
+  final ChannelConnector _channelConnector;
+  final ReconnectBackoff _backoff;
+  final ReconnectTimerFactory _reconnectTimerFactory;
 
   WebSocketChannel? _channel;
   StreamSubscription? _sub;
   bool _disposed = false;
   bool _reconnecting = false; // single-flight reconnect guard
+  bool _manualDisconnect = false;
+  Timer? _reconnectTimer;
 
   int _nextId = 1;
   final Map<int, Completer<dynamic>> _pending = {};
   final List<EventCallback> _eventListeners = [];
-  final ReconnectBackoff _backoff = ReconnectBackoff();
 
   // Heartbeat
   Timer? _pingTimer;
   Timer? _pingTimeout;
-  static const _pingInterval = Duration(seconds: 25);
-  static const _pingTimeoutDuration = Duration(seconds: 10);
+  static const _pingInterval = Duration(seconds: 30);
+  static const _pingTimeoutDuration = Duration(seconds: 15);
 
   // Connection state stream
   final _connectedCtrl = StreamController<bool>.broadcast();
@@ -61,15 +85,33 @@ class WsClient {
   bool _connected = false;
   bool get isConnected => _connected;
 
-  WsClient({required this.url, required this.token});
+  // Reconnecting state stream
+  final _reconnectingCtrl = StreamController<bool>.broadcast();
+  Stream<bool> get onReconnecting => _reconnectingCtrl.stream;
+
+  WsClient({
+    required this.url,
+    required this.token,
+    ChannelConnector? channelConnector,
+    ReconnectBackoff? backoff,
+    ReconnectTimerFactory? reconnectTimerFactory,
+  }) : _channelConnector = channelConnector ?? WebSocketChannel.connect,
+       _backoff = backoff ?? ReconnectBackoff(),
+       _reconnectTimerFactory = reconnectTimerFactory ?? _defaultReconnectTimerFactory;
 
   /// Connect and start listening. Reconnects automatically on disconnect.
-  Future<void> connect({Duration timeout = const Duration(seconds: 8)}) async {
+  Future<void> connect({Duration timeout = const Duration(seconds: 15)}) async {
     if (_disposed) return;
+    if (_connected && _channel != null) return;
+
+    _manualDisconnect = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     try {
       final uri = Uri.parse(url).replace(queryParameters: {'token': token});
-      _channel = WebSocketChannel.connect(uri);
-      await _channel!.ready.timeout(
+      final channel = _channelConnector(uri);
+      _channel = channel;
+      await channel.ready.timeout(
         timeout,
         onTimeout: () {
           throw TimeoutException('WebSocket handshake timeout');
@@ -77,20 +119,23 @@ class WsClient {
       );
       _connected = true;
       _connectedCtrl.add(true);
+      _reconnectingCtrl.add(false);
       _backoff.reset();
       _reconnecting = false;
 
       _startPingTimer();
 
-      _sub = _channel!.stream.listen(
+      _sub = channel.stream.listen(
         _onData,
         onError: (_) => _scheduleReconnect(),
         onDone: _scheduleReconnect,
         cancelOnError: true,
       );
     } catch (e) {
+      _reconnecting = false;
       _scheduleReconnect();
-      rethrow;
+      // Do not rethrow: callers should treat connect as fire-and-forget
+      // because automatic reconnection is already scheduled.
     }
   }
 
@@ -124,24 +169,39 @@ class WsClient {
   }
 
   void _scheduleReconnect() {
-    if (_disposed) return;
+    if (_disposed || _manualDisconnect) return;
     if (_reconnecting) return; // single-flight guard
     _reconnecting = true;
 
+    _teardownTransport();
+    _reconnectingCtrl.add(true);
+
+    final delay = _backoff.next();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = _reconnectTimerFactory(delay, () {
+      if (!_disposed && !_manualDisconnect) {
+        connect();
+      }
+    });
+  }
+
+  void _teardownTransport() {
     _stopPingTimer();
-    _connected = false;
-    _connectedCtrl.add(false);
+    if (_connected) {
+      _connected = false;
+      _connectedCtrl.add(false);
+    } else {
+      _connected = false;
+    }
     _sub?.cancel();
-    _channel?.sink.close();
+    _sub = null;
+    try {
+      _channel?.sink.close();
+    } catch (_) {}
     _channel = null;
 
     // Fail all pending RPC calls immediately
     _failAllPending('disconnected');
-
-    final delay = _backoff.next();
-    Future.delayed(delay, () {
-      if (!_disposed) connect();
-    });
   }
 
   /// Fail all pending RPC completers with an error.
@@ -228,11 +288,12 @@ class WsClient {
 
   void dispose() {
     _disposed = true;
-    _stopPingTimer();
-    _sub?.cancel();
-    _channel?.sink.close();
-    _failAllPending('disposed');
+    _manualDisconnect = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _teardownTransport();
     _connectedCtrl.close();
+    _reconnectingCtrl.close();
   }
 
   // ── Static helpers (testable without network) ────────────────────────────

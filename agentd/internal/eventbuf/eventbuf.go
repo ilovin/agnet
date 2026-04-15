@@ -63,6 +63,17 @@ func (eb *EventBuffer) LastSeq() uint64 {
 	return eb.seq
 }
 
+// LastEvent returns the most recently appended event, or a zero Event if empty.
+func (eb *EventBuffer) LastEvent() Event {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+	if eb.count == 0 {
+		return Event{}
+	}
+	idx := (eb.head + eb.count - 1) % eb.cap
+	return eb.buf[idx]
+}
+
 // InitSeq sets the internal sequence counter to lastSeq.
 // Use this after loading persisted state so new appends continue from lastSeq+1.
 func (eb *EventBuffer) InitSeq(lastSeq uint64) {

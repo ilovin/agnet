@@ -3,7 +3,9 @@ package ws_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -378,6 +380,87 @@ func TestConversationKeyForwardsToNode(t *testing.T) {
 	result, ok := resp["result"].(map[string]any)
 	if !ok || result["ok"] != true {
 		t.Fatalf("expected ok result, got %#v", resp["result"])
+	}
+}
+
+func TestNodeRestartReconnectsNode(t *testing.T) {
+	ts, mgr := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	agentd := newFakeAgentd(t, map[string]any{
+		"agents": []any{},
+	})
+	parsed, err := url.Parse(agentd.URL)
+	if err != nil {
+		t.Fatalf("parse fake agentd url: %v", err)
+	}
+	port, err := strconv.Atoi(parsed.Port())
+	if err != nil {
+		t.Fatalf("parse fake agentd port: %v", err)
+	}
+
+	id, err := mgr.Add(nodecfg.NodeEntry{
+		Name:       "n1",
+		Host:       "127.0.0.1",
+		SSHPort:    22,
+		AgentdPort: port,
+		Token:      "tok",
+	})
+	if err != nil {
+		t.Fatalf("mgr.Add: %v", err)
+	}
+
+	mgr.SetRestartFunc(func(n *node.Node, remoteDir string) error {
+		if remoteDir != "/opt/agentd" {
+			t.Fatalf("expected default remoteDir /opt/agentd, got %q", remoteDir)
+		}
+		return nil
+	})
+
+	resp := rpc(t, conn, "node.restart", map[string]any{"nodeId": id})
+	if resp["error"] != nil {
+		t.Fatalf("node.restart error: %v", resp["error"])
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		n := mgr.Get(id)
+		if n != nil && n.GetStatus() == node.StatusConnected && n.GetProxy() != nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	n := mgr.Get(id)
+	if n == nil {
+		t.Fatal("node missing after restart")
+	}
+	t.Fatalf("expected node to reconnect, status=%s proxyNil=%v", n.GetStatus(), n.GetProxy() == nil)
+}
+
+func TestGatewayRestartCallsRestartFunc(t *testing.T) {
+	called := make(chan bool, 1)
+	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.yaml"))
+	mgr := node.NewManager(store, nil)
+	srv := ws.New(mgr, "testtoken")
+	srv.SetGatewayRestartFunc(func() error {
+		called <- true
+		return nil
+	})
+	ts2 := httptest.NewServer(srv)
+	defer ts2.Close()
+	conn2 := dialWS(t, ts2, "testtoken")
+
+	resp := rpc(t, conn2, "gateway.restart", nil)
+	if resp["error"] != nil {
+		t.Fatalf("gateway.restart error: %v", resp["error"])
+	}
+
+	select {
+	case <-called:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected restart function to be called")
 	}
 }
 

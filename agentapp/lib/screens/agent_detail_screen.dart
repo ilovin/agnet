@@ -126,7 +126,10 @@ String _optimizeVoiceInput(String raw, String currentText) {
         (_) => '',
       )
       .replaceAllMapped(
-        RegExp(r'\s+[，,]?\s*(嗯|啊|呃|那个|就是|然后|所以|比如说)\s*[，,]?\s*', caseSensitive: false),
+        RegExp(
+          r'\s+[，,]?\s*(嗯|啊|呃|那个|就是|然后|所以|比如说)\s*[，,]?\s*',
+          caseSensitive: false,
+        ),
         (_) => '，',
       );
 
@@ -153,7 +156,9 @@ String _optimizeVoiceInput(String raw, String currentText) {
   }
   // If cleaned starts with the tail of current, trim the overlap
   for (int overlap = cleaned.length; overlap > 0; overlap--) {
-    if (current.toLowerCase().endsWith(cleaned.substring(0, overlap).toLowerCase())) {
+    if (current.toLowerCase().endsWith(
+      cleaned.substring(0, overlap).toLowerCase(),
+    )) {
       cleaned = cleaned.substring(overlap).trimLeft();
       break;
     }
@@ -161,7 +166,9 @@ String _optimizeVoiceInput(String raw, String currentText) {
   if (cleaned.isEmpty) return '';
 
   // Decide separator: newline after sentence terminator, otherwise space
-  final lastChar = current.isNotEmpty ? current.substring(current.length - 1) : '';
+  final lastChar = current.isNotEmpty
+      ? current.substring(current.length - 1)
+      : '';
   final terminators = {'.', '?', '!', '。', '？', '！', '\n'};
   final separator = terminators.contains(lastChar) ? '\n' : ' ';
   return separator + cleaned;
@@ -193,7 +200,9 @@ class ChatMessage {
   }
 
   /// true if this message is a grouped assistant activity block.
-  bool get isActivityBlock => role == 'assistant' && (kind == 'activity_block' || kind == 'activity_list');
+  bool get isActivityBlock =>
+      role == 'assistant' &&
+      (kind == 'activity_block' || kind == 'activity_list');
 
   /// Matches tool call patterns: [Bash: cmd], [Agent], [SendMessage], [TaskList], etc.
   static final _toolCallPattern = RegExp(r'^\[[\w]+[:\]]');
@@ -235,7 +244,8 @@ bool _isThinkingEvent({
   required bool raw,
 }) {
   if (role != 'assistant' || raw) return false;
-  if (const {'thinking', 'thinking_delta', 'reasoning'}.contains(kind)) return true;
+  if (const {'thinking', 'thinking_delta', 'reasoning'}.contains(kind))
+    return true;
   return ChatMessage._explicitThinkingPrefix.hasMatch(text);
 }
 
@@ -396,10 +406,105 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
     'awaitingPermission': map['awaitingPermission'] ?? false,
     'imageCount': map['imageCount'] ?? 0,
     'activities': map['activities'] ?? <Map<String, dynamic>>[],
-    'images': (map['images'] as List?)?.map((e) => e.toString()).toList() ?? <String>[],
+    'images':
+        (map['images'] as List?)?.map((e) => e.toString()).toList() ??
+        <String>[],
     if (map.containsKey('permissionRequest'))
       'permissionRequest': map['permissionRequest'],
   };
+}
+
+class ConversationEventCacheEntry {
+  final List<Map<String, dynamic>> events;
+  final DateTime touchedAt;
+
+  const ConversationEventCacheEntry({
+    required this.events,
+    required this.touchedAt,
+  });
+
+  ConversationEventCacheEntry copyWith({
+    List<Map<String, dynamic>>? events,
+    DateTime? touchedAt,
+  }) {
+    return ConversationEventCacheEntry(
+      events: events ?? this.events,
+      touchedAt: touchedAt ?? this.touchedAt,
+    );
+  }
+}
+
+List<Map<String, dynamic>> mergeConversationEvents(
+  List<Map<String, dynamic>> existing,
+  Iterable<dynamic> incoming,
+) {
+  final bySeq = <int, Map<String, dynamic>>{};
+
+  void addEvent(Map<dynamic, dynamic> raw) {
+    final normalized = normalizeHistoryEvent(raw);
+    final seq = (normalized['seq'] as num?)?.toInt() ?? 0;
+    bySeq[seq] = normalized;
+  }
+
+  for (final event in existing) {
+    addEvent(event);
+  }
+  for (final event in incoming) {
+    addEvent(event as Map);
+  }
+
+  final merged = bySeq.values.toList()
+    ..sort(
+      (a, b) => ((a['seq'] as num?)?.toInt() ?? 0).compareTo(
+        (b['seq'] as num?)?.toInt() ?? 0,
+      ),
+    );
+  return merged;
+}
+
+int latestConversationSeq(List<Map<String, dynamic>> events) {
+  var lastSeq = 0;
+  for (final event in events) {
+    final seq = (event['seq'] as num?)?.toInt() ?? 0;
+    if (seq > lastSeq) {
+      lastSeq = seq;
+    }
+  }
+  return lastSeq;
+}
+
+int oldestConversationSeq(List<Map<String, dynamic>> events) {
+  if (events.isEmpty) return 0;
+  var firstSeq = latestConversationSeq(events);
+  for (final event in events) {
+    final seq = (event['seq'] as num?)?.toInt() ?? 0;
+    if (seq < firstSeq) {
+      firstSeq = seq;
+    }
+  }
+  return firstSeq;
+}
+
+Map<String, ConversationEventCacheEntry> pruneConversationCache(
+  Map<String, ConversationEventCacheEntry> cache, {
+  DateTime? now,
+  Duration ttl = const Duration(hours: 12),
+  int maxEntries = 24,
+}) {
+  final current = now ?? DateTime.now();
+  final freshEntries =
+      cache.entries
+          .where(
+            (entry) =>
+                entry.value.events.isNotEmpty &&
+                current.difference(entry.value.touchedAt) <= ttl,
+          )
+          .toList()
+        ..sort((a, b) => b.value.touchedAt.compareTo(a.value.touchedAt));
+
+  return Map<String, ConversationEventCacheEntry>.fromEntries(
+    freshEntries.take(maxEntries),
+  );
 }
 
 /// Converts raw events to display messages.
@@ -407,7 +512,11 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
 /// Merges consecutive assistant text_delta fragments into complete messages.
 /// Collapses consecutive tool/read activity into a stable block.
 /// Builds a structured activity item from后端event data.
-Map<String, dynamic> _buildActivityItem(String text, String kind, Map<String, dynamic> rawEvent) {
+Map<String, dynamic> _buildActivityItem(
+  String text,
+  String kind,
+  Map<String, dynamic> rawEvent,
+) {
   final explicitToolName = (rawEvent['toolName'] as String?) ?? '';
 
   if (kind == 'tool_result') {
@@ -563,7 +672,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
             isRaw: raw,
             kind: kind,
             imageCount: (e['imageCount'] as num?)?.toInt() ?? 0,
-            images: (e['images'] as List?)?.map((i) => i.toString()).toList() ?? <String>[],
+            images:
+                (e['images'] as List?)?.map((i) => i.toString()).toList() ??
+                <String>[],
           ),
         );
       }
@@ -606,8 +717,8 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       if (cleaned.isNotEmpty && !isNoiseOnlyText(cleaned)) {
         flushActivityBuf();
         flushThinkingBuf();
+        hadTextDelta = true;
       }
-      hadTextDelta = true;
       deltaTextBuf.write(cleaned);
     }
 
@@ -646,7 +757,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // Also handle legacy events where kind is empty.
     // For 'result' events: extract extra content (e.g. btw addendum) that wasn't
     // in text_deltas. Only skip if result text is fully covered by delta text.
-    if (role == 'assistant' && !raw && hadTextDelta &&
+    if (role == 'assistant' &&
+        !raw &&
+        hadTextDelta &&
         (kind == 'text' || kind == '' || kind == 'result')) {
       flushMergeBuf();
       if (kind == 'result') {
@@ -658,7 +771,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           // Find where delta text ends in the result and take the remainder
           String extra = '';
           if (deltaText.isNotEmpty && resultText.contains(deltaText)) {
-            extra = resultText.substring(resultText.indexOf(deltaText) + deltaText.length).trim();
+            extra = resultText
+                .substring(resultText.indexOf(deltaText) + deltaText.length)
+                .trim();
           } else if (deltaText.isNotEmpty) {
             // Fuzzy match: check if result starts with similar content
             final deltaLen = deltaText.length;
@@ -715,6 +830,33 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   return messages;
 }
 
+/// Collapses consecutive assistant activity blocks into a single block.
+/// This ensures multiple adjacent activity_list messages are rendered in
+/// one foldable container, showing only the latest activity when collapsed.
+List<ChatMessage> collapseConsecutiveActivityBlocks(List<ChatMessage> messages) {
+  final result = <ChatMessage>[];
+  for (final msg in messages) {
+    if (msg.isActivityBlock &&
+        result.isNotEmpty &&
+        result.last.isActivityBlock) {
+      final last = result.last;
+      final merged = List<Map<String, dynamic>>.from(last.activities)
+        ..addAll(msg.activities);
+      result[result.length - 1] = ChatMessage(
+        role: last.role,
+        text: last.text,
+        seq: last.seq,
+        kind: 'activity_list',
+        activities: merged,
+        isRaw: last.isRaw,
+      );
+    } else {
+      result.add(msg);
+    }
+  }
+  return result;
+}
+
 List<Map<String, String>> normalizeOpencodeModels(dynamic rawModels) {
   final models = ((rawModels as List?) ?? const [])
       .whereType<Map>()
@@ -726,12 +868,14 @@ List<Map<String, String>> normalizeOpencodeModels(dynamic rawModels) {
       .toList();
 
   models.sort((a, b) {
-    final providerCompare =
-        (a['provider'] ?? '').compareTo(b['provider'] ?? '');
+    final providerCompare = (a['provider'] ?? '').compareTo(
+      b['provider'] ?? '',
+    );
     if (providerCompare != 0) return providerCompare;
 
-    final nameCompare =
-        (a['name'] ?? a['id'] ?? '').compareTo(b['name'] ?? b['id'] ?? '');
+    final nameCompare = (a['name'] ?? a['id'] ?? '').compareTo(
+      b['name'] ?? b['id'] ?? '',
+    );
     if (nameCompare != 0) return nameCompare;
 
     return (a['id'] ?? '').compareTo(b['id'] ?? '');
@@ -797,6 +941,9 @@ class AgentDetailScreen extends ConsumerStatefulWidget {
 }
 
 class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
+  static const _conversationCacheTtl = Duration(hours: 12);
+  static const _conversationCacheMaxEntries = 24;
+
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   bool _loading = false;
@@ -812,7 +959,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   String? _agentName; // local override for renamed agent
 
   // Static cache for messages
-  static final Map<String, List<Map<String, dynamic>>> _messageCache = {};
+  static final Map<String, ConversationEventCacheEntry> _messageCache = {};
 
   // Raw events from EventBuffer
   List<Map<String, dynamic>> _rawEvents = [];
@@ -825,8 +972,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   // true = auto-resolve (default for mobile), false = manual confirmation
   bool _autoResolvePermissions = true;
 
-  // Current agent mode (e.g. bypassPermissions, plan)
-  String _currentMode = 'bypassPermissions';
+  // Pending mode shown optimistically until fresh backend state arrives.
+  String? _pendingMode;
 
   // Dynamic skills loaded from remote agentd
   List<SlashCommand> _dynamicSkills = [];
@@ -843,13 +990,23 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     super.initState();
     _scrollCtrl.addListener(_handleScroll);
 
+    _pruneMessageCache();
+
     // Load from cache if available
-    final cacheKey = '${widget.nodeId}:${widget.agentId}';
-    final cachedEvents = _messageCache[cacheKey];
-    if (cachedEvents != null && cachedEvents.isNotEmpty) {
+    final cacheKey = _cacheKey;
+    final cachedEntry = _messageCache[cacheKey];
+    if (cachedEntry != null && cachedEntry.events.isNotEmpty) {
+      final cachedEvents = List<Map<String, dynamic>>.from(cachedEntry.events);
       setState(() {
-        _rawEvents = List.from(cachedEvents);
+        _rawEvents = cachedEvents;
+        _lastSeq = latestConversationSeq(cachedEvents);
+        _oldestSeq = oldestConversationSeq(cachedEvents);
+        _hasMoreHistory = _oldestSeq > 1;
         _initialLoading = false;
+      });
+      _touchMessageCache(cachedEvents: cachedEvents);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(force: true, animate: false);
       });
     }
 
@@ -885,6 +1042,27 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     super.dispose();
   }
 
+  String get _cacheKey => '${widget.nodeId}:${widget.agentId}';
+
+  void _touchMessageCache({List<Map<String, dynamic>>? cachedEvents}) {
+    _messageCache[_cacheKey] = ConversationEventCacheEntry(
+      events: List<Map<String, dynamic>>.from(cachedEvents ?? _rawEvents),
+      touchedAt: DateTime.now(),
+    );
+    _pruneMessageCache();
+  }
+
+  void _pruneMessageCache() {
+    final pruned = pruneConversationCache(
+      _messageCache,
+      ttl: _conversationCacheTtl,
+      maxEntries: _conversationCacheMaxEntries,
+    );
+    _messageCache
+      ..clear()
+      ..addAll(pruned);
+  }
+
   void _handleScroll() {
     if (!_scrollCtrl.hasClients) return;
     _lastUserScroll = DateTime.now();
@@ -918,36 +1096,21 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final firstSeqFromResp = (raw['firstSeq'] as num?)?.toInt() ?? 0;
-
-      // Update cache
-      final cacheKey = '${widget.nodeId}:${widget.agentId}';
-      _messageCache[cacheKey] = events
+      final normalizedEvents = events
           .map((e) => normalizeHistoryEvent(e as Map))
           .toList();
+      final mergedEvents = lastSeq < _lastSeq && lastSeq >= 0
+          ? normalizedEvents
+          : mergeConversationEvents(_rawEvents, normalizedEvents);
 
       if (mounted) {
         setState(() {
-          // Merge with existing events, avoiding duplicates
-          final existingSeqs = _rawEvents
-              .map((e) => (e['seq'] as num?)?.toInt() ?? 0)
-              .toSet();
-          final newEvents = events
-              .map((e) => normalizeHistoryEvent(e as Map))
-              .where((e) => !existingSeqs.contains((e['seq'] as num?)?.toInt() ?? 0))
-              .toList();
-
-          if (newEvents.isNotEmpty) {
-            _rawEvents.addAll(newEvents);
-            // Update cache
-            final cacheKey = '${widget.nodeId}:${widget.agentId}';
-            _messageCache[cacheKey] = List.from(_rawEvents);
-          }
-
+          _rawEvents = mergedEvents;
           _lastSeq = lastSeq;
           if (_rawEvents.isNotEmpty) {
             _oldestSeq = firstSeqFromResp > 0
                 ? firstSeqFromResp
-                : ((_rawEvents.first['seq'] as num?)?.toInt() ?? 0);
+                : oldestConversationSeq(_rawEvents);
             _hasMoreHistory = _oldestSeq > 1;
           } else {
             _oldestSeq = 0;
@@ -958,9 +1121,10 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           _isLoadingFreshData = false;
         });
 
-        // Only scroll to bottom if we're not at the bottom
+        _touchMessageCache();
+
         if (_stickToBottom) {
-          _scrollToBottom(force: true);
+          _scrollToBottom(force: true, animate: false);
         }
       }
     } catch (e) {
@@ -968,7 +1132,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       if (mounted) {
         setState(() {
           _initialLoading = false;
-          _lastError = '加载历史失败，请重试';
+          _isLoadingFreshData = false;
         });
       }
     }
@@ -987,10 +1151,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         setState(() {
           _dynamicSkills = skills
               .whereType<Map>()
-              .map((s) => SlashCommand(
-                    (s['command'] as String?) ?? '',
-                    (s['description'] as String?) ?? '',
-                  ))
+              .map(
+                (s) => SlashCommand(
+                  (s['command'] as String?) ?? '',
+                  (s['description'] as String?) ?? '',
+                ),
+              )
               .where((s) => s.command.isNotEmpty)
               .toList();
         });
@@ -1041,6 +1207,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _hasMoreHistory = _oldestSeq > 1 && older.length >= 200;
         _loadingOlder = false;
       });
+      _touchMessageCache();
 
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_scrollCtrl.hasClients) return;
@@ -1056,7 +1223,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       if (!mounted) return;
       setState(() {
         _loadingOlder = false;
-        _lastError = '加载更多历史失败，请重试';
       });
     }
   }
@@ -1083,7 +1249,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
       // Detect sequence regression (e.g. after /clear resets server history)
       if (lastSeq < _lastSeq && lastSeq >= 0) {
-        debugPrint('seq regression detected: server=$lastSeq local=$_lastSeq, reloading history');
+        debugPrint(
+          'seq regression detected: server=$lastSeq local=$_lastSeq, reloading history',
+        );
         _pollingNewEvents = false;
         setState(() {
           _rawEvents.clear();
@@ -1097,29 +1265,19 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       }
 
       if (events.isNotEmpty) {
-        // Deduplicate by seq before appending
-        final existingSeqs = _rawEvents
-            .map((e) => (e['seq'] as num?)?.toInt() ?? 0)
-            .toSet();
-        final newEvents = events
-            .map((e) => normalizeHistoryEvent(e as Map))
-            .where(
-              (e) => !existingSeqs.contains((e['seq'] as num?)?.toInt() ?? 0),
-            )
-            .toList();
-        if (newEvents.isNotEmpty) {
+        final newEvents = mergeConversationEvents(_rawEvents, events);
+        final hadNewEvents = newEvents.length > _rawEvents.length;
+        if (hadNewEvents) {
           setState(() {
-            _rawEvents.addAll(newEvents);
-            // Update cache
-            final cacheKey = '${widget.nodeId}:${widget.agentId}';
-            _messageCache[cacheKey] = List.from(_rawEvents);
+            _rawEvents = newEvents;
             _lastSeq = lastSeq;
             if (_oldestSeq == 0 && _rawEvents.isNotEmpty) {
-              _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? 0);
+              _oldestSeq = oldestConversationSeq(_rawEvents);
               _hasMoreHistory = _oldestSeq > 1;
             }
             _lastError = null;
           });
+          _touchMessageCache();
           _scrollToBottom();
         } else {
           // All events were duplicates, just update seq
@@ -1159,17 +1317,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 'permissionRequest': perm,
               });
             }
-            // Update cache
-            final cacheKey = '${widget.nodeId}:${widget.agentId}';
-            _messageCache[cacheKey] = List.from(_rawEvents);
           });
+          _touchMessageCache();
         }
       }
     } catch (e) {
+      // Silently ignore polling errors; the connection indicator in the AppBar
+      // is enough to signal transient disconnects.
       if (!mounted) return;
-      setState(() {
-        _lastError = '拉取新消息失败，稍后重试';
-      });
     } finally {
       _pollingNewEvents = false;
     }
@@ -1337,23 +1492,56 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const Text(
+              '特殊按键',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 16),
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                _KeyChip(label: 'ESC', onTap: () => _sendKeyAndClose(ctx, 'esc')),
-                _KeyChip(label: 'Ctrl+C', onTap: () => _sendKeyAndClose(ctx, 'ctrl_c')),
-                _KeyChip(label: 'Ctrl+D', onTap: () => _sendKeyAndClose(ctx, 'ctrl_d')),
-                _KeyChip(label: 'Ctrl+Z', onTap: () => _sendKeyAndClose(ctx, 'ctrl_z')),
-                _KeyChip(label: 'Ctrl+A', onTap: () => _sendKeyAndClose(ctx, 'ctrl_a')),
-                _KeyChip(label: 'Ctrl+E', onTap: () => _sendKeyAndClose(ctx, 'ctrl_e')),
-                _KeyChip(label: 'Tab', onTap: () => _sendKeyAndClose(ctx, 'tab')),
+                _KeyChip(
+                  label: 'ESC',
+                  onTap: () => _sendKeyAndClose(ctx, 'esc'),
+                ),
+                _KeyChip(
+                  label: 'Ctrl+C',
+                  onTap: () => _sendKeyAndClose(ctx, 'ctrl_c'),
+                ),
+                _KeyChip(
+                  label: 'Ctrl+D',
+                  onTap: () => _sendKeyAndClose(ctx, 'ctrl_d'),
+                ),
+                _KeyChip(
+                  label: 'Ctrl+Z',
+                  onTap: () => _sendKeyAndClose(ctx, 'ctrl_z'),
+                ),
+                _KeyChip(
+                  label: 'Ctrl+A',
+                  onTap: () => _sendKeyAndClose(ctx, 'ctrl_a'),
+                ),
+                _KeyChip(
+                  label: 'Ctrl+E',
+                  onTap: () => _sendKeyAndClose(ctx, 'ctrl_e'),
+                ),
+                _KeyChip(
+                  label: 'Tab',
+                  onTap: () => _sendKeyAndClose(ctx, 'tab'),
+                ),
                 _KeyChip(label: '↑', onTap: () => _sendKeyAndClose(ctx, 'up')),
-                _KeyChip(label: '↓', onTap: () => _sendKeyAndClose(ctx, 'down')),
-                _KeyChip(label: '←', onTap: () => _sendKeyAndClose(ctx, 'left')),
-                _KeyChip(label: '→', onTap: () => _sendKeyAndClose(ctx, 'right')),
+                _KeyChip(
+                  label: '↓',
+                  onTap: () => _sendKeyAndClose(ctx, 'down'),
+                ),
+                _KeyChip(
+                  label: '←',
+                  onTap: () => _sendKeyAndClose(ctx, 'left'),
+                ),
+                _KeyChip(
+                  label: '→',
+                  onTap: () => _sendKeyAndClose(ctx, 'right'),
+                ),
               ],
             ),
           ],
@@ -1487,17 +1675,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     final client = ref.read(connectionProvider);
     if (client == null) return;
-    setState(() => _currentMode = mode);
+    setState(() => _pendingMode = mode);
     try {
-      final result = await client.call('agent.restart', {
+      await client.call('agent.restart', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
         'permissionMode': mode,
       });
-      final map = result is Map
-          ? Map<String, dynamic>.from(result)
-          : <String, dynamic>{};
-      // Agent ID stays the same — just refresh the agent list
       final listResult = await client.call('agent.list', {
         'nodeId': widget.nodeId,
       });
@@ -1507,17 +1691,27 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       ref.read(nodesProvider.notifier).loadAgents(widget.nodeId, agents);
     } catch (e) {
       debugPrint('switchMode error: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _pendingMode = null);
+      }
     }
   }
 
   String _modeLabel(String modeId) {
     final allModes = [...kClaudeModes, ...kOpenCodeModes];
     return allModes
-        .firstWhere((m) => m.id == modeId, orElse: () => AgentMode(id: modeId, label: modeId, icon: Icons.help))
+        .firstWhere(
+          (m) => m.id == modeId,
+          orElse: () => AgentMode(id: modeId, label: modeId, icon: Icons.help),
+        )
         .label;
   }
 
-  Future<void> _switchProvider(String providerId, {VoidCallback? onSwitched}) async {
+  Future<void> _switchProvider(
+    String providerId, {
+    VoidCallback? onSwitched,
+  }) async {
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
@@ -1547,16 +1741,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         final msg = model.isNotEmpty
             ? '已切换到 $providerName ($model)'
             : '已切换到 $providerName';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(msg)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(msg)));
       }
     } catch (e) {
       debugPrint('switchProvider error: $e');
     }
   }
 
-  void _scrollToBottom({bool force = false}) {
+  void _scrollToBottom({bool force = false, bool animate = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
       if (!force && !_stickToBottom) return;
@@ -1572,8 +1766,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           return;
         }
       }
+      final offset = _scrollCtrl.position.maxScrollExtent;
+      if (!animate) {
+        _scrollCtrl.jumpTo(offset);
+        return;
+      }
       _scrollCtrl.animateTo(
-        _scrollCtrl.position.maxScrollExtent,
+        offset,
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeOut,
       );
@@ -1625,7 +1824,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final agents = nodeState.agentsFor(widget.nodeId);
     final agent = agents.where((a) => a.id == widget.agentId).firstOrNull;
 
-    final messages = convertEventsToMessages(_rawEvents);
+    final messages = collapseConsecutiveActivityBlocks(
+      convertEventsToMessages(_rawEvents),
+    );
     final showPermissionOverlay = hasPendingPermissionPrompt(_rawEvents);
     final provider = agent?.provider ?? '';
 
@@ -1637,6 +1838,10 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         break;
       }
     }
+
+    final activeMode = agent == null
+        ? ''
+        : effectiveModeForAgent(agent, pendingMode: _pendingMode);
 
     return Scaffold(
       appBar: AppBar(
@@ -1658,6 +1863,18 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           ],
         ),
         actions: [
+          if (!_wsConnected)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           // Interrupt button (shown when agent is working)
           if (agent?.status == AgentStatus.working)
             IconButton(
@@ -1665,23 +1882,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               icon: const Icon(Icons.stop_circle),
               tooltip: '中断 (Ctrl+C)',
             ),
-          // Permission mode toggle
-          Tooltip(
-            message: _autoResolvePermissions ? '权限模式: 自动' : '权限模式: 手动',
-            child: IconButton(
-              icon: Icon(
-                _autoResolvePermissions ? Icons.shield : Icons.shield_outlined,
-                size: 20,
-                color: _autoResolvePermissions ? Colors.green : null,
-              ),
-              onPressed: () {
-                setState(() {
-                  _autoResolvePermissions = !_autoResolvePermissions;
-                });
-              },
-            ),
-          ),
-
         ],
       ),
       body: Column(
@@ -1725,32 +1925,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 ],
               ),
             ),
-          // Connection lost banner
-          if (!_wsConnected)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: Row(
-                children: [
-                  Icon(Icons.cloud_off, size: 16, color: Theme.of(context).colorScheme.onErrorContainer),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '连接已断开，正在自动重连…',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onErrorContainer,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () => context.go('/'),
-                    child: const Text('返回'),
-                  ),
-                ],
-              ),
-            ),
           if (_loading || _stopping)
             Container(
               width: double.infinity,
@@ -1764,14 +1938,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 ),
               ),
             ),
-          if (agent != null) _AgentStateSummary(agent: agent),
           // Control bar
           if (agent != null)
             _ControlBar(
               agent: agent,
               nodeId: widget.nodeId,
               stopping: _stopping,
-              currentMode: _currentMode,
+              currentMode: activeMode,
               onControl: _control,
               onSwitchModel: _switchModel,
               onSwitchProvider: _switchProvider,
@@ -1802,9 +1975,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                         child: ListView.builder(
                           controller: _scrollCtrl,
                           padding: const EdgeInsets.all(12),
-                          itemCount: messages.length + (_loadingOlder ? 1 : 0) + (!_initialLoading && _isLoadingFreshData ? 1 : 0),
+                          itemCount:
+                              messages.length +
+                              (_loadingOlder ? 1 : 0) +
+                              (!_initialLoading && _isLoadingFreshData ? 1 : 0),
                           itemBuilder: (_, i) {
-                            if (!_initialLoading && _isLoadingFreshData && i == 0) {
+                            if (!_initialLoading &&
+                                _isLoadingFreshData &&
+                                i == 0) {
                               return const Padding(
                                 padding: EdgeInsets.only(bottom: 8),
                                 child: Center(
@@ -1819,7 +1997,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                 ),
                               );
                             }
-                            if (_loadingOlder && i == (!_initialLoading && _isLoadingFreshData ? 1 : 0)) {
+                            if (_loadingOlder &&
+                                i ==
+                                    (!_initialLoading && _isLoadingFreshData
+                                        ? 1
+                                        : 0)) {
                               return const Padding(
                                 padding: EdgeInsets.only(bottom: 8),
                                 child: Center(
@@ -1833,7 +2015,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                 ),
                               );
                             }
-                            final idx = i - (!_initialLoading && _isLoadingFreshData ? 1 : 0) - (_loadingOlder ? 1 : 0);
+                            final idx =
+                                i -
+                                (!_initialLoading && _isLoadingFreshData
+                                    ? 1
+                                    : 0) -
+                                (_loadingOlder ? 1 : 0);
                             return _MessageBubble(
                               message: messages[idx],
                               isLastAssistant: idx == lastAssistantIndex,
@@ -1904,7 +2091,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   Color _statusColor(AgentStatus s) => AgentStatusTheme.getColor(s);
 
-
   String _statusLabel(AgentStatus s) {
     switch (s) {
       case AgentStatus.working:
@@ -1921,122 +2107,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   }
 }
 
-class _AgentStateSummary extends StatelessWidget {
-  final AgentModel agent;
 
-  const _AgentStateSummary({required this.agent});
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final chips = <Widget>[];
-
-    if ((agent.runtimeState ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: _runtimeStateLabel(agent.runtimeState),
-        color: Colors.green,
-      ));
-    }
-    if ((agent.sessionState ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: _sessionStateLabel(agent.sessionState),
-        color: Colors.blue,
-      ));
-    }
-    if ((agent.sessionControl ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: _sessionControlLabel(agent.sessionControl),
-        color: Colors.indigo,
-      ));
-    }
-    if ((agent.providerState ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: _providerStateLabel(agent.providerState),
-        color: agent.providerState == 'drifted' ? Colors.orange : Colors.teal,
-      ));
-    }
-    if ((agent.providerScope ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: _providerScopeLabel(agent.providerScope),
-        color: Colors.blueGrey,
-      ));
-    }
-    if ((agent.providerWriteMode ?? '').isNotEmpty) {
-      chips.add(_StateChip(
-        label: agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换',
-        color: agent.providerWriteMode == 'read_only' ? Colors.orange : Colors.green,
-      ));
-    }
-
-    final detailLines = <String>[];
-    if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
-      detailLines.add('Session: ${agent.sessionStateReason!.trim()}');
-    }
-    if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
-      detailLines.add('Provider: ${agent.providerReadOnlyReason!.trim()}');
-    }
-
-    if (chips.isEmpty && detailLines.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        border: Border(bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.35))),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (chips.isNotEmpty)
-            Wrap(spacing: 6, runSpacing: 6, children: chips),
-          if (detailLines.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            ...detailLines.map(
-              (line) => Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: Text(
-                  line,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _StateChip extends StatelessWidget {
-  final String label;
-  final Color color;
-
-  const _StateChip({required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          color: color,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
+String effectiveModeForAgent(AgentModel agent, {String? pendingMode}) {
+  if ((pendingMode ?? '').isNotEmpty) return pendingMode!;
+  final backendMode = (agent.permissionMode ?? '').trim();
+  if (backendMode.isNotEmpty) return backendMode;
+  final modes = modesForProvider(agent.provider);
+  if (modes.isNotEmpty) return modes.first.id;
+  return '';
 }
 
 class _ControlBar extends ConsumerStatefulWidget {
@@ -2046,7 +2124,8 @@ class _ControlBar extends ConsumerStatefulWidget {
   final String currentMode;
   final Future<void> Function(String action) onControl;
   final Future<void> Function(String model) onSwitchModel;
-  final Future<void> Function(String providerId, {VoidCallback? onSwitched}) onSwitchProvider;
+  final Future<void> Function(String providerId, {VoidCallback? onSwitched})
+  onSwitchProvider;
   final Future<void> Function(String mode) onSwitchMode;
 
   const _ControlBar({
@@ -2092,9 +2171,12 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                   const SizedBox(width: 20),
                 Icon(m.icon, size: 16),
                 const SizedBox(width: 6),
-                Text(m.label, style: TextStyle(
-                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
-                )),
+                Text(
+                  m.label,
+                  style: TextStyle(
+                    fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
               ],
             ),
           );
@@ -2106,9 +2188,14 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
             children: [
               Icon(current.icon, size: 16, color: scheme.primary),
               const SizedBox(width: 3),
-              Text(current.label, style: TextStyle(
-                fontSize: 12, color: scheme.primary, fontWeight: FontWeight.w600,
-              )),
+              Text(
+                current.label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
               const Icon(Icons.arrow_drop_down, size: 16),
             ],
           ),
@@ -2121,7 +2208,8 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
   Future<Map<String, dynamic>>? _providerListFuture;
 
   Widget _buildConfigSelector(BuildContext context) {
-    if (widget.agent.provider != 'claude' && widget.agent.provider != 'opencode') {
+    if (widget.agent.provider != 'claude' &&
+        widget.agent.provider != 'opencode') {
       return const SizedBox.shrink();
     }
     final scheme = Theme.of(context).colorScheme;
@@ -2136,12 +2224,14 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
         final providerReadOnlyReason =
             (data['providerReadOnlyReason'] as String? ?? '').trim();
         final isClaudeProvider = widget.agent.provider == 'claude';
-        final isProviderReadOnly = isClaudeProvider &&
+        final isOpencodeProvider = widget.agent.provider == 'opencode';
+        final isProviderReadOnly =
+            isClaudeProvider &&
             (!snapshot.hasData || providerWriteMode == 'read_only');
 
         String currentProviderName = 'Default';
-        if (!isClaudeProvider) {
-          currentProviderName = '模型';
+        if (isOpencodeProvider) {
+          currentProviderName = currentOpencodeModelLabel(data);
         } else if (currentProviderId.isNotEmpty) {
           for (final p in providers) {
             if ((p['id'] ?? '') == currentProviderId) {
@@ -2157,7 +2247,9 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
           decoration: BoxDecoration(
             color: scheme.surfaceContainerLow,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.5),
+            ),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -2169,10 +2261,14 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
               ),
               const SizedBox(width: 4),
               Text(
-                widget.agent.provider == 'claude' ? currentProviderName : '模型',
+                currentProviderName,
                 style: TextStyle(fontSize: 12, color: scheme.onSurface),
               ),
-              Icon(Icons.arrow_drop_down, size: 16, color: scheme.onSurfaceVariant),
+              Icon(
+                Icons.arrow_drop_down,
+                size: 16,
+                color: scheme.onSurfaceVariant,
+              ),
             ],
           ),
         );
@@ -2180,12 +2276,11 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
         if (isProviderReadOnly) {
           return Tooltip(
             message: providerReadOnlyReason.isEmpty
-                ? (snapshot.hasData ? '当前 Provider 仅支持只读展示' : '正在加载 Provider 状态')
+                ? (snapshot.hasData
+                      ? '当前 Provider 仅支持只读展示'
+                      : '正在加载 Provider 状态')
                 : providerReadOnlyReason,
-            child: Opacity(
-              opacity: 0.8,
-              child: triggerChild,
-            ),
+            child: Opacity(opacity: 0.8, child: triggerChild),
           );
         }
 
@@ -2199,7 +2294,9 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
               _showAddProviderDialog(context);
             } else if (value.startsWith('__model__')) {
               final model = value.substring('__model__'.length);
-              widget.onSwitchModel(model);
+              widget.onSwitchModel(model).whenComplete(() {
+                if (mounted) _fetchProviders();
+              });
             }
           },
           itemBuilder: (_) {
@@ -2208,32 +2305,42 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
               items.add(
                 const PopupMenuItem<String>(
                   enabled: false,
-                  child: Text('Provider', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  child: Text(
+                    'Provider',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  ),
                 ),
               );
               if (providers.isEmpty) {
-                items.add(const PopupMenuItem<String>(
-                  enabled: false,
-                  child: Text('暂无可用 Provider', style: TextStyle(fontSize: 13)),
-                ));
+                items.add(
+                  const PopupMenuItem<String>(
+                    enabled: false,
+                    child: Text(
+                      '暂无可用 Provider',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                );
               } else {
                 for (final p in providers) {
                   final id = (p['id'] ?? '').toString();
                   final name = (p['name'] ?? id).toString();
                   final isActive = id == currentProviderId;
-                  items.add(PopupMenuItem<String>(
-                    value: '__provider__$id',
-                    child: Row(
-                      children: [
-                        if (isActive) ...[
-                          const Icon(Icons.check, size: 16),
-                          const SizedBox(width: 4),
-                        ] else
-                          const SizedBox(width: 20),
-                        Text(name, style: const TextStyle(fontSize: 13)),
-                      ],
+                  items.add(
+                    PopupMenuItem<String>(
+                      value: '__provider__$id',
+                      child: Row(
+                        children: [
+                          if (isActive) ...[
+                            const Icon(Icons.check, size: 16),
+                            const SizedBox(width: 4),
+                          ] else
+                            const SizedBox(width: 20),
+                          Text(name, style: const TextStyle(fontSize: 13)),
+                        ],
+                      ),
                     ),
-                  ));
+                  );
                 }
               }
               items.add(const PopupMenuDivider());
@@ -2255,35 +2362,73 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
             items.add(
               const PopupMenuItem<String>(
                 enabled: false,
-                child: Text('Model', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                child: Text(
+                  'Model',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
               ),
             );
             if (widget.agent.provider == 'opencode') {
-              final opencodeModels = snapshot.data?['_opencodeModels'] as List<Map<String, String>>? ?? [];
+              final opencodeModels = normalizeOpencodeModels(
+                snapshot.data?['_opencodeModels'],
+              );
+              final currentModelId = currentOpencodeModelId(data);
               if (opencodeModels.isNotEmpty) {
                 String? lastProvider;
                 for (final m in opencodeModels) {
                   final prov = m['provider'] ?? '';
                   if (prov != lastProvider && prov.isNotEmpty) {
-                    if (lastProvider != null) items.add(const PopupMenuDivider());
-                    items.add(PopupMenuItem<String>(
-                      enabled: false,
-                      child: Text(prov, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.grey)),
-                    ));
+                    if (lastProvider != null)
+                      items.add(const PopupMenuDivider());
+                    items.add(
+                      PopupMenuItem<String>(
+                        enabled: false,
+                        child: Text(
+                          prov,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                    );
                     lastProvider = prov;
                   }
                   final id = m['id'] ?? '';
                   final name = m['name'] ?? id;
-                  items.add(PopupMenuItem<String>(
-                    value: '__model__$id',
-                    child: Text(name, style: const TextStyle(fontSize: 13)),
-                  ));
+                  final isActive = opencodeModelMatches(id, currentModelId);
+                  items.add(
+                    PopupMenuItem<String>(
+                      value: '__model__$id',
+                      child: Row(
+                        children: [
+                          if (isActive) ...[
+                            const Icon(Icons.check, size: 16),
+                            const SizedBox(width: 4),
+                          ] else
+                            const SizedBox(width: 20),
+                          Expanded(
+                            child: Text(
+                              name,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
                 }
               } else {
-                items.add(const PopupMenuItem<String>(
-                  enabled: false,
-                  child: Text('No models found', style: TextStyle(fontSize: 13)),
-                ));
+                items.add(
+                  const PopupMenuItem<String>(
+                    enabled: false,
+                    child: Text(
+                      'No models found',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                );
               }
             }
             return items;
@@ -2297,8 +2442,26 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
   @override
   void initState() {
     super.initState();
-    if (widget.agent.provider == 'claude') {
+    if (widget.agent.provider == 'claude' ||
+        widget.agent.provider == 'opencode') {
       _fetchProviders();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _ControlBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.agent.id != widget.agent.id ||
+        oldWidget.nodeId != widget.nodeId ||
+        oldWidget.agent.provider != widget.agent.provider) {
+      if (widget.agent.provider == 'claude' ||
+          widget.agent.provider == 'opencode') {
+        _fetchProviders();
+      } else {
+        setState(() {
+          _providerListFuture = null;
+        });
+      }
     }
   }
 
@@ -2306,33 +2469,28 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
     final client = ref.read(connectionProvider);
     if (client == null) return;
     setState(() {
-      _providerListFuture = client
-          .call('provider.list', {
+      _providerListFuture = (() async {
+        if (widget.agent.provider == 'opencode') {
+          final modelResult = await client.call('opencode.models', {
             'nodeId': widget.nodeId,
-            'agentId': widget.agent.id,
-          })
-          .then((r) {
-        final data = r is Map ? Map<String, dynamic>.from(r) : <String, dynamic>{};
-
-        // If not opencode, return data immediately
-        if (widget.agent.provider != 'opencode') {
-          return data;
+          });
+          final modelData = modelResult is Map
+              ? Map<String, dynamic>.from(modelResult)
+              : <String, dynamic>{};
+          return {
+            '_opencodeModels': normalizeOpencodeModels(modelData['models']),
+            '_opencodeCurrent': (modelData['current'] ?? '').toString(),
+          };
         }
 
-        // For opencode, fetch models and merge with data
-        return client.call('opencode.models', {'nodeId': widget.nodeId})
-          .then((mr) {
-            if (mr is Map) {
-              final models = (mr['models'] as List?) ?? [];
-              final modelList = models.map((m) => Map<String, String>.from(m as Map)).toList();
-              return {...data, '_opencodeModels': modelList};
-            }
-            return data; // Return original data if models fetch fails
-          })
-          .catchError((_) {
-            return data; // Return original data on error
-          });
-      });
+        final result = await client.call('provider.list', {
+          'nodeId': widget.nodeId,
+          'agentId': widget.agent.id,
+        });
+        return result is Map
+            ? Map<String, dynamic>.from(result)
+            : <String, dynamic>{};
+      })();
     });
   }
 
@@ -2391,7 +2549,10 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
                 if (error.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child: Text(error, style: const TextStyle(color: Colors.red, fontSize: 13)),
+                    child: Text(
+                      error,
+                      style: const TextStyle(color: Colors.red, fontSize: 13),
+                    ),
                   ),
               ],
             ),
@@ -2459,7 +2620,9 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
             ),
           if (!stopped)
             IconButton(
-              onPressed: widget.stopping ? null : () => widget.onControl('stop'),
+              onPressed: widget.stopping
+                  ? null
+                  : () => widget.onControl('stop'),
               icon: widget.stopping
                   ? const SizedBox(
                       width: 14,
@@ -2562,7 +2725,10 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
               children: [
                 Text(
                   widget.header,
-                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
+                  ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -2623,7 +2789,6 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
   }
 }
 
-
 class _ActivityCard extends StatelessWidget {
   final String kind;
   final String toolName;
@@ -2668,8 +2833,10 @@ class _ActivityCard extends StatelessWidget {
       case 'Skill':
         return (Icons.auto_awesome, Colors.deepPurple);
       default:
-        if (name.toLowerCase().contains('skill')) return (Icons.auto_awesome, Colors.deepPurple);
-        if (name.toLowerCase().contains('todo')) return (Icons.checklist, Colors.green);
+        if (name.toLowerCase().contains('skill'))
+          return (Icons.auto_awesome, Colors.deepPurple);
+        if (name.toLowerCase().contains('todo'))
+          return (Icons.checklist, Colors.green);
         return (Icons.build, Colors.grey);
     }
   }
@@ -2797,7 +2964,11 @@ class _ActivityBlockState extends State<_ActivityBlock> {
           CircleAvatar(
             radius: 16,
             backgroundColor: scheme.primaryContainer,
-            child: Icon(Icons.build, size: 18, color: scheme.onPrimaryContainer),
+            child: Icon(
+              Icons.build,
+              size: 18,
+              color: scheme.onPrimaryContainer,
+            ),
           ),
           const SizedBox(width: 8),
           Flexible(
@@ -2828,7 +2999,9 @@ class _ActivityBlockState extends State<_ActivityBlock> {
     if (latest != null) {
       final tn = (latest['toolName'] as String?) ?? '';
       final t = (latest['title'] as String?) ?? '';
-      preview = tn.isNotEmpty && t.isNotEmpty ? '$tn: $t' : (tn.isNotEmpty ? tn : t);
+      preview = tn.isNotEmpty && t.isNotEmpty
+          ? '$tn: $t'
+          : (tn.isNotEmpty ? tn : t);
     }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -2880,12 +3053,14 @@ class _ActivityBlockState extends State<_ActivityBlock> {
             ],
           ),
           const SizedBox(height: 8),
-          ...items.map((item) => _ActivityCard(
-            kind: (item['kind'] as String?) ?? 'activity',
-            toolName: (item['toolName'] as String?) ?? '',
-            title: (item['title'] as String?) ?? '',
-            content: (item['content'] as String?) ?? '',
-          )),
+          ...items.map(
+            (item) => _ActivityCard(
+              kind: (item['kind'] as String?) ?? 'activity',
+              toolName: (item['toolName'] as String?) ?? '',
+              title: (item['title'] as String?) ?? '',
+              content: (item['content'] as String?) ?? '',
+            ),
+          ),
         ],
       ),
     );
@@ -2962,11 +3137,18 @@ class _UserImagesState extends State<_UserImages> {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.image, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          Icon(
+            Icons.image,
+            size: 16,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 4),
           Text(
             widget.paths.length == 1 ? '图片附件' : '${widget.paths.length} 张图片',
-            style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
         ],
       );
@@ -3074,9 +3256,13 @@ class _MessageBubble extends StatelessWidget {
           .firstWhere((line) => line.trim().isNotEmpty, orElse: () => '');
       if (firstLine.isNotEmpty) {
         final trimmed = firstLine.trim();
-        contentPreview = trimmed.length > 60 ? trimmed.substring(0, 60) : trimmed;
+        contentPreview = trimmed.length > 60
+            ? trimmed.substring(0, 60)
+            : trimmed;
       }
-      final header = contentPreview.isNotEmpty ? '💭 $contentPreview' : '💭 思考过程';
+      final header = contentPreview.isNotEmpty
+          ? '💭 $contentPreview'
+          : '💭 思考过程';
       return _CollapsibleBubble(
         header: header,
         content: message.text,
@@ -3103,7 +3289,9 @@ class _MessageBubble extends StatelessWidget {
           params = params.substring(0, 50) + '...';
         }
       }
-      final header = params.isNotEmpty ? '🔧 $toolName: $params' : '🔧 $toolName';
+      final header = params.isNotEmpty
+          ? '🔧 $toolName: $params'
+          : '🔧 $toolName';
       return _CollapsibleBubble(
         header: header,
         content: message.text,
@@ -3171,11 +3359,11 @@ class _MessageBubble extends StatelessWidget {
                         width: 1,
                       )
                     : (isLastAssistant
-                        ? Border.all(
-                            color: scheme.primary.withValues(alpha: 0.5),
-                            width: 2,
-                          )
-                        : null),
+                          ? Border.all(
+                              color: scheme.primary.withValues(alpha: 0.5),
+                              width: 2,
+                            )
+                          : null),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -3203,10 +3391,16 @@ class _MessageBubble extends StatelessWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.image, size: 16, color: textColor.withValues(alpha: 0.8)),
+                          Icon(
+                            Icons.image,
+                            size: 16,
+                            color: textColor.withValues(alpha: 0.8),
+                          ),
                           const SizedBox(width: 4),
                           Text(
-                            message.imageCount == 1 ? '图片附件' : '${message.imageCount} 张图片',
+                            message.imageCount == 1
+                                ? '图片附件'
+                                : '${message.imageCount} 张图片',
                             style: TextStyle(
                               fontSize: 12,
                               color: textColor.withValues(alpha: 0.8),
@@ -3275,11 +3469,7 @@ class _MarkdownContent extends StatelessWidget {
       data: text,
       selectable: true,
       styleSheet: MarkdownStyleSheet(
-        p: TextStyle(
-          fontSize: fontSize,
-          color: textColor,
-          height: 1.4,
-        ),
+        p: TextStyle(fontSize: fontSize, color: textColor, height: 1.4),
         h1: TextStyle(
           fontSize: fontSize + 8,
           fontWeight: FontWeight.bold,
@@ -3342,10 +3532,7 @@ class _MarkdownContent extends StatelessWidget {
           ),
         ),
         blockquotePadding: const EdgeInsets.only(left: 12),
-        listBullet: TextStyle(
-          fontSize: fontSize,
-          color: textColor,
-        ),
+        listBullet: TextStyle(fontSize: fontSize, color: textColor),
         a: TextStyle(
           fontSize: fontSize,
           color: scheme.primary,
@@ -3369,10 +3556,7 @@ class _KeyChip extends StatelessWidget {
   const _KeyChip({required this.label, required this.onTap});
   @override
   Widget build(BuildContext context) {
-    return ActionChip(
-      label: Text(label),
-      onPressed: onTap,
-    );
+    return ActionChip(label: Text(label), onPressed: onTap);
   }
 }
 
@@ -3478,7 +3662,7 @@ class AgentMode {
 }
 
 const kClaudeModes = [
-  AgentMode(id: 'bypassPermissions', label: 'Build', icon: Icons.build),
+  AgentMode(id: 'bypassPermissions', label: 'Bypass', icon: Icons.build),
   AgentMode(id: 'plan', label: 'Plan', icon: Icons.architecture),
   AgentMode(id: 'auto', label: 'Auto', icon: Icons.auto_mode),
 ];
@@ -3876,7 +4060,10 @@ class _InputBarState extends State<_InputBar> {
 
   String _detectMimeType(List<int> bytes) {
     if (bytes.length >= 4) {
-      if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+      if (bytes[0] == 0x89 &&
+          bytes[1] == 0x50 &&
+          bytes[2] == 0x4E &&
+          bytes[3] == 0x47) {
         return 'image/png';
       }
       if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
@@ -3886,8 +4073,14 @@ class _InputBarState extends State<_InputBar> {
         return 'image/gif';
       }
       if (bytes.length >= 12 &&
-          bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
-          bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50) {
+          bytes[0] == 0x52 &&
+          bytes[1] == 0x49 &&
+          bytes[2] == 0x46 &&
+          bytes[3] == 0x46 &&
+          bytes[8] == 0x57 &&
+          bytes[9] == 0x45 &&
+          bytes[10] == 0x42 &&
+          bytes[11] == 0x50) {
         return 'image/webp';
       }
     }
@@ -4029,11 +4222,10 @@ class _InputBarState extends State<_InputBar> {
                         ),
                         onTap: () {
                           widget.controller.text = '${cmd.command} ';
-                          widget.controller.selection =
-                              TextSelection.fromPosition(
-                            TextPosition(
-                              offset: widget.controller.text.length,
-                            ),
+                          widget
+                              .controller
+                              .selection = TextSelection.fromPosition(
+                            TextPosition(offset: widget.controller.text.length),
                           );
                           setState(() => _showSlashMenu = false);
                         },
@@ -4059,7 +4251,12 @@ class _InputBarState extends State<_InputBar> {
                         onTap: () => _showImagePreview(ctx, bytes),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(8),
-                          child: Image.memory(bytes, width: 64, height: 64, fit: BoxFit.cover),
+                          child: Image.memory(
+                            bytes,
+                            width: 64,
+                            height: 64,
+                            fit: BoxFit.cover,
+                          ),
                         ),
                       ),
                       Positioned(
@@ -4067,13 +4264,22 @@ class _InputBarState extends State<_InputBar> {
                         right: -4,
                         child: GestureDetector(
                           onTap: () {
-                            final updated = List<Map<String, String>>.from(widget.pendingImages)..removeAt(i);
+                            final updated = List<Map<String, String>>.from(
+                              widget.pendingImages,
+                            )..removeAt(i);
                             widget.onImagesChanged(updated);
                           },
                           child: Container(
-                            decoration: const BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                            decoration: const BoxDecoration(
+                              color: Colors.black54,
+                              shape: BoxShape.circle,
+                            ),
                             padding: const EdgeInsets.all(2),
-                            child: const Icon(Icons.close, size: 14, color: Colors.white),
+                            child: const Icon(
+                              Icons.close,
+                              size: 14,
+                              color: Colors.white,
+                            ),
                           ),
                         ),
                       ),
@@ -4089,7 +4295,10 @@ class _InputBarState extends State<_InputBar> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.red.shade50,
                     borderRadius: BorderRadius.circular(16),
@@ -4103,7 +4312,10 @@ class _InputBarState extends State<_InputBar> {
                       Flexible(
                         child: Text(
                           _speechPreview,
-                          style: TextStyle(fontSize: 13, color: Colors.red.shade900),
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Colors.red.shade900,
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -4123,7 +4335,10 @@ class _InputBarState extends State<_InputBar> {
                   icon: const Icon(Icons.image, size: 20),
                   tooltip: '添加图片',
                   visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
                   padding: EdgeInsets.zero,
                 ),
               Expanded(
@@ -4154,43 +4369,120 @@ class _InputBarState extends State<_InputBar> {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   IconButton(
-                    onPressed: isReadOnly ? null : () {
-                          // Show special keys bottom sheet
-                          showModalBottomSheet(
-                            context: context,
-                            builder: (ctx) => Container(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Text('特殊按键', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 16),
-                                  Wrap(
-                                    spacing: 8,
-                                    runSpacing: 8,
-                                    children: [
-                                      ActionChip(label: const Text('ESC'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('esc'); }),
-                                      ActionChip(label: const Text('Ctrl+C'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_c'); }),
-                                      ActionChip(label: const Text('Ctrl+D'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_d'); }),
-                                      ActionChip(label: const Text('Ctrl+Z'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_z'); }),
-                                      ActionChip(label: const Text('Ctrl+A'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_a'); }),
-                                      ActionChip(label: const Text('Ctrl+E'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('ctrl_e'); }),
-                                      ActionChip(label: const Text('Tab'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('tab'); }),
-                                      ActionChip(label: const Text('↑'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('up'); }),
-                                      ActionChip(label: const Text('↓'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('down'); }),
-                                      ActionChip(label: const Text('←'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('left'); }),
-                                      ActionChip(label: const Text('→'), onPressed: () { Navigator.pop(ctx); widget.onKey?.call('right'); }),
-                                    ],
-                                  ),
-                                ],
+                    onPressed: isReadOnly
+                        ? null
+                        : () {
+                            // Show special keys bottom sheet
+                            showModalBottomSheet(
+                              context: context,
+                              builder: (ctx) => Container(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text(
+                                      '特殊按键',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 16),
+                                    Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        ActionChip(
+                                          label: const Text('ESC'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('esc');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+C'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_c');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+D'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_d');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+Z'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_z');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+A'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_a');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+E'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_e');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Tab'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('tab');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('↑'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('up');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('↓'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('down');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('←'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('left');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('→'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('right');
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          );
-                        },
+                            );
+                          },
                     icon: const Icon(Icons.keyboard_hide, size: 20),
                     tooltip: '特殊按键',
                     visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
                     padding: EdgeInsets.zero,
                   ),
                   const SizedBox(width: 4),
@@ -4207,9 +4499,14 @@ class _InputBarState extends State<_InputBar> {
                           onPressed: isReadOnly ? null : widget.onSend,
                           icon: const Icon(Icons.send, size: 20),
                           visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                          constraints: const BoxConstraints(
+                            minWidth: 32,
+                            minHeight: 32,
+                          ),
                           padding: EdgeInsets.zero,
-                          color: isReadOnly ? null : Theme.of(context).colorScheme.primary,
+                          color: isReadOnly
+                              ? null
+                              : Theme.of(context).colorScheme.primary,
                         ),
                 ],
               ),

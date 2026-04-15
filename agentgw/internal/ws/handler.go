@@ -65,7 +65,7 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return h.nodeDeploy(req)
 	case "node.restart":
 		return h.nodeRestart(req)
-	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename",
+	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename", "agent.remove",
 		"conversation.history", "conversation.send", "conversation.key",
 		"session.list", "session.create", "session.attach", "session.catalog",
 		"provider.list", "provider.switch", "provider.add",
@@ -80,6 +80,8 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return dispatchResult{resp: h.sessionCatalogAll(req)}
 	case "system.health":
 		return dispatchResult{resp: h.systemHealth(req)}
+	case "gateway.restart":
+		return h.gatewayRestart(req)
 	case "rpc.ping":
 		return dispatchResult{resp: okResp(req.ID, map[string]any{"ok": true, "time": time.Now().Unix()})}
 	default:
@@ -603,6 +605,26 @@ func injectNodeLocation(result any, n *node.Node) any {
 	}
 
 	return newResult
+}
+
+func (h *handler) gatewayRestart(req RPCRequest) dispatchResult {
+	h.server.mu.RLock()
+	restartFn := h.server.restartFn
+	h.server.mu.RUnlock()
+	if restartFn == nil {
+		return dispatchResult{resp: errResp(req.ID, -32000, "gateway restart not configured")}
+	}
+	postSend := func() {
+		// Give the response time to flush before restarting.
+		time.Sleep(500 * time.Millisecond)
+		if err := restartFn(); err != nil {
+			log.Printf("gateway restart failed: %v", err)
+		}
+	}
+	return dispatchResult{
+		resp:     okResp(req.ID, map[string]any{"ok": true, "message": "restarting gateway"}),
+		postSend: postSend,
+	}
 }
 
 func (h *handler) systemHealth(req RPCRequest) RPCResponse {

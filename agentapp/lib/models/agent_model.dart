@@ -36,6 +36,7 @@ class AgentModel {
   final String? providerScope;
   final String? providerWriteMode;
   final String? providerReadOnlyReason;
+  final String? permissionMode;
 
   const AgentModel({
     required this.id,
@@ -58,30 +59,32 @@ class AgentModel {
     this.providerScope,
     this.providerWriteMode,
     this.providerReadOnlyReason,
+    this.permissionMode,
   });
 
   factory AgentModel.fromJson(Map<String, dynamic> json) => AgentModel(
-        id: json['id'] as String,
-        name: json['name'] as String? ?? '',
-        workDir: json['workDir'] as String? ?? '',
-        nodeId: json['nodeId'] as String? ?? '',
-        provider: json['provider'] as String? ?? 'custom',
-        status: _parseAgentStatus(json['status'] as String? ?? ''),
-        hasHistory: json['hasHistory'] as bool? ?? false,
-        isReadOnly: json['readOnly'] as bool? ?? false,
-        readOnlyReason: json['readOnlyReason'] as String? ?? '',
-        attachMode: json['attachMode'] as String? ?? '',
-        projectName: json['projectName'] as String?,
-        sessionId: json['sessionId'] as String?,
-        runtimeState: json['runtimeState'] as String?,
-        sessionState: json['sessionState'] as String?,
-        sessionStateReason: json['sessionStateReason'] as String?,
-        sessionControl: json['sessionControl'] as String?,
-        providerState: json['providerState'] as String?,
-        providerScope: json['providerScope'] as String?,
-        providerWriteMode: json['providerWriteMode'] as String?,
-        providerReadOnlyReason: json['providerReadOnlyReason'] as String?,
-      );
+    id: json['id'] as String,
+    name: json['name'] as String? ?? '',
+    workDir: json['workDir'] as String? ?? '',
+    nodeId: json['nodeId'] as String? ?? '',
+    provider: json['provider'] as String? ?? 'custom',
+    status: _parseAgentStatus(json['status'] as String? ?? ''),
+    hasHistory: json['hasHistory'] as bool? ?? false,
+    isReadOnly: json['readOnly'] as bool? ?? false,
+    readOnlyReason: json['readOnlyReason'] as String? ?? '',
+    attachMode: json['attachMode'] as String? ?? '',
+    projectName: json['projectName'] as String?,
+    sessionId: json['sessionId'] as String?,
+    runtimeState: json['runtimeState'] as String?,
+    sessionState: json['sessionState'] as String?,
+    sessionStateReason: json['sessionStateReason'] as String?,
+    sessionControl: json['sessionControl'] as String?,
+    providerState: json['providerState'] as String?,
+    providerScope: json['providerScope'] as String?,
+    providerWriteMode: json['providerWriteMode'] as String?,
+    providerReadOnlyReason: json['providerReadOnlyReason'] as String?,
+    permissionMode: json['permissionMode'] as String?,
+  );
 
   AgentModel copyWith({
     String? id,
@@ -104,28 +107,29 @@ class AgentModel {
     String? providerScope,
     String? providerWriteMode,
     String? providerReadOnlyReason,
-  }) =>
-      AgentModel(
-        id: id ?? this.id,
-        name: name ?? this.name,
-        workDir: workDir ?? this.workDir,
-        nodeId: nodeId ?? this.nodeId,
-        provider: provider ?? this.provider,
-        status: status ?? this.status,
-        hasHistory: hasHistory ?? this.hasHistory,
-        isReadOnly: isReadOnly ?? this.isReadOnly,
-        readOnlyReason: readOnlyReason ?? this.readOnlyReason,
-        attachMode: attachMode ?? this.attachMode,
-        projectName: projectName ?? this.projectName,
-        sessionId: sessionId ?? this.sessionId,
-        runtimeState: runtimeState ?? this.runtimeState,
-        sessionState: sessionState ?? this.sessionState,
-        sessionStateReason: sessionStateReason ?? this.sessionStateReason,
-        sessionControl: sessionControl ?? this.sessionControl,
-        providerState: providerState ?? this.providerState,
-        providerScope: providerScope ?? this.providerScope,
-        providerWriteMode: providerWriteMode ?? this.providerWriteMode,
-        providerReadOnlyReason:
-            providerReadOnlyReason ?? this.providerReadOnlyReason,
-      );
+    String? permissionMode,
+  }) => AgentModel(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    workDir: workDir ?? this.workDir,
+    nodeId: nodeId ?? this.nodeId,
+    provider: provider ?? this.provider,
+    status: status ?? this.status,
+    hasHistory: hasHistory ?? this.hasHistory,
+    isReadOnly: isReadOnly ?? this.isReadOnly,
+    readOnlyReason: readOnlyReason ?? this.readOnlyReason,
+    attachMode: attachMode ?? this.attachMode,
+    projectName: projectName ?? this.projectName,
+    sessionId: sessionId ?? this.sessionId,
+    runtimeState: runtimeState ?? this.runtimeState,
+    sessionState: sessionState ?? this.sessionState,
+    sessionStateReason: sessionStateReason ?? this.sessionStateReason,
+    sessionControl: sessionControl ?? this.sessionControl,
+    providerState: providerState ?? this.providerState,
+    providerScope: providerScope ?? this.providerScope,
+    providerWriteMode: providerWriteMode ?? this.providerWriteMode,
+    providerReadOnlyReason:
+        providerReadOnlyReason ?? this.providerReadOnlyReason,
+    permissionMode: permissionMode ?? this.permissionMode,
+  );
 }

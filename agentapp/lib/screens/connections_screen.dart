@@ -3,12 +3,28 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'dashboard_screen.dart';
 import '../models/connection_config.dart';
 import '../providers/connection_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/health_provider.dart';
+
+/// Pick the best saved config to auto-reconnect.
+/// Prefers [lastUrl] if present, otherwise the first saved config.
+ConnectionConfig? pickAutoReconnectConfig(
+  List<ConnectionConfig> saved,
+  String? lastUrl,
+) {
+  if (saved.isEmpty) return null;
+  if (lastUrl != null) {
+    try {
+      return saved.firstWhere((c) => c.url == lastUrl);
+    } catch (_) {}
+  }
+  return saved.first;
+}
 
 class ConnectionsScreen extends ConsumerStatefulWidget {
   const ConnectionsScreen({super.key});
@@ -17,43 +33,58 @@ class ConnectionsScreen extends ConsumerStatefulWidget {
   ConsumerState<ConnectionsScreen> createState() => _ConnectionsScreenState();
 }
 
-class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
+class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
+    with WidgetsBindingObserver {
   List<ConnectionConfig> _saved = [];
-  bool _autoConnected = false;
   bool _connecting = false;
   String? _connectingUrl;
   String? _connectStatus;
   bool _connectStatusIsError = false;
-  Timer? _autoConnectTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSaved();
-    // Auto-connect to default gateway after a short delay
-    _autoConnectTimer = Timer(const Duration(milliseconds: 500), () {
-      if (mounted && !_autoConnected) {
-        _autoConnectDefault();
-      }
-    });
   }
 
   @override
   void dispose() {
-    _autoConnectTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
-  Future<void> _autoConnectDefault() async {
-    _autoConnected = true;
-    // No default connection — user must configure one
-    // (removed hardcoded IP/token)
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _tryAutoReconnect();
+    }
   }
 
   Future<void> _loadSaved() async {
     final store = ref.read(connectionStoreProvider);
     final configs = await store.load();
     if (mounted) setState(() => _saved = configs);
+    if (configs.isNotEmpty) {
+      _tryAutoReconnect();
+    }
+  }
+
+  Future<void> _tryAutoReconnect() async {
+    final client = ref.read(connectionProvider);
+    if (client != null && client.isConnected) return;
+    if (_connecting) return;
+    final cfg = await _pickAutoReconnectConfig();
+    if (cfg != null) {
+      await _connect(cfg);
+    }
+  }
+
+  Future<ConnectionConfig?> _pickAutoReconnectConfig() async {
+    if (_saved.isEmpty) return null;
+    final store = ref.read(connectionStoreProvider);
+    final lastUrl = await store.getLastUsedUrl();
+    return pickAutoReconnectConfig(_saved, lastUrl);
   }
 
   Future<void> _deleteConnection(int index) async {
@@ -107,6 +138,42 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
     );
   }
 
+  Future<void> _scanQrCode() async {
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const _QrScannerPage()),
+    );
+    if (result == null || !mounted) return;
+
+    // Parse QR: format is "ws://URL|TOKEN" or "ws://URL\nTOKEN"
+    String url;
+    String token;
+    if (result.contains('|')) {
+      final parts = result.split('|');
+      url = parts[0].trim();
+      token = parts.sublist(1).join('|').trim();
+    } else if (result.contains('\n')) {
+      final parts = result.split('\n');
+      url = parts[0].trim();
+      token = parts.sublist(1).join('\n').trim();
+    } else {
+      url = result.trim();
+      token = '';
+    }
+
+    // Show pre-filled edit sheet so user can modify URL (e.g. change to Tailscale IP)
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AddConnectionSheet(
+        initialUrl: url,
+        initialToken: token,
+        onConnect: _connect,
+      ),
+    );
+  }
+
   Future<void> _connect(ConnectionConfig cfg) async {
     if (_connecting) return;
     if (mounted) {
@@ -138,6 +205,15 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
         ref.read(nodesProvider.notifier).handleEvent(event);
         ref.read(conversationProvider.notifier).handleEvent(event);
       });
+
+      // Register auto-refresh callback for newly discovered agents
+      ref.read(nodesProvider.notifier).onAgentsRefresh = (nodeId) async {
+        try {
+          final ar = await client.call('agent.list', {'nodeId': nodeId});
+          final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
+          ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
+        } catch (_) {}
+      };
 
       // Load agents for each node
       for (final n in nodes) {
@@ -329,11 +405,22 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
                           '无连接',
                           style: TextStyle(fontSize: 18, color: Colors.grey),
                         ),
-                        const SizedBox(height: 8),
-                        ElevatedButton.icon(
-                          onPressed: _showAddSheet,
-                          icon: const Icon(Icons.add),
-                          label: const Text('添加连接'),
+                        const SizedBox(height: 16),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            ElevatedButton.icon(
+                              onPressed: _showAddSheet,
+                              icon: const Icon(Icons.add),
+                              label: const Text('手动添加'),
+                            ),
+                            const SizedBox(width: 12),
+                            ElevatedButton.icon(
+                              onPressed: _connecting ? null : _scanQrCode,
+                              icon: const Icon(Icons.qr_code_scanner),
+                              label: const Text('扫码连接'),
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -393,13 +480,28 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
                       const Divider(height: 1),
                       Padding(
                         padding: const EdgeInsets.all(12),
-                        child: ElevatedButton.icon(
-                          onPressed: _connecting ? null : _showAddSheet,
-                          icon: const Icon(Icons.add),
-                          label: const Text('新建连接'),
-                          style: ElevatedButton.styleFrom(
-                            minimumSize: const Size(double.infinity, 48),
-                          ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: _connecting ? null : _showAddSheet,
+                                icon: const Icon(Icons.add),
+                                label: const Text('新建连接'),
+                                style: ElevatedButton.styleFrom(
+                                  minimumSize: const Size.fromHeight(48),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton.icon(
+                              onPressed: _connecting ? null : _scanQrCode,
+                              icon: const Icon(Icons.qr_code_scanner),
+                              label: const Text('扫码'),
+                              style: ElevatedButton.styleFrom(
+                                minimumSize: const Size.fromHeight(48),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -408,8 +510,9 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _showAddSheet,
-        child: const Icon(Icons.add),
+        onPressed: _connecting ? null : _scanQrCode,
+        tooltip: '扫码连接',
+        child: const Icon(Icons.qr_code_scanner),
       ),
     );
   }
@@ -417,16 +520,22 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen> {
 
 class _AddConnectionSheet extends StatefulWidget {
   final Future<void> Function(ConnectionConfig) onConnect;
+  final String initialUrl;
+  final String initialToken;
 
-  const _AddConnectionSheet({required this.onConnect});
+  const _AddConnectionSheet({
+    required this.onConnect,
+    this.initialUrl = 'ws://',
+    this.initialToken = '',
+  });
 
   @override
   State<_AddConnectionSheet> createState() => _AddConnectionSheetState();
 }
 
 class _AddConnectionSheetState extends State<_AddConnectionSheet> {
-  final _urlCtrl = TextEditingController(text: 'ws://');
-  final _tokenCtrl = TextEditingController();
+  late final _urlCtrl = TextEditingController(text: widget.initialUrl);
+  late final _tokenCtrl = TextEditingController(text: widget.initialToken);
   bool _loading = false;
   String? _error;
 
@@ -615,6 +724,75 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Text('保存'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// QR Scanner page using mobile_scanner.
+class _QrScannerPage extends StatefulWidget {
+  const _QrScannerPage();
+
+  @override
+  State<_QrScannerPage> createState() => _QrScannerPageState();
+}
+
+class _QrScannerPageState extends State<_QrScannerPage> {
+  final MobileScannerController _controller = MobileScannerController();
+  bool _processed = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('扫描二维码')),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: (capture) {
+              if (_processed) return;
+              for (final barcode in capture.barcodes) {
+                if (barcode.rawValue != null) {
+                  _processed = true;
+                  _controller.stop();
+                  Navigator.pop(context, barcode.rawValue);
+                  return;
+                }
+              }
+            },
+          ),
+          // Scanner overlay
+          Center(
+            child: Container(
+              width: 250,
+              height: 250,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white, width: 3),
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 80,
+            left: 0,
+            right: 0,
+            child: Text(
+              '将二维码对准框内',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                shadows: [Shadow(blurRadius: 4, color: Colors.black.withOpacity(0.8))],
+              ),
+            ),
           ),
         ],
       ),

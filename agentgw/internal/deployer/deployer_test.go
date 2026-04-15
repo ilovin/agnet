@@ -57,3 +57,20 @@ func TestPlanDeployStepsStartsDetached(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanDeployStepsWithTokenIncludesConfigUpload(t *testing.T) {
+	steps := deployer.PlanStepsWithToken("~/bin", []byte("fake"), "my-secret-token")
+	foundConfig := false
+	for _, s := range steps {
+		if s.Kind == "upload" && strings.Contains(s.Path, "config.yaml") {
+			foundConfig = true
+			content := string(s.Data)
+			if !strings.Contains(content, "token: 'my-secret-token'") {
+				t.Fatalf("expected config to contain token, got %q", content)
+			}
+		}
+	}
+	if !foundConfig {
+		t.Fatal("expected config.yaml upload step when token is provided")
+	}
+}

@@ -39,11 +39,12 @@ func (c *client) writePing() error {
 }
 
 type Server struct {
-	manager   *node.Manager
-	token     string
-	mu        sync.RWMutex
-	clients   map[*websocket.Conn]*client
-	startTime time.Time
+	manager    *node.Manager
+	token      string
+	mu         sync.RWMutex
+	clients    map[*websocket.Conn]*client
+	startTime  time.Time
+	restartFn  func() error
 }
 
 func New(mgr *node.Manager, token string) *Server {
@@ -53,6 +54,13 @@ func New(mgr *node.Manager, token string) *Server {
 		clients:   make(map[*websocket.Conn]*client),
 		startTime: time.Now(),
 	}
+}
+
+// SetGatewayRestartFunc sets the function used by gateway.restart to restart the process.
+func (s *Server) SetGatewayRestartFunc(fn func() error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.restartFn = fn
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
