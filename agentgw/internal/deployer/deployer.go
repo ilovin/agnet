@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -26,15 +27,50 @@ func HashBinary(data []byte) string {
 
 // PlanSteps returns the deploy steps for uploading agentd to remoteDir.
 func PlanSteps(remoteDir string, binaryData []byte) []Step {
+	return PlanStepsWithToken(remoteDir, binaryData, "")
+}
+
+// PlanStepsWithToken returns deploy steps including an agentd config with the given token.
+func PlanStepsWithToken(remoteDir string, binaryData []byte, token string) []Step {
 	binPath := filepath.Join(remoteDir, "agentd")
-	return []Step{
-		{Kind: "mkdir", Path: remoteDir, Command: "mkdir -p " + remoteDir},
-		{Kind: "upload", Path: binPath, Data: binaryData},
-		{Kind: "exec", Command: "chmod +x " + binPath},
-		{Kind: "exec", Command: binPath + " version || true"},
-		{Kind: "exec", Command: "pkill -f 'agentd start' || true"},
-		{Kind: "exec", Command: binPath + " start &"},
+	quotedRemoteDir := shellCommandPath(remoteDir)
+	quotedBinPath := shellCommandPath(binPath)
+	steps := []Step{
+		{Kind: "mkdir", Path: remoteDir, Command: "mkdir -p " + quotedRemoteDir},
 	}
+	if token != "" {
+		configPath := filepath.Join(remoteDir, "config.yaml")
+		configContent := fmt.Sprintf("port: 7373\ntoken: %s\n", shellQuote(token))
+		steps = append(steps, Step{Kind: "upload", Path: configPath, Data: []byte(configContent)})
+	}
+	steps = append(steps, []Step{
+		{Kind: "upload", Path: binPath, Data: binaryData},
+		{Kind: "exec", Command: "chmod +x " + quotedBinPath},
+		{Kind: "exec", Command: quotedBinPath + " version || true"},
+		{Kind: "exec", Command: "pkill -f 'agentd start' 2>/dev/null || true; sleep 1"},
+		{Kind: "exec", Command: startDetachedCommand(binPath)},
+	}...)
+	return steps
+}
+
+func startDetachedCommand(binPath string) string {
+	quotedBinPath := shellCommandPath(binPath)
+	return "if command -v setsid >/dev/null 2>&1; then setsid " + quotedBinPath + " start >/tmp/agentd.log 2>&1 < /dev/null & else nohup " + quotedBinPath + " start >/tmp/agentd.log 2>&1 < /dev/null & fi"
+}
+
+func shellCommandPath(path string) string {
+	switch {
+	case strings.HasPrefix(path, "~/"):
+		return "\"$HOME/" + strings.TrimPrefix(path, "~/") + "\""
+	case strings.HasPrefix(path, "$HOME/"):
+		return "\"$HOME/" + strings.TrimPrefix(path, "$HOME/") + "\""
+	default:
+		return shellQuote(path)
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // Deployer uploads agentd to a remote machine via SSH and starts it.

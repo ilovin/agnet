@@ -3,6 +3,7 @@ package deployer_test
 import (
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/phone-talk/agentgw/internal/deployer"
@@ -36,5 +37,23 @@ func TestPlanDeploySteps(t *testing.T) {
 	}
 	if !found["exec"] {
 		t.Error("expected exec step")
+	}
+}
+
+func TestPlanDeployStepsStartsDetached(t *testing.T) {
+	steps := deployer.PlanSteps("~/bin", []byte("fake"))
+	if len(steps) == 0 {
+		t.Fatal("expected deploy steps")
+	}
+	startCmd := steps[len(steps)-1].Command
+	for _, want := range []string{
+		"setsid",
+		"nohup",
+		"\"$HOME/bin/agentd\" start",
+		">/tmp/agentd.log 2>&1 < /dev/null &",
+	} {
+		if !strings.Contains(startCmd, want) {
+			t.Fatalf("expected start command to contain %q, got %q", want, startCmd)
+		}
 	}
 }
