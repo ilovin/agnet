@@ -150,4 +150,4 @@ echo ""
 echo "To update tunnel URL without restarting agentgw:"
 echo '  curl -X POST http://localhost:8383/config/tunnel \\'
 echo '    -H "Authorization: Bearer <agentgw-token>" \\'
-echo '    -d \'{ "url": "wss://<new-domain>.trycloudflare.com/tunnel/register?userId=<username>", "token": "<user-password>" }\''
+echo "    -d '{ \"url\": \"wss://<new-domain>.trycloudflare.com/tunnel/register?userId=<username>\", \"token\": \"<user-password>\" }'"
