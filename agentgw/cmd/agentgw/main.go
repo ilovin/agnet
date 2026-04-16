@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/phone-talk/agentgw/internal/config"
@@ -40,33 +42,44 @@ func restartTunnel(url, token, localAddr, localToken string) {
 }
 
 func main() {
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+
+	// If the first arg looks like a flag, treat it as implicit "start".
+	if len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		args = append([]string{"start"}, args...)
+	}
+
+	if len(args) < 1 {
 		showHelp()
 		os.Exit(1)
 	}
-	switch os.Args[1] {
+
+	switch args[0] {
 	case "start":
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
 		showQR := fs.Bool("qr", false, "print connection QR code to terminal after startup")
-		fs.Parse(os.Args[2:])
+		fs.Parse(args[1:])
 		runServer(*tunnelURL, *tunnelToken, *showQR)
+	case "qr":
+		printQRFromConfig()
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
 		showHelp()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
 		os.Exit(1)
 	}
 }
 
 func showHelp() {
-	fmt.Println(`Usage: agentgw <start|version|help>
+	fmt.Print(`Usage: agentgw <start|qr|version|help>
 
 Commands:
   start    Start the gateway server
+  qr       Print connection QR code to terminal now
   version  Show version
   help     Show this help message
 
@@ -255,34 +268,11 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
 	if showQR {
-		localIP := getLocalIP()
-		if localIP != "" {
-			localURL := fmt.Sprintf("http://%s:%d?token=%s", localIP, cfg.Port, cfg.Token)
-			urls := []string{localURL}
-			if tunnelURL != "" {
-				appURL := strings.Split(tunnelURL, "/tunnel/register")[0]
-				if appURL != "" {
-					remoteURL := fmt.Sprintf("%s?token=%s", appURL, cfg.Token)
-					urls = append(urls, remoteURL)
-				}
-			}
-			for i, qrURL := range urls {
-				label := "Local"
-				if i > 0 {
-					label = "Remote"
-				}
-				qr, err := qrcode.New(qrURL, qrcode.Medium)
-				if err == nil {
-					fmt.Printf("\n[%s] Scan QR code to connect:\n", label)
-					fmt.Println(qr.ToSmallString(false))
-					fmt.Printf("URL: %s\n", qrURL)
-				} else {
-					log.Printf("failed to generate QR for %s: %v", label, err)
-				}
-			}
-			fmt.Println()
-		}
+		printQRCode(cfg.Port, cfg.Token, tunnelURL)
 	}
+
+	// Handle on-demand QR requests via SIGUSR1.
+	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL)
 
 	err = http.Serve(ln, nil)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -390,6 +380,60 @@ func findStaticDir() string {
 		}
 	}
 	return ""
+}
+
+func printQRCode(port int, token, tunnelURL string) {
+	localIP := getLocalIP()
+	if localIP == "" {
+		fmt.Println("Unable to determine local IP address")
+		return
+	}
+	localURL := fmt.Sprintf("http://%s:%d?token=%s", localIP, port, token)
+	urls := []string{localURL}
+	if tunnelURL != "" {
+		appURL := strings.Split(tunnelURL, "/tunnel/register")[0]
+		if appURL != "" {
+			remoteURL := fmt.Sprintf("%s?token=%s", appURL, token)
+			urls = append(urls, remoteURL)
+		}
+	}
+	for i, qrURL := range urls {
+		label := "Local"
+		if i > 0 {
+			label = "Remote"
+		}
+		qr, err := qrcode.New(qrURL, qrcode.Medium)
+		if err == nil {
+			fmt.Printf("\n[%s] Scan QR code to connect:\n", label)
+			fmt.Println(qr.ToSmallString(false))
+			fmt.Printf("URL: %s\n", qrURL)
+		} else {
+			log.Printf("failed to generate QR for %s: %v", label, err)
+		}
+	}
+	fmt.Println()
+}
+
+func printQRFromConfig() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("get home dir: %v", err)
+	}
+	cfgPath := home + "/.agentgw/config.yaml"
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	tunnelURL := os.Getenv("AGENTGW_TUNNEL_URL")
+	printQRCode(cfg.Port, cfg.Token, tunnelURL)
+}
+
+func handleQRSignals(port int, token, tunnelURL string) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGUSR1)
+	for range ch {
+		printQRCode(port, token, tunnelURL)
+	}
 }
 
 func getLocalIP() string {
