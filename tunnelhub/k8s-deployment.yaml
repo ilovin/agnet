@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: tunnelhub
-          image: adas-img.nioint.com/aa-perception/tunnelhub:v0.1.0  # update tag before deploy
+          image: adas-img.nioint.com/aa-perception/tunnelhub:v0.0.2
           ports:
             - containerPort: 7374
           env:
