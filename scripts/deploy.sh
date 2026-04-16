@@ -19,6 +19,7 @@ LOCAL_BIN="$AGENTD_DIR/agentd"
 LINUX_BIN="$AGENTD_DIR/agentd-linux"
 APK_OUTPUT="$AGENTGW_DIR/agentapp.apk"
 IPA_OUTPUT="$AGENTGW_DIR/agentapp.ipa"
+WEB_STATIC_DIR="$AGENTGW_DIR/static"
 REMOTE_HOST="${REMOTE_HOST:-ws}"
 REMOTE_LOG="/tmp/agentd.log"
 
@@ -52,12 +53,15 @@ TARGETS:
   flutter-ios      Use \`flutter install\` to flash iOS (auto-detects device)
   sim              Build and install to iOS Simulator via xcrun simctl
   cfgutil          Install existing IPA via Apple Configurator 2 (cfgutil)
+  web              Build Flutter Web and copy to agentgw/static
   mobile           Install existing APK/IPA to connected devices without rebuilding
   gw               Restart agentgw only
   help             Show this help message
 
 ENVIRONMENT:
-  REMOTE_HOST    Remote SSH host for 'ws' target (default: ws)
+  REMOTE_HOST            Remote SSH host for 'ws' target (default: ws)
+  AGENTGW_TUNNEL_URL     Optional tunnel hub URL (e.g. wss://hub.example.com/tunnel/register?userId=alice)
+  AGENTGW_TUNNEL_TOKEN   Optional tunnel auth token
 
 EXAMPLES:
   # Full dev cycle (default)
@@ -152,6 +156,18 @@ build_ipa() {
     else
         echo "[deploy] WARNING: IPA not found after build"
     fi
+}
+
+build_web() {
+    if up_to_date "$WEB_STATIC_DIR/index.html" agentapp/lib -type f -name '*.dart' agentapp/pubspec.yaml agentapp/pubspec.lock; then
+        echo "[deploy] Web static up-to-date, skipping build"
+        return 0
+    fi
+    echo "[deploy] Building Flutter Web..."
+    (cd "$AGENTAPP_DIR" && flutter build web --release --no-tree-shake-icons)
+    rm -rf "$WEB_STATIC_DIR"
+    cp -r "$AGENTAPP_DIR/build/web" "$WEB_STATIC_DIR"
+    echo "[deploy] Web static copied to $WEB_STATIC_DIR"
 }
 
 install_android() {
@@ -260,6 +276,11 @@ install_ios_flutter() {
         echo "[deploy] flutter not found, skipping iOS install"
         return 1
     fi
+    echo "[deploy] Building iOS for device..."
+    (cd "$AGENTAPP_DIR" && flutter build ios) || {
+        echo "[deploy] WARNING: flutter build ios failed"
+        return 1
+    }
     echo "[deploy] Running flutter install for iOS..."
     (cd "$AGENTAPP_DIR" && flutter install) || echo "[deploy] WARNING: flutter install failed"
 }
@@ -340,17 +361,19 @@ deploy_mobile() {
 }
 
 build_all() {
-    # Build macOS, Linux, APK and IPA in parallel
-    local mac_pid linux_pid apk_pid ipa_pid mac_ok=0 linux_ok=0 apk_ok=0 ipa_ok=0
+    # Build macOS, Linux, APK, IPA and Web in parallel
+    local mac_pid linux_pid apk_pid ipa_pid web_pid mac_ok=0 linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0
     build_mac & mac_pid=$!
     build_linux & linux_pid=$!
     build_apk & apk_pid=$!
     build_ipa & ipa_pid=$!
+    build_web & web_pid=$!
     wait "$mac_pid" && mac_ok=1 || true
     wait "$linux_pid" && linux_ok=1 || true
     wait "$apk_pid" && apk_ok=1 || true
     wait "$ipa_pid" && ipa_ok=1 || true
-    echo "[deploy] Build results: mac=$mac_ok linux=$linux_ok apk=$apk_ok ipa=$ipa_ok"
+    wait "$web_pid" && web_ok=1 || true
+    echo "[deploy] Build results: mac=$mac_ok linux=$linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok"
     [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $apk_ok -eq 1 ]]
 }
 
@@ -422,6 +445,7 @@ deploy_all() {
 }
 
 restart_agentgw() {
+    build_web
     echo "[deploy] Restarting agentgw (to reconnect WS tunnels to agentd)..."
     pkill -f "agentgw start" 2>/dev/null || true
     sleep 1
@@ -467,6 +491,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         cfgutil)
             install_ios_cfgutil
+            ;;
+        web)
+            build_web
             ;;
         mobile)
             deploy_mobile

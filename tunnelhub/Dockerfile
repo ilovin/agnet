@@ -1,0 +1,6 @@
+FROM scratch
+COPY tunnelhub /
+EXPOSE 7374
+ENV PORT=7374
+ENV TUNNEL_SECRET=""
+ENTRYPOINT ["/tunnelhub"]

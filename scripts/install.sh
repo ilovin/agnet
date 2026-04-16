@@ -41,6 +41,10 @@ OPTIONS (for install):
   --no-browser       Don't open browser after installation
   -h, --help         Show this help message and exit
 
+ENVIRONMENT:
+  AGENTGW_TUNNEL_URL    Optional tunnel hub URL (e.g. wss://hub.example.com/tunnel/register?userId=alice)
+  AGENTGW_TUNNEL_TOKEN  Optional tunnel auth token
+
 EXAMPLES:
   ./install.sh
   ./install.sh --token mytoken --local-only
@@ -435,10 +439,13 @@ pkill -f "agentgw start" 2>/dev/null || true
 sleep 1
 
 # Copy static files if available
-if [[ -d "$SCRIPT_DIR/static" ]]; then
-  mkdir -p "$INSTALL_DIR/static"
-  cp -r "$SCRIPT_DIR/static/"* "$INSTALL_DIR/static/" 2>/dev/null || true
-fi
+for static_src in "$SCRIPT_DIR/static" "$SCRIPT_DIR/../agentgw/static"; do
+  if [[ -d "$static_src" ]]; then
+    mkdir -p "$INSTALL_DIR/static"
+    cp -r "$static_src/"* "$INSTALL_DIR/static/" 2>/dev/null || true
+    break
+  fi
+done
 
 nohup "$INSTALL_DIR/agentgw" start > /tmp/agentgw.log 2>&1 &
 GW_PID=$!
@@ -491,17 +498,46 @@ if [[ -n "$TAILSCALE_IP" && -n "$LAN_IP" && "$TAILSCALE_IP" != "$LAN_IP" ]]; the
   esac
 fi
 
-GW_URL="ws://${LOCAL_IP}:${GW_PORT}/ws"
-QR_DATA="${GW_URL}|${TOKEN}"
+TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
+TUNNEL_USER=""
+if [[ -n "$TUNNEL_URL" ]]; then
+  # Extract userId from query string if present
+  TUNNEL_USER="$(echo "$TUNNEL_URL" | sed -n 's/.*[?&]userId=\([^&]*\).*/\1/p')"
+fi
+
+if [[ -n "$TUNNEL_URL" ]]; then
+  GW_URL="${TUNNEL_URL}"
+  QR_DATA="${GW_URL}|${TOKEN}"
+else
+  GW_URL="ws://${LOCAL_IP}:${GW_PORT}/ws"
+  QR_DATA="${GW_URL}|${TOKEN}"
+fi
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   🎉 安装完成！                            ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${CYAN}📱 手机连接:${NC}"
-echo "  URL:   ${GW_URL}"
-echo "  Token: ${TOKEN}"
+
+if [[ -n "$TUNNEL_URL" ]]; then
+  echo -e "${CYAN}🌐 隧道模式已启用${NC}"
+  echo -e "${CYAN}📱 手机连接 (通过隧道):${NC}"
+  echo "  URL:   ${TUNNEL_URL}"
+  echo "  Token: ${TOKEN}"
+  if [[ -n "$TUNNEL_USER" ]]; then
+    echo "  User:  ${TUNNEL_USER}"
+  fi
+  echo ""
+  echo -e "${CYAN}💻 本地 Web 控制台:${NC}"
+  echo "  http://localhost:${GW_PORT}"
+else
+  echo -e "${CYAN}📱 手机连接:${NC}"
+  echo "  URL:   ${GW_URL}"
+  echo "  Token: ${TOKEN}"
+  echo ""
+  echo -e "${CYAN}💻 本地 Web 控制台:${NC}"
+  echo "  http://localhost:${GW_PORT}"
+fi
 echo ""
 
 # QR code
@@ -518,10 +554,23 @@ fi
 echo ""
 echo -e "${CYAN}💡 提示:${NC}"
 echo "  📱 手机安装 agentapp.apk → 扫描上方二维码"
-echo "  🌐 浏览器: http://localhost:${GW_PORT}"
+if [[ -n "$TUNNEL_URL" ]]; then
+  echo "  🌐 浏览器: http://localhost:${GW_PORT}（本地管理）"
+  echo "  🔗 隧道地址: ${TUNNEL_URL}"
+else
+  echo "  🌐 浏览器: http://localhost:${GW_PORT}"
+fi
 echo "  📝 配置: ${INSTALL_DIR}/config.yaml"
 echo "  📋 日志: tail -f /tmp/agentgw.log"
 echo "  🔄 重启: ./install.sh restart"
 echo "  ⏹  停止: ./install.sh stop"
 echo "  ℹ️  状态: ./install.sh status"
+if [[ -n "$TUNNEL_URL" ]]; then
+  echo ""
+  echo "  隧道环境变量已传递给 agentgw："
+  echo "    AGENTGW_TUNNEL_URL=${TUNNEL_URL}"
+  if [[ -n "${AGENTGW_TUNNEL_TOKEN:-}" ]]; then
+    echo "    AGENTGW_TUNNEL_TOKEN=***"
+  fi
+fi
 echo ""

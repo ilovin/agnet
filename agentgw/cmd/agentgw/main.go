@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -17,23 +18,67 @@ import (
 	"github.com/phone-talk/agentgw/internal/config"
 	"github.com/phone-talk/agentgw/internal/node"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
+	"github.com/phone-talk/agentgw/internal/tunnel"
 	"github.com/phone-talk/agentgw/internal/ws"
+	"github.com/skip2/go-qrcode"
 )
+
+var activeTunnel *tunnel.Client
+
+func restartTunnel(url, token, localAddr, localToken string) {
+	if activeTunnel != nil {
+		activeTunnel.Stop()
+	}
+	if url != "" {
+		activeTunnel = tunnel.NewClient(url, token, localAddr, localToken)
+		go activeTunnel.Start()
+		log.Printf("[agentgw] tunnel client started: %s -> %s", url, localAddr)
+	} else {
+		activeTunnel = nil
+		log.Printf("[agentgw] tunnel client stopped")
+	}
+}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: agentgw <start|version>")
+		showHelp()
 		os.Exit(1)
 	}
 	switch os.Args[1] {
 	case "start":
-		runServer()
+		fs := flag.NewFlagSet("start", flag.ExitOnError)
+		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
+		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
+		showQR := fs.Bool("qr", false, "print connection QR code to terminal after startup")
+		fs.Parse(os.Args[2:])
+		runServer(*tunnelURL, *tunnelToken, *showQR)
 	case "version":
 		fmt.Println("agentgw v0.1.0")
+	case "help", "--help", "-h":
+		showHelp()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		os.Exit(1)
 	}
+}
+
+func showHelp() {
+	fmt.Println(`Usage: agentgw <start|version|help>
+
+Commands:
+  start    Start the gateway server
+  version  Show version
+  help     Show this help message
+
+Start flags:
+  --tunnel-url string    Tunnel hub URL (overrides AGENTGW_TUNNEL_URL)
+  --tunnel-token string  Tunnel auth token (overrides AGENTGW_TUNNEL_TOKEN)
+  --qr                   Print connection QR code to terminal after startup
+
+Environment:
+  AGENTGW_TUNNEL_URL    Tunnel hub URL
+  AGENTGW_TUNNEL_TOKEN  Tunnel auth token
+`)
 }
 
 // staticHandler wraps a http.FileServer and serves static files without auth.
@@ -55,7 +100,7 @@ func checkToken(r *http.Request, token string) bool {
 	return t == token
 }
 
-func runServer() {
+func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -106,6 +151,43 @@ func runServer() {
 	})
 
 	mgr.ConnectAll()
+
+	// Start reverse tunnel client if configured.
+	tunnelURL := tunnelURLFlag
+	if tunnelURL == "" {
+		tunnelURL = os.Getenv("AGENTGW_TUNNEL_URL")
+	}
+	tunnelToken := tunnelTokenFlag
+	if tunnelToken == "" {
+		tunnelToken = os.Getenv("AGENTGW_TUNNEL_TOKEN")
+	}
+	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
+	if tunnelURL != "" {
+		restartTunnel(tunnelURL, tunnelToken, localAddr, cfg.Token)
+	}
+
+	// Admin endpoint to hot-update tunnel URL without restarting agentgw.
+	http.HandleFunc("/config/tunnel", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !checkToken(r, cfg.Token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			URL   string `json:"url"`
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		restartTunnel(req.URL, req.Token, localAddr, cfg.Token)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": req.URL})
+	})
 
 	// Find static directory (check multiple locations)
 	staticDir := findStaticDir()
@@ -171,6 +253,37 @@ func runServer() {
 		tokenPreview = tokenPreview[:8]
 	}
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
+
+	if showQR {
+		localIP := getLocalIP()
+		if localIP != "" {
+			localURL := fmt.Sprintf("http://%s:%d?token=%s", localIP, cfg.Port, cfg.Token)
+			urls := []string{localURL}
+			if tunnelURL != "" {
+				appURL := strings.Split(tunnelURL, "/tunnel/register")[0]
+				if appURL != "" {
+					remoteURL := fmt.Sprintf("%s?token=%s", appURL, cfg.Token)
+					urls = append(urls, remoteURL)
+				}
+			}
+			for i, qrURL := range urls {
+				label := "Local"
+				if i > 0 {
+					label = "Remote"
+				}
+				qr, err := qrcode.New(qrURL, qrcode.Medium)
+				if err == nil {
+					fmt.Printf("\n[%s] Scan QR code to connect:\n", label)
+					fmt.Println(qr.ToSmallString(false))
+					fmt.Printf("URL: %s\n", qrURL)
+				} else {
+					log.Printf("failed to generate QR for %s: %v", label, err)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
 	err = http.Serve(ln, nil)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
 		log.Fatalf("serve: %v", err)
@@ -273,6 +386,21 @@ func findStaticDir() string {
 			// Check for index.html
 			if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
 				return dir
+			}
+		}
+	}
+	return ""
+}
+
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
 			}
 		}
 	}
