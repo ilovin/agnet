@@ -33,18 +33,24 @@ spec:
             limits:
               memory: "256Mi"
               cpu: "200m"
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /health
               port: 7374
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            periodSeconds: 2
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /health
               port: 7374
-            initialDelaySeconds: 5
             periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7374
+            periodSeconds: 10
+            failureThreshold: 3
 ---
 apiVersion: v1
 kind: Service
