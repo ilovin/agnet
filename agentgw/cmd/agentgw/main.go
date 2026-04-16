@@ -28,9 +28,11 @@ import (
 
 var activeTunnel *tunnel.Client
 var currentTunnelURL string
+var currentTunnelToken string
 
 func restartTunnel(url, token, localAddr, localToken string) {
 	currentTunnelURL = url
+	currentTunnelToken = token
 	if activeTunnel != nil {
 		activeTunnel.Stop()
 	}
@@ -195,7 +197,7 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"tunnelUrl": currentTunnelURL})
+			json.NewEncoder(w).Encode(map[string]any{"tunnelUrl": currentTunnelURL, "tunnelToken": currentTunnelToken})
 		case http.MethodPost:
 			var req struct {
 				URL   string `json:"url"`
@@ -401,7 +403,7 @@ func printQRCode(port int, token, tunnelURL, tunnelToken string) {
 	}
 	localURL := fmt.Sprintf("ws://%s:%d/ws|%s", localIP, port, token)
 	urls := []string{localURL}
-	if tunnelURL != "" {
+	if tunnelURL != "" && tunnelToken != "" {
 		u, err := url.Parse(tunnelURL)
 		if err == nil {
 			userID := u.Query().Get("userId")
@@ -412,11 +414,7 @@ func printQRCode(port int, token, tunnelURL, tunnelToken string) {
 			if u.Scheme == "ws" {
 				scheme = "ws"
 			}
-			pass := tunnelToken
-			if pass == "" {
-				pass = token
-			}
-			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, pass)
+			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, tunnelToken)
 			urls = append(urls, remoteURL)
 		}
 	}
@@ -447,34 +445,41 @@ func printQRFromConfig(tunnelURL, tunnelToken string) {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	if tunnelURL == "" {
-		tunnelURL = fetchTunnelURLFromRunningServer(cfg.Port, cfg.Token)
+	if tunnelURL == "" || tunnelToken == "" {
+		url, tok := fetchTunnelConfigFromRunningServer(cfg.Port, cfg.Token)
+		if tunnelURL == "" {
+			tunnelURL = url
+		}
+		if tunnelToken == "" {
+			tunnelToken = tok
+		}
 	}
 	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
 }
 
-func fetchTunnelURLFromRunningServer(port int, token string) string {
+func fetchTunnelConfigFromRunningServer(port int, token string) (string, string) {
 	url := fmt.Sprintf("http://localhost:%d/config/tunnel", port)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return "", ""
 	}
 	var body struct {
-		TunnelURL string `json:"tunnelUrl"`
+		TunnelURL   string `json:"tunnelUrl"`
+		TunnelToken string `json:"tunnelToken"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return ""
+		return "", ""
 	}
-	return body.TunnelURL
+	return body.TunnelURL, body.TunnelToken
 }
 
 func handleQRSignals(port int, token, tunnelURL, tunnelToken string) {
