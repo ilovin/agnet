@@ -18,6 +18,66 @@ func min(a, b int) int {
 	return b
 }
 
+// extractOpencodeText tries multiple known JSON structures to extract assistant text.
+func extractOpencodeText(generic map[string]interface{}) string {
+	// Structure 1: {"type":"text","part":{"type":"text","text":"..."}}
+	if part, ok := generic["part"].(map[string]interface{}); ok {
+		if text, ok := part["text"].(string); ok && text != "" {
+			return text
+		}
+	}
+
+	// Structure 2: {"type":"message","role":"assistant","content":"..."}
+	if role, _ := generic["role"].(string); role == "assistant" || role == "user" {
+		if content, ok := generic["content"].(string); ok && content != "" {
+			return content
+		}
+	}
+
+	// Structure 3: {"type":"assistant","text":"..."} or {"type":"assistant","content":"..."}
+	if text, ok := generic["text"].(string); ok && text != "" {
+		return text
+	}
+
+	// Structure 4: nested content_block_delta like Claude stream-json
+	// {"type":"content_block_delta","delta":{"text":"..."}}
+	if delta, ok := generic["delta"].(map[string]interface{}); ok {
+		if text, ok := delta["text"].(string); ok && text != "" {
+			return text
+		}
+		if text, ok := delta["text_delta"].(string); ok && text != "" {
+			return text
+		}
+	}
+
+	// Structure 5: {"type":"stream_event","event":{"type":"...","delta":{"text":"..."}}}
+	if eventData, ok := generic["event"].(map[string]interface{}); ok {
+		if delta, ok := eventData["delta"].(map[string]interface{}); ok {
+			if text, ok := delta["text"].(string); ok && text != "" {
+				return text
+			}
+			if text, ok := delta["text_delta"].(string); ok && text != "" {
+				return text
+			}
+		}
+	}
+
+	// Structure 6: {"type":"result","result":"..."}
+	if result, ok := generic["result"].(string); ok && result != "" {
+		return result
+	}
+
+	// Structure 7: {"output":"..."} or {"message":"..."}
+	if output, ok := generic["output"].(string); ok && output != "" {
+		return output
+	}
+	if msg, ok := generic["message"].(string); ok && msg != "" {
+		return msg
+	}
+
+	return ""
+}
+
 // openCodeSendWithResume sends a message to an OpenCode session using resume mode.
 // OpenCode doesn't support real-time PTY input, so we use `opencode run --session`.
 func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, message string) RPCResponse {
@@ -106,10 +166,16 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 		scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 
 		var fullResponse strings.Builder
+		var rawBuf strings.Builder
 		lineCount := 0
 		for scanner.Scan() {
 			line := scanner.Text()
 			lineCount++
+
+			if strings.TrimSpace(line) != "" {
+				rawBuf.WriteString(line)
+				rawBuf.WriteString("\n")
+			}
 
 			// Try to parse as generic JSON first to see structure
 			var generic map[string]interface{}
@@ -121,37 +187,35 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 			evType, _ := generic["type"].(string)
 
 			// Log first few lines for debugging
-			if lineCount <= 3 {
-				log.Printf("[OpenCode] JSON line %d type=%s", lineCount, evType)
+			if lineCount <= 5 {
+				log.Printf("[OpenCode] JSON line %d type=%s raw=%s", lineCount, evType, line[:min(len(line), 120)])
 			}
 
-			// Handle text events (structure: {"type":"text","part":{"type":"text","text":"..."}})
-			if evType == "text" {
-				if part, ok := generic["part"].(map[string]interface{}); ok {
-					text, _ := part["text"].(string)
-					if text != "" {
-						log.Printf("[OpenCode] Got text (len=%d): %s", len(text), text[:min(len(text), 50)])
-						fullResponse.WriteString(text)
-						// Broadcast partial response for real-time display
-						h.server.broadcast(event("conversation.message", map[string]any{
-							"agentId": ag.ID,
-							"role":    "assistant",
-							"text":    text,
-							"partial": true,
-						}), nil)
-					} else {
-						log.Printf("[OpenCode] Text event but no text content")
-					}
-				} else {
-					log.Printf("[OpenCode] Text event but no part field")
-				}
+			text := extractOpencodeText(generic)
+			if text != "" {
+				log.Printf("[OpenCode] Got text (len=%d): %s", len(text), text[:min(len(text), 50)])
+				fullResponse.WriteString(text)
+				// Broadcast partial response for real-time display
+				h.server.broadcast(event("conversation.message", map[string]any{
+					"agentId": ag.ID,
+					"role":    "assistant",
+					"text":    text,
+					"partial": true,
+				}), nil)
 			}
 
 			// Handle step_finish to detect completion
-			if evType == "step_finish" {
-				log.Printf("[OpenCode] Step finished, breaking")
+			if evType == "step_finish" || evType == "message_stop" || evType == "done" {
+				log.Printf("[OpenCode] Step finished (%s), breaking", evType)
 				break
 			}
+		}
+
+		// Record final assistant response even if scanner broke early or fullResponse is empty
+		// but stdout had content we couldn't parse (fallback to raw stdout).
+		if fullResponse.Len() == 0 && rawBuf.Len() > 0 {
+			log.Printf("[OpenCode] No parsed text from JSON stream for agent %s, using raw stdout fallback", ag.ID)
+			fullResponse.WriteString(rawBuf.String())
 		}
 
 		if err := scanner.Err(); err != nil {

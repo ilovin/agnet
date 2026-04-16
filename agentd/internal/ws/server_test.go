@@ -736,6 +736,72 @@ func TestConversationSendClaudeKeepsSameAgentID(t *testing.T) {
 	}
 }
 
+func TestConversationSendClaudeWithImagesPassesCleanFileArgs(t *testing.T) {
+	setupFakeClaude(t)
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	createResp := rpc(conn, "agent.create", map[string]any{
+		"name":    "img-agent",
+		"cmd":     "claude",
+		"workDir": t.TempDir(),
+	})
+	if createResp["error"] != nil {
+		t.Fatalf("agent.create error: %v", createResp["error"])
+	}
+	createResult, ok := createResp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got %T", createResp["result"])
+	}
+	agentID, ok := createResult["id"].(string)
+	if !ok || agentID == "" {
+		t.Fatalf("expected non-empty id, got %#v", createResult["id"])
+	}
+
+	sendResp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": agentID,
+		"message": "describe this",
+		"images": []map[string]any{
+			{"data": "iVBORw0KGgo=", "mimeType": "image/png"},
+		},
+	})
+	if sendResp["error"] != nil {
+		t.Fatalf("send error: %v", sendResp["error"])
+	}
+
+	// Verify history records the image
+	deadline := time.Now().Add(2 * time.Second)
+	var foundUser bool
+	for time.Now().Before(deadline) {
+		historyResp := rpc(conn, "conversation.history", map[string]any{
+			"agentId": agentID,
+			"limit":   50,
+		})
+		if historyResp["error"] != nil {
+			t.Fatalf("history error: %v", historyResp["error"])
+		}
+		historyResult, _ := historyResp["result"].(map[string]any)
+		rawEvents, _ := historyResult["events"].([]any)
+		for _, raw := range rawEvents {
+			eventMap, _ := raw.(map[string]any)
+			role, _ := eventMap["role"].(string)
+			text, _ := eventMap["text"].(string)
+			imageCount, _ := eventMap["imageCount"].(float64)
+			if role == "user" && text == "describe this" && imageCount == 1 {
+				foundUser = true
+				break
+			}
+		}
+		if foundUser {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !foundUser {
+		t.Fatalf("expected user message with imageCount=1 in history")
+	}
+}
+
 func TestSessionCreateAndList(t *testing.T) {
 	ts, _ := newTestServer(t)
 	conn := dialWS(t, ts, "testtoken")

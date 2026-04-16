@@ -24,6 +24,17 @@ type handler struct {
 	server *Server
 	conn   *websocket.Conn
 	self   *client
+	mu     sync.Mutex
+	providerRowsCache struct {
+		rows          []map[string]any
+		resp          RPCResponse
+		ok            bool
+		currentID     string
+		currentReason string
+		runtimeID     string
+		runtimeReason string
+		at            time.Time
+	}
 }
 
 type providerSnapshot struct {
@@ -781,6 +792,11 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	// For tmux-attached Claude sessions, write directly to PTY (don't restart)
 	if isTmuxAttached {
+		// tmux-attached interactive sessions cannot receive --file flags dynamically;
+		// images would be recorded in history but never passed to the CLI process.
+		if len(imageFiles) > 0 {
+			return errResp(req.ID, -32000, "tmux-attached sessions do not support image attachments")
+		}
 		// Same as the generic PTY path below, but skip the opencode/fresh checks
 		eventData := map[string]any{
 			"role":       "user",
@@ -813,16 +829,20 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
-		return h.agentRestartWithMessage(req, ag, message, imageFiles)
+		return h.agentRestartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For fresh Claude agent (no process yet), start with message
 	if isFreshClaude {
-		return h.agentStartWithMessage(req, ag, message, imageFiles)
+		return h.agentStartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For OpenCode attached sessions, use resume mode
 	if isOpenCode {
+		// OpenCode resume mode does not support image attachments.
+		if len(imageFiles) > 0 {
+			return errResp(req.ID, -32000, "opencode sessions do not support image attachments")
+		}
 		return h.openCodeSendWithResume(req, ag, message)
 	}
 
@@ -903,7 +923,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 // agentRestartWithMessage restarts a Claude agent with a new message written to stdin.
 // Used for -p mode where Claude exits after each response and reads prompt from stdin.
-func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
+func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string, imagePaths []string) RPCResponse {
 	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
@@ -923,8 +943,8 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	// Append --file flags for image attachments
-	for i, f := range imageFiles {
-		args = append(args, "--file", fmt.Sprintf("img%d:%s", i, f))
+	for _, f := range imageFiles {
+		args = append(args, "--file", f)
 	}
 
 	if err := h.server.manager.RestartInPlace(ag.ID, provider, cmd, args, env); err != nil {
@@ -944,21 +964,29 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	}
 
 	// Record user message first, then broadcast for deterministic history/view sync.
-	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+	historyData := map[string]any{
 		"role":       "user",
 		"text":       message,
 		"raw":        false,
 		"imageCount": len(imageFiles),
-	}); err != nil {
+	}
+	if len(imagePaths) > 0 {
+		historyData["images"] = imagePaths
+	}
+	if _, err := h.server.manager.RecordConversationEvent(ag.ID, historyData); err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
-	h.server.broadcast(event("conversation.message", map[string]any{
+	broadcastData := map[string]any{
 		"agentId":    ag.ID,
 		"role":       "user",
 		"text":       message,
 		"imageCount": len(imageFiles),
-	}), nil)
+	}
+	if len(imagePaths) > 0 {
+		broadcastData["images"] = imagePaths
+	}
+	h.server.broadcast(event("conversation.message", broadcastData), nil)
 
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
@@ -967,7 +995,7 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 
 // agentStartWithMessage starts a fresh Claude agent with the first message.
 // Used when a Claude agent was created without starting a process.
-func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string) RPCResponse {
+func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message string, imageFiles []string, imagePaths []string) RPCResponse {
 	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
@@ -986,26 +1014,34 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	// Append --file flags for image attachments
-	for i, f := range imageFiles {
-		args = append(args, "--file", fmt.Sprintf("img%d:%s", i, f))
+	for _, f := range imageFiles {
+		args = append(args, "--file", f)
 	}
 
 	// Record user message first
-	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+	historyData := map[string]any{
 		"role":       "user",
 		"text":       message,
 		"raw":        false,
 		"imageCount": len(imageFiles),
-	}); err != nil {
+	}
+	if len(imagePaths) > 0 {
+		historyData["images"] = imagePaths
+	}
+	if _, err := h.server.manager.RecordConversationEvent(ag.ID, historyData); err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
-	h.server.broadcast(event("conversation.message", map[string]any{
+	broadcastData := map[string]any{
 		"agentId":    ag.ID,
 		"role":       "user",
 		"text":       message,
 		"imageCount": len(imageFiles),
-	}), nil)
+	}
+	if len(imagePaths) > 0 {
+		broadcastData["images"] = imagePaths
+	}
+	h.server.broadcast(event("conversation.message", broadcastData), nil)
 
 	// Start the agent with the message
 	if err := h.server.manager.StartInPlaceWithMessage(ag.ID, provider, cmd, args, env, message); err != nil {
@@ -1710,6 +1746,31 @@ func (h *handler) providerRows() ([]map[string]any, RPCResponse, bool) {
 	return rows, RPCResponse{}, true
 }
 
+func (h *handler) cachedProviderData() ([]map[string]any, RPCResponse, bool, string, string, string, string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Since(h.providerRowsCache.at) < time.Second && !h.providerRowsCache.at.IsZero() {
+		return h.providerRowsCache.rows, h.providerRowsCache.resp, h.providerRowsCache.ok,
+			h.providerRowsCache.currentID, h.providerRowsCache.currentReason,
+			h.providerRowsCache.runtimeID, h.providerRowsCache.runtimeReason
+	}
+	rows, resp, ok := h.providerRows()
+	var currentID, currentReason, runtimeID, runtimeReason string
+	if ok {
+		currentID, currentReason = currentProviderFromRows(rows)
+		runtimeID, runtimeReason = runtimeProviderFromRows(rows)
+	}
+	h.providerRowsCache.rows = rows
+	h.providerRowsCache.resp = resp
+	h.providerRowsCache.ok = ok
+	h.providerRowsCache.currentID = currentID
+	h.providerRowsCache.currentReason = currentReason
+	h.providerRowsCache.runtimeID = runtimeID
+	h.providerRowsCache.runtimeReason = runtimeReason
+	h.providerRowsCache.at = time.Now()
+	return rows, resp, ok, currentID, currentReason, runtimeID, runtimeReason
+}
+
 func (h *handler) deriveProviderScope(ag *agent.Agent) string {
 	if ag == nil {
 		return "standalone"
@@ -1742,7 +1803,7 @@ func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
 		}
 	}
 
-	rows, _, ok := h.providerRows()
+	_, _, ok, currentProviderID, currentReason, runtimeProviderID, runtimeReason := h.cachedProviderData()
 	if !ok {
 		snapshot := providerSnapshot{
 			ProviderScope:       scope,
@@ -1760,8 +1821,6 @@ func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
 		}
 		return snapshot
 	}
-	currentProviderID, currentReason := currentProviderFromRows(rows)
-	runtimeProviderID, runtimeReason := runtimeProviderFromRows(rows)
 	snapshot := providerSnapshot{
 		CurrentProviderID: currentProviderID,
 		RuntimeProviderID: runtimeProviderID,
@@ -1824,7 +1883,7 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 }
 
 func (h *handler) providerList(req RPCRequest) RPCResponse {
-	rows, resp, ok := h.providerRows()
+	rows, resp, ok, _, _, _, _ := h.cachedProviderData()
 	if !ok {
 		if resp.Error == nil {
 			return okResp(req.ID, map[string]any{

@@ -1422,7 +1422,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       if (images.isNotEmpty) {
         params['images'] = images;
       }
-      final result = await client.call('conversation.send', params);
+      final result = await client.call(
+        'conversation.send',
+        params,
+        timeout: const Duration(seconds: 30),
+      );
 
       final map = result is Map
           ? Map<String, dynamic>.from(result)
@@ -1449,8 +1453,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     } catch (e) {
       debugPrint('sendMessage error: $e');
       if (mounted) {
+        String msg = '发送失败，请重试';
+        if (e.toString().contains('timeout')) {
+          msg = '发送超时，图片可能过大或网络较慢';
+        } else if (e.toString().contains('tmux-attached sessions do not support image')) {
+          msg = 'tmux 附加会话不支持图片附件，请新建普通 Claude 会话再试';
+        } else if (e.toString().contains('opencode sessions do not support image')) {
+          msg = 'OpenCode 会话不支持图片附件';
+        }
         setState(() {
-          _lastError = '发送失败，请重试';
+          _lastError = msg;
         });
       }
     }
@@ -3110,7 +3122,7 @@ class _UserImagesState extends State<_UserImages> {
           }
         }
       } catch (e) {
-        debugPrint('load image error: \$e');
+        debugPrint('load image error: $e');
       }
     }
   }
@@ -4011,51 +4023,71 @@ class _InputBarState extends State<_InputBar> {
   }
 
   Future<void> _pickImage() async {
-    ImageSource? source;
-    if (kIsWeb) {
-      source = ImageSource.gallery;
-    } else {
-      source = await showModalBottomSheet<ImageSource>(
-        context: context,
-        builder: (ctx) => SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                leading: const Icon(Icons.camera_alt),
-                title: const Text('拍照'),
-                onTap: () => Navigator.pop(ctx, ImageSource.camera),
-              ),
-              ListTile(
-                leading: const Icon(Icons.photo_library),
-                title: const Text('从相册选择'),
-                onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-              ),
-            ],
+    try {
+      ImageSource? source;
+      if (kIsWeb) {
+        source = ImageSource.gallery;
+      } else {
+        source = await showModalBottomSheet<ImageSource>(
+          context: context,
+          builder: (ctx) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.camera_alt),
+                  title: const Text('拍照'),
+                  onTap: () => Navigator.pop(ctx, ImageSource.camera),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.photo_library),
+                  title: const Text('从相册选择'),
+                  onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
+        );
+      }
+      if (source == null) return;
+
+      final picked = kIsWeb
+          ? await _imagePicker.pickImage(source: source)
+          : await _imagePicker.pickImage(
+              source: source,
+              maxWidth: 1920,
+              maxHeight: 1920,
+              imageQuality: 85,
+            );
+      if (picked == null) return;
+
+      final bytes = await picked.readAsBytes();
+      final b64 = base64Encode(bytes);
+      // Web端未压缩，限制单张图片 base64 后不超过 5MB（约 3.75MB 原始文件）
+      if (kIsWeb && b64.length > 5 * 1024 * 1024) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Web 端图片过大，请选择小于 3MB 的图片')),
+          );
+        }
+        return;
+      }
+      String mime = picked.mimeType ?? '';
+      if (mime.isEmpty) {
+        mime = _detectMimeType(bytes);
+      }
+
+      final updated = List<Map<String, String>>.from(widget.pendingImages)
+        ..add({'data': b64, 'mimeType': mime});
+      widget.onImagesChanged(updated);
+    } catch (e, st) {
+      debugPrint('pickImage error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('选择图片失败: $e')),
+        );
+      }
     }
-    if (source == null) return;
-
-    final picked = await _imagePicker.pickImage(
-      source: source,
-      maxWidth: 1920,
-      maxHeight: 1920,
-      imageQuality: 85,
-    );
-    if (picked == null) return;
-
-    final bytes = await picked.readAsBytes();
-    final b64 = base64Encode(bytes);
-    String mime = picked.mimeType ?? '';
-    if (mime.isEmpty) {
-      mime = _detectMimeType(bytes);
-    }
-
-    final updated = List<Map<String, String>>.from(widget.pendingImages)
-      ..add({'data': b64, 'mimeType': mime});
-    widget.onImagesChanged(updated);
   }
 
   String _detectMimeType(List<int> bytes) {
@@ -4329,7 +4361,9 @@ class _InputBarState extends State<_InputBar> {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               // Image button (left of text field)
-              if (!isReadOnly)
+              if (!isReadOnly &&
+                  widget.agent?.provider != 'opencode' &&
+                  widget.agent?.attachMode != 'tmux')
                 IconButton(
                   onPressed: effectiveLoading ? null : _pickImage,
                   icon: const Icon(Icons.image, size: 20),

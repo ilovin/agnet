@@ -117,8 +117,8 @@ func (w *OpenCodeDBWatcher) poll() {
 		rows, err = db.Query(`
 			SELECT m.id, m.data
 			FROM message m
-			WHERE m.session_id = ? AND m.time_created > (
-				SELECT time_created FROM message WHERE id = ?
+			WHERE m.session_id = ? AND m.time_created >= COALESCE(
+				(SELECT time_created FROM message WHERE id = ?), 0
 			)
 			ORDER BY m.time_created ASC`,
 			w.sessionID, w.lastMsgID)
@@ -131,6 +131,9 @@ func (w *OpenCodeDBWatcher) poll() {
 	for rows.Next() {
 		var msgID, msgData string
 		if err := rows.Scan(&msgID, &msgData); err != nil {
+			continue
+		}
+		if msgID == w.lastMsgID {
 			continue
 		}
 
@@ -170,6 +173,8 @@ func (w *OpenCodeDBWatcher) poll() {
 			}
 		}
 		partRows.Close()
+
+		w.lastMsgID = msgID
 
 		// Emit event if there's text content
 		if len(textParts) > 0 {

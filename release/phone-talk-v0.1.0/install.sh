@@ -112,52 +112,6 @@ stop_services() {
   fi
 }
 
-# Detect agentgw binary for current platform
-detect_binary() {
-  case "$(uname -s):$(uname -m)" in
-    Darwin:*)  echo "$BIN_DIR/agentgw-macos-arm64" ;;
-    Linux:x86_64)  echo "$BIN_DIR/agentgw-linux" ;;
-    Linux:aarch64) echo "$BIN_DIR/agentgw-linux" ;;
-    *) echo "" ;;
-  esac
-}
-
-# Detect local agentd binary (in agentd/ dir, sibling of scripts/)
-detect_local_agentd() {
-  local agentd_dir="$SCRIPT_DIR/../agentd"
-  case "$(uname -s):$(uname -m)" in
-    Darwin:arm64|Darwin:x86_64)
-      if [[ -f "$agentd_dir/agentd-darwin" ]]; then
-        echo "$agentd_dir/agentd-darwin"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-    Linux:x86_64)
-      if [[ -f "$agentd_dir/agentd-linux-amd64" ]]; then
-        echo "$agentd_dir/agentd-linux-amd64"
-      elif [[ -f "$agentd_dir/agentd-linux" ]]; then
-        echo "$agentd_dir/agentd-linux"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-    Linux:aarch64)
-      if [[ -f "$agentd_dir/agentd-linux" ]]; then
-        echo "$agentd_dir/agentd-linux"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-    *)
-      # Fallback: any agentd binary
-      if [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-  esac
-}
-
 restart_services() {
   stop_services
 
@@ -173,13 +127,9 @@ restart_services() {
     chmod +x "$INSTALL_DIR/agentgw"
   fi
 
-  local local_bin
-  local_bin="$(detect_local_agentd)"
-  if [[ -z "$local_bin" || ! -f "$local_bin" ]]; then
-    warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
-    warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux|-linux-amd64]"
-  else
-    step "启动本地 agentd (${local_bin##*/})..."
+  local local_bin="$BIN_DIR/agentd"
+  if [[ -f "$local_bin" ]]; then
+    step "启动本地 agentd..."
     nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
     sleep 2
     if lsof -nP -iTCP:"$AGENTD_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -187,6 +137,8 @@ restart_services() {
     else
       warn "agentd 启动失败，查看日志: tail -f /tmp/agentd-local.log"
     fi
+  else
+    warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
   fi
 
   step "启动 agentgw..."
@@ -250,6 +202,16 @@ esac
 # ═══════════════════════════════════════════════════════════════════
 # Normal install flow below
 # ═══════════════════════════════════════════════════════════════════
+
+# ── Detect platform ────────────────────────────────────────────────
+detect_binary() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:*)  echo "$BIN_DIR/agentgw-macos-arm64" ;;
+    Linux:x86_64)  echo "$BIN_DIR/agentgw-linux" ;;
+    Linux:aarch64) echo "$BIN_DIR/agentgw-linux" ;;
+    *) echo "" ;;
+  esac
+}
 
 # ── Scan SSH config ────────────────────────────────────────────────
 scan_ssh_nodes() {

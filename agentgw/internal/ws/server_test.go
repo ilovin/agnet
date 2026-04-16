@@ -87,6 +87,18 @@ func newFakeAgentd(t *testing.T, result map[string]any) *httptest.Server {
 					"id":      req["id"],
 					"result":  map[string]any{"ok": true},
 				})
+			case "conversation.image":
+				_ = conn.WriteJSON(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req["id"],
+					"result":  map[string]any{"data": "dGVzdA=="},
+				})
+			case "conversation.permission_response":
+				_ = conn.WriteJSON(map[string]any{
+					"jsonrpc": "2.0",
+					"id":      req["id"],
+					"result":  map[string]any{"ok": true},
+				})
 			default:
 				_ = conn.WriteJSON(map[string]any{
 					"jsonrpc": "2.0",
@@ -380,6 +392,37 @@ func TestConversationKeyForwardsToNode(t *testing.T) {
 	result, ok := resp["result"].(map[string]any)
 	if !ok || result["ok"] != true {
 		t.Fatalf("expected ok result, got %#v", resp["result"])
+	}
+}
+
+func TestConversationImageForwardsToNode(t *testing.T) {
+	ts, mgr := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	id, err := mgr.Add(nodecfg.NodeEntry{Name: "n1", Host: "127.0.0.1", SSHPort: 22, AgentdPort: 7373, Token: "tok"})
+	if err != nil {
+		t.Fatalf("mgr.Add: %v", err)
+	}
+
+	agentd := newFakeAgentd(t, map[string]any{})
+	wsURL := "ws" + strings.TrimPrefix(agentd.URL, "http")
+	p, err := proxy.New(wsURL, "tok")
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close() })
+	mgr.Get(id).SetProxy(p)
+
+	resp := rpc(t, conn, "conversation.image", map[string]any{
+		"nodeId": id,
+		"path":   "/data/images/test.png",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("conversation.image error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok || result["data"] != "dGVzdA==" {
+		t.Fatalf("expected image data result, got %#v", resp["result"])
 	}
 }
 
