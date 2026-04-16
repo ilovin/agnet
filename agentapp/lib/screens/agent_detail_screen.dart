@@ -3471,7 +3471,6 @@ class _MarkdownContent extends StatelessWidget {
         style: TextStyle(
           fontSize: fontSize,
           color: textColor,
-          fontFamily: 'monospace',
           height: 1.4,
         ),
       );
@@ -3521,7 +3520,6 @@ class _MarkdownContent extends StatelessWidget {
         code: TextStyle(
           fontSize: fontSize - 1,
           color: textColor,
-          fontFamily: 'monospace',
           backgroundColor: scheme.surfaceContainerHighest,
         ),
         codeblockDecoration: BoxDecoration(
