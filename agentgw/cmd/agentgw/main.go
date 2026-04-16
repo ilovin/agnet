@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,8 +27,10 @@ import (
 )
 
 var activeTunnel *tunnel.Client
+var currentTunnelURL string
 
 func restartTunnel(url, token, localAddr, localToken string) {
+	currentTunnelURL = url
 	if activeTunnel != nil {
 		activeTunnel.Stop()
 	}
@@ -63,7 +66,10 @@ func main() {
 		fs.Parse(args[1:])
 		runServer(*tunnelURL, *tunnelToken, *showQR)
 	case "qr":
-		printQRFromConfig()
+		fs := flag.NewFlagSet("qr", flag.ExitOnError)
+		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
+		fs.Parse(args[1:])
+		printQRFromConfig(*tunnelURL)
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
@@ -179,27 +185,31 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 		restartTunnel(tunnelURL, tunnelToken, localAddr, cfg.Token)
 	}
 
-	// Admin endpoint to hot-update tunnel URL without restarting agentgw.
+	// Admin endpoint to get or hot-update tunnel URL without restarting agentgw.
 	http.HandleFunc("/config/tunnel", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 		if !checkToken(r, cfg.Token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		var req struct {
-			URL   string `json:"url"`
-			Token string `json:"token"`
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"tunnelUrl": currentTunnelURL})
+		case http.MethodPost:
+			var req struct {
+				URL   string `json:"url"`
+				Token string `json:"token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			restartTunnel(req.URL, req.Token, localAddr, cfg.Token)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": req.URL})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		restartTunnel(req.URL, req.Token, localAddr, cfg.Token)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "url": req.URL})
 	})
 
 	// Find static directory (check multiple locations)
@@ -388,12 +398,20 @@ func printQRCode(port int, token, tunnelURL string) {
 		fmt.Println("Unable to determine local IP address")
 		return
 	}
-	localURL := fmt.Sprintf("http://%s:%d?token=%s", localIP, port, token)
+	localURL := fmt.Sprintf("ws://%s:%d/ws|%s", localIP, port, token)
 	urls := []string{localURL}
 	if tunnelURL != "" {
-		appURL := strings.Split(tunnelURL, "/tunnel/register")[0]
-		if appURL != "" {
-			remoteURL := fmt.Sprintf("%s?token=%s", appURL, token)
+		u, err := url.Parse(tunnelURL)
+		if err == nil {
+			userID := u.Query().Get("userId")
+			if userID == "" {
+				userID = "default"
+			}
+			scheme := "wss"
+			if u.Scheme == "ws" {
+				scheme = "ws"
+			}
+			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, token)
 			urls = append(urls, remoteURL)
 		}
 	}
@@ -414,7 +432,7 @@ func printQRCode(port int, token, tunnelURL string) {
 	fmt.Println()
 }
 
-func printQRFromConfig() {
+func printQRFromConfig(tunnelURL string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -424,8 +442,34 @@ func printQRFromConfig() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	tunnelURL := os.Getenv("AGENTGW_TUNNEL_URL")
+	if tunnelURL == "" {
+		tunnelURL = fetchTunnelURLFromRunningServer(cfg.Port, cfg.Token)
+	}
 	printQRCode(cfg.Port, cfg.Token, tunnelURL)
+}
+
+func fetchTunnelURLFromRunningServer(port int, token string) string {
+	url := fmt.Sprintf("http://localhost:%d/config/tunnel", port)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		TunnelURL string `json:"tunnelUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return ""
+	}
+	return body.TunnelURL
 }
 
 func handleQRSignals(port int, token, tunnelURL string) {

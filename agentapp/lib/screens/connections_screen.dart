@@ -161,17 +161,24 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
       token = '';
     }
 
-    // Show pre-filled edit sheet so user can modify URL (e.g. change to Tailscale IP)
-    if (!mounted) return;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => _AddConnectionSheet(
-        initialUrl: url,
-        initialToken: token,
-        onConnect: _connect,
-      ),
-    );
+    if (url.isEmpty) return;
+
+    if (token.isNotEmpty) {
+      // Direct connect if both URL and token are present.
+      await _connect(ConnectionConfig(url: url, token: token));
+    } else {
+      // Show pre-filled edit sheet so user can modify URL or fill token.
+      if (!mounted) return;
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => _AddConnectionSheet(
+          initialUrl: url,
+          initialToken: token,
+          onConnect: _connect,
+        ),
+      );
+    }
   }
 
   Future<void> _connect(ConnectionConfig cfg) async {
