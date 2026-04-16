@@ -48,6 +48,12 @@ func main() {
 	// agentapp inbound connections
 	http.HandleFunc("/ws/", h.BridgeApp)
 
+	// health probe for orchestrators
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "7374"

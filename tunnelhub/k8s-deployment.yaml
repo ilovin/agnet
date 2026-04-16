@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: tunnelhub
-          image: ccr.ccs.tencentyun.com/your-namespace/phonetalk-tunnelhub:latest
+          image: adas-img.nioint.com/aa-perception/tunnelhub:v0.1.0  # update tag before deploy
           ports:
             - containerPort: 7374
           env:
@@ -58,3 +58,7 @@ spec:
     - port: 7374
       targetPort: 7374
   type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
