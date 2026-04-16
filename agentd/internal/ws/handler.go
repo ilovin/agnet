@@ -170,6 +170,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		PermissionMode         string `json:"permissionMode,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
+	seenSession := make(map[string]struct{})
 	for _, ag := range agents {
 		lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
 		projectName := ""
@@ -177,6 +178,14 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		// Defensive deduplication: skip if same session already listed
+		if resumeID != "" {
+			key := strings.ToLower(ag.Provider + "|" + resumeID)
+			if _, ok := seenSession[key]; ok {
+				continue
+			}
+			seenSession[key] = struct{}{}
+		}
 		derived := h.server.manager.DeriveAgentState(ag.ID)
 		provider := h.deriveProviderSnapshot(ag)
 		result = append(result, agentInfo{

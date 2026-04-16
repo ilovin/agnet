@@ -88,6 +88,8 @@ func (m *Manager) LoadFromStore() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	loadedAttached := make(map[string]struct{})
+	loadedByPID := make(map[string]struct{})
+	loadedBySession := make(map[string]struct{})
 	for _, r := range records {
 		// Skip agents whose process is no longer running — they will be
 		// re-discovered by ScanExisting/Attach if the process comes back.
@@ -100,10 +102,31 @@ func (m *Manager) LoadFromStore() error {
 		if strings.Contains(r.Name, "-attached-") {
 			key := r.Provider + "|" + r.Name
 			if _, ok := loadedAttached[key]; ok {
+				_ = m.store.DeleteAgent(r.ID)
 				continue
 			}
 			loadedAttached[key] = struct{}{}
 		}
+
+		// Deduplicate by PID+Provider and ResumeSessionID+Provider
+		pidKey := fmt.Sprintf("%s|%d", r.Provider, r.PID)
+		if _, ok := loadedByPID[pidKey]; ok {
+			log.Printf("[LoadFromStore] Skipping duplicate agent %s (same PID %d)", r.ID, r.PID)
+			_ = m.store.DeleteAgent(r.ID)
+			continue
+		}
+		loadedByPID[pidKey] = struct{}{}
+
+		if r.ResumeSessionID != "" {
+			sessionKey := r.Provider + "|" + r.ResumeSessionID
+			if _, ok := loadedBySession[sessionKey]; ok {
+				log.Printf("[LoadFromStore] Skipping duplicate agent %s (same session %s)", r.ID, r.ResumeSessionID)
+				_ = m.store.DeleteAgent(r.ID)
+				continue
+			}
+			loadedBySession[sessionKey] = struct{}{}
+		}
+
 		var cmd string
 		var args []string
 		switch r.Provider {
@@ -117,6 +140,7 @@ func (m *Manager) LoadFromStore() error {
 			args = []string{"--dangerously-skip-permissions"}
 		}
 		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
+		ag.PID = r.PID
 		m.wireStatusCallback(ag)
 		ag.setStatus(StatusIdle)
 		log.Printf("[LoadFromStore] Agent %s (PID %d) is still running, setting status to idle", r.ID, r.PID)
@@ -279,6 +303,7 @@ func (m *Manager) readPTYForPermissionPrompts(agentID string, ag *Agent, provide
 	}()
 
 	buf := make([]byte, 4096)
+	var lineBuffer strings.Builder
 	var lastAutoResolveTime time.Time
 	const autoResolveCooldown = 2 * time.Second // Prevent rapid re-detection
 
@@ -313,9 +338,22 @@ func (m *Manager) readPTYForPermissionPrompts(agentID string, ag *Agent, provide
 
 			// Check for stream-json events in PTY output (Claude outputs JSON to PTY in stream-json mode)
 			if provider == "claude" {
-				if ev := m.tryParseStreamJSON(text); ev != nil {
-					m.handleStreamJSONEvent(agentID, ag, ev)
-					continue
+				lineBuffer.WriteString(text)
+				content := lineBuffer.String()
+				lines := strings.Split(content, "\n")
+				lineBuffer.Reset()
+				if len(lines) > 0 && !strings.HasSuffix(content, "\n") {
+					lineBuffer.WriteString(lines[len(lines)-1])
+					lines = lines[:len(lines)-1]
+				}
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					if ev := m.tryParseStreamJSON(line); ev != nil {
+						m.handleStreamJSONEvent(agentID, ag, ev)
+					}
 				}
 			}
 		}
@@ -324,6 +362,16 @@ func (m *Manager) readPTYForPermissionPrompts(agentID string, ag *Agent, provide
 				log.Printf("[PTY] Read error for agent %s: %v", agentID, err)
 			}
 			break
+		}
+	}
+
+	// Process any remaining content in buffer
+	if provider == "claude" {
+		remaining := strings.TrimSpace(lineBuffer.String())
+		if remaining != "" {
+			if ev := m.tryParseStreamJSON(remaining); ev != nil {
+				m.handleStreamJSONEvent(agentID, ag, ev)
+			}
 		}
 	}
 }
@@ -1589,6 +1637,9 @@ func (m *Manager) Rename(agentID, name string) error {
 		return fmt.Errorf("agent not found: %s", agentID)
 	}
 	ag.Name = name
+	if err := m.store.UpdateAgentName(agentID, name); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1866,7 +1917,15 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	projectName := projectNameFromDir(info.WorkDir)
 	var name string
 	if projectName != "" {
-		name = fmt.Sprintf("%s (%s)", projectName, info.Provider)
+		shortSession := sessionID
+		if len(shortSession) > 4 {
+			shortSession = shortSession[len(shortSession)-4:]
+		}
+		if shortSession != "" {
+			name = fmt.Sprintf("%s #%s (%s)", projectName, shortSession, info.Provider)
+		} else {
+			name = fmt.Sprintf("%s (%s)", projectName, info.Provider)
+		}
 	} else {
 		name = fmt.Sprintf("%s-attached-%d", info.Provider, info.PID)
 	}

@@ -134,8 +134,8 @@ class WsClient {
     } catch (e) {
       _reconnecting = false;
       _scheduleReconnect();
-      // Do not rethrow: callers should treat connect as fire-and-forget
-      // because automatic reconnection is already scheduled.
+      // Rethrow so callers know the initial connection failed.
+      rethrow;
     }
   }
 

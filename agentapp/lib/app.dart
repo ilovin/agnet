@@ -11,11 +11,12 @@ import 'providers/connection_provider.dart';
 final _router = GoRouter(
   initialLocation: '/connections',
   redirect: (context, state) {
-    // If navigating to dashboard/agent/settings without a connection, go to connections
-    // This handles the case where the browser reloads at /#/dashboard
+    // If navigating to dashboard/agent/settings without ever connecting, go to connections.
+    // We intentionally do NOT redirect just because the WebSocket is temporarily
+    // disconnected — DashboardScreen already shows a reconnect indicator and auto-refreshes.
     final container = ProviderScope.containerOf(context);
     final client = container.read(connectionProvider);
-    final needsConnection = client == null || !client.isConnected;
+    final needsConnection = client == null;
     if (needsConnection && state.matchedLocation != '/connections') {
       return '/connections';
     }

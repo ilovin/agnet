@@ -14,15 +14,24 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
-                if (call.method == "installApk") {
-                    val path = call.argument<String>("path")
-                    if (path != null) {
-                        installApk(path, result)
-                    } else {
-                        result.error("INVALID", "path is null", null)
+                when (call.method) {
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        if (path != null) {
+                            installApk(path, result)
+                        } else {
+                            result.error("INVALID", "path is null", null)
+                        }
                     }
-                } else {
-                    result.notImplemented()
+                    "getLaunchExtras" -> {
+                        val url = intent.getStringExtra("url")
+                        val token = intent.getStringExtra("token")
+                        result.success(mapOf(
+                            "url" to (url ?: ""),
+                            "token" to (token ?: "")
+                        ))
+                    }
+                    else -> result.notImplemented()
                 }
             }
     }

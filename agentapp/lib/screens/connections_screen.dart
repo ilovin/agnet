@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -35,11 +36,14 @@ class ConnectionsScreen extends ConsumerStatefulWidget {
 
 class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
     with WidgetsBindingObserver {
+  static const _platform = MethodChannel('com.phonetalk.agentapp/install');
+
   List<ConnectionConfig> _saved = [];
   bool _connecting = false;
   String? _connectingUrl;
   String? _connectStatus;
   bool _connectStatusIsError = false;
+  ConnectionConfig? _lastFailedConfig;
 
   @override
   void initState() {
@@ -67,6 +71,20 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
     if (mounted) setState(() => _saved = configs);
     if (configs.isNotEmpty) {
       _tryAutoReconnect();
+    }
+    await _checkLaunchExtras();
+  }
+
+  Future<void> _checkLaunchExtras() async {
+    try {
+      final extras = await _platform.invokeMethod<Map<dynamic, dynamic>>('getLaunchExtras');
+      final url = extras?['url'] as String? ?? '';
+      final token = extras?['token'] as String? ?? '';
+      if (url.isNotEmpty && token.isNotEmpty && mounted) {
+        await _connect(ConnectionConfig(url: url, token: token));
+      }
+    } on PlatformException catch (e) {
+      debugPrint('getLaunchExtras error: ${e.message}');
     }
   }
 
@@ -165,7 +183,18 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
 
     if (token.isNotEmpty) {
       // Direct connect if both URL and token are present.
-      await _connect(ConnectionConfig(url: url, token: token));
+      final ok = await _connect(ConnectionConfig(url: url, token: token));
+      if (!ok && mounted) {
+        showModalBottomSheet(
+          context: context,
+          isScrollControlled: true,
+          builder: (_) => _AddConnectionSheet(
+            initialUrl: url,
+            initialToken: token,
+            onConnect: _connect,
+          ),
+        );
+      }
     } else {
       // Show pre-filled edit sheet so user can modify URL or fill token.
       if (!mounted) return;
@@ -181,14 +210,15 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
     }
   }
 
-  Future<void> _connect(ConnectionConfig cfg) async {
-    if (_connecting) return;
+  Future<bool> _connect(ConnectionConfig cfg) async {
+    if (_connecting) return false;
     if (mounted) {
       setState(() {
         _connecting = true;
         _connectingUrl = cfg.url;
         _connectStatus = '连接中…';
         _connectStatusIsError = false;
+        _lastFailedConfig = null;
       });
     }
 
@@ -247,14 +277,17 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
         });
         context.go('/dashboard');
       }
+      return true;
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() {
         _connecting = false;
         _connectingUrl = null;
         _connectStatus = _friendlyConnectError(e, cfg);
         _connectStatusIsError = true;
+        _lastFailedConfig = cfg;
       });
+      return false;
     }
   }
 
@@ -389,6 +422,25 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                           : Icons.check_circle_outline,
                     ),
               actions: [
+                if (_connectStatusIsError && _lastFailedConfig != null)
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _connectStatus = null;
+                        _connectStatusIsError = false;
+                      });
+                      showModalBottomSheet(
+                        context: context,
+                        isScrollControlled: true,
+                        builder: (_) => _AddConnectionSheet(
+                          initialUrl: _lastFailedConfig!.url,
+                          initialToken: _lastFailedConfig!.token,
+                          onConnect: _connect,
+                        ),
+                      );
+                    },
+                    child: const Text('编辑'),
+                  ),
                 TextButton(
                   onPressed: () {
                     setState(() {

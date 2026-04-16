@@ -110,6 +110,14 @@ func (s *Store) ListAgents() ([]AgentRecord, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) UpdateAgentName(id, name string) error {
+	_, err := s.db.Exec(`UPDATE agents SET name=? WHERE id=?`, name, id)
+	if err != nil {
+		return fmt.Errorf("update name for agent %s: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
 	result, err := s.db.Exec(`UPDATE agents SET resume_session_id=? WHERE id=?`, sessionID, id)
 	if err != nil {

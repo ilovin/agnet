@@ -68,8 +68,9 @@ func main() {
 	case "qr":
 		fs := flag.NewFlagSet("qr", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
+		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
 		fs.Parse(args[1:])
-		printQRFromConfig(*tunnelURL)
+		printQRFromConfig(*tunnelURL, *tunnelToken)
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
@@ -278,11 +279,11 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
 	if showQR {
-		printQRCode(cfg.Port, cfg.Token, tunnelURL)
+		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
 	}
 
 	// Handle on-demand QR requests via SIGUSR1.
-	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL)
+	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
 
 	err = http.Serve(ln, nil)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -392,7 +393,7 @@ func findStaticDir() string {
 	return ""
 }
 
-func printQRCode(port int, token, tunnelURL string) {
+func printQRCode(port int, token, tunnelURL, tunnelToken string) {
 	localIP := getLocalIP()
 	if localIP == "" {
 		fmt.Println("Unable to determine local IP address")
@@ -411,7 +412,11 @@ func printQRCode(port int, token, tunnelURL string) {
 			if u.Scheme == "ws" {
 				scheme = "ws"
 			}
-			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, token)
+			pass := tunnelToken
+			if pass == "" {
+				pass = token
+			}
+			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, pass)
 			urls = append(urls, remoteURL)
 		}
 	}
@@ -432,7 +437,7 @@ func printQRCode(port int, token, tunnelURL string) {
 	fmt.Println()
 }
 
-func printQRFromConfig(tunnelURL string) {
+func printQRFromConfig(tunnelURL, tunnelToken string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -445,7 +450,7 @@ func printQRFromConfig(tunnelURL string) {
 	if tunnelURL == "" {
 		tunnelURL = fetchTunnelURLFromRunningServer(cfg.Port, cfg.Token)
 	}
-	printQRCode(cfg.Port, cfg.Token, tunnelURL)
+	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
 }
 
 func fetchTunnelURLFromRunningServer(port int, token string) string {
@@ -472,11 +477,11 @@ func fetchTunnelURLFromRunningServer(port int, token string) string {
 	return body.TunnelURL
 }
 
-func handleQRSignals(port int, token, tunnelURL string) {
+func handleQRSignals(port int, token, tunnelURL, tunnelToken string) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGUSR1)
 	for range ch {
-		printQRCode(port, token, tunnelURL)
+		printQRCode(port, token, tunnelURL, tunnelToken)
 	}
 }
 

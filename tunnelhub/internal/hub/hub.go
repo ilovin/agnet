@@ -14,19 +14,23 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+type tunnelEntry struct {
+	conn    *websocket.Conn
+	mu      sync.Mutex
+	appConn *websocket.Conn
+}
+
 // Hub bridges agentapp connections to local agentgw via reverse tunnels.
 type Hub struct {
-	mu       sync.RWMutex
-	tunnels  map[string]*websocket.Conn // userID -> agentgw reverse ws
-	appConns map[string]*websocket.Conn // userID -> current app ws (for tracking)
-	users    map[string]string          // userID -> password
+	mu      sync.RWMutex
+	tunnels map[string]*tunnelEntry // userID -> agentgw reverse ws
+	users   map[string]string       // userID -> password
 }
 
 func New(users map[string]string) *Hub {
 	return &Hub{
-		tunnels:  make(map[string]*websocket.Conn),
-		appConns: make(map[string]*websocket.Conn),
-		users:    users,
+		tunnels: make(map[string]*tunnelEntry),
+		users:   users,
 	}
 }
 
@@ -45,12 +49,14 @@ func (h *Hub) RegisterTunnel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	entry := &tunnelEntry{conn: conn}
+
 	h.mu.Lock()
 	old := h.tunnels[userID]
-	h.tunnels[userID] = conn
+	h.tunnels[userID] = entry
 	h.mu.Unlock()
 	if old != nil {
-		old.Close()
+		old.conn.Close()
 	}
 
 	log.Printf("[Hub] tunnel registered for user=%s", userID)
@@ -80,21 +86,36 @@ func (h *Hub) RegisterTunnel(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			log.Printf("[Hub] tunnel closed for user=%s: %v", userID, err)
-			break
-		}
-	}
-	close(done)
+	// Single reader goroutine for the tunnel: forwards to active app conn.
+	go h.tunnelReader(userID, entry, done)
+
+	// Block until the tunnel connection closes (tunnelReader will close done).
+	<-done
 
 	h.mu.Lock()
-	if h.tunnels[userID] == conn {
+	if h.tunnels[userID] == entry {
 		delete(h.tunnels, userID)
 	}
 	h.mu.Unlock()
 	log.Printf("[Hub] tunnel unregistered for user=%s", userID)
+}
+
+func (h *Hub) tunnelReader(userID string, entry *tunnelEntry, done chan struct{}) {
+	defer close(done)
+	for {
+		mt, data, err := entry.conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		entry.mu.Lock()
+		appConn := entry.appConn
+		entry.mu.Unlock()
+		if appConn != nil {
+			if err := appConn.WriteMessage(mt, data); err != nil {
+				appConn.Close()
+			}
+		}
+	}
 }
 
 // BridgeApp handles the WebSocket connection from agentapp.
@@ -106,13 +127,20 @@ func (h *Hub) BridgeApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// In production, auth middleware (e.g. oauth2-proxy) runs before this.
-	// For PoC we accept a query token or rely on upstream auth.
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	}
+	pass, ok := h.users[userID]
+	if !ok || token != pass {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 
 	h.mu.RLock()
-	tunnel := h.tunnels[userID]
+	entry := h.tunnels[userID]
 	h.mu.RUnlock()
-	if tunnel == nil {
+	if entry == nil {
 		http.Error(w, "agentgw offline", http.StatusBadGateway)
 		return
 	}
@@ -124,53 +152,34 @@ func (h *Hub) BridgeApp(w http.ResponseWriter, r *http.Request) {
 	}
 	defer appConn.Close()
 
-	h.mu.Lock()
-	oldApp := h.appConns[userID]
-	h.appConns[userID] = appConn
-	h.mu.Unlock()
+	entry.mu.Lock()
+	oldApp := entry.appConn
+	entry.appConn = appConn
+	entry.mu.Unlock()
 	if oldApp != nil {
 		oldApp.Close()
 	}
 
 	log.Printf("[Hub] app connected for user=%s", userID)
 
-	// Bidirectional copy.
-	errCh := make(chan error, 2)
-	go func() {
-		for {
-			t, data, err := appConn.ReadMessage()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if err := tunnel.WriteMessage(t, data); err != nil {
-				errCh <- err
-				return
-			}
+	// Read from app and write to tunnel. tunnelReader handles tunnel -> app.
+	for {
+		t, data, err := appConn.ReadMessage()
+		if err != nil {
+			break
 		}
-	}()
-	go func() {
-		for {
-			t, data, err := tunnel.ReadMessage()
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if err := appConn.WriteMessage(t, data); err != nil {
-				errCh <- err
-				return
-			}
+		if err := entry.conn.WriteMessage(t, data); err != nil {
+			break
 		}
-	}()
+	}
 
-	<-errCh
 	log.Printf("[Hub] app disconnected for user=%s", userID)
 
-	h.mu.Lock()
-	if h.appConns[userID] == appConn {
-		delete(h.appConns, userID)
+	entry.mu.Lock()
+	if entry.appConn == appConn {
+		entry.appConn = nil
 	}
-	h.mu.Unlock()
+	entry.mu.Unlock()
 }
 
 func (h *Hub) auth(r *http.Request) (string, bool) {
