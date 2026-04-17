@@ -625,6 +625,10 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 					return
 				}
 			}
+			// User messages (including interrupts) should reset status to idle.
+			// When a user interrupts a running request, Claude writes a user-type
+			// message, and we need to transition away from StatusWorking.
+			ag.setStatus(StatusIdle)
 		}
 
 		if role == "assistant" {

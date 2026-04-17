@@ -350,5 +350,13 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 		return ConversationEvent{}, false
 	}
 
+	// A user message that interrupts a running request should reset status to standby.
+	// Claude writes "[Request interrupted by user]" as a user-type message, which the
+	// assistant-only status detection above would miss, leaving status stuck on working.
+	if line.Type == "user" {
+		s := StatusStandby
+		ev.StatusChange = &s
+	}
+
 	return ev, true
 }
