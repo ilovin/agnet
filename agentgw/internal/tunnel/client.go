@@ -3,7 +3,6 @@ package tunnel
 import (
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -79,16 +78,7 @@ func (c *Client) runOnce() error {
 		headers.Set("Authorization", "Bearer "+c.token)
 	}
 
-	url := c.hubURL
-	if !strings.Contains(url, "token=") && c.token != "" {
-		sep := "?"
-		if strings.Contains(url, "?") {
-			sep = "&"
-		}
-		url = url + sep + "token=" + c.token
-	}
-
-	conn, _, err := dialer.Dial(url, headers)
+	conn, _, err := dialer.Dial(c.hubURL, headers)
 	if err != nil {
 		return err
 	}

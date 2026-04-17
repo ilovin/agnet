@@ -14,7 +14,7 @@ import (
 
 type Config struct {
 	Port      int    `yaml:"port"`
-	Token     string `yaml:"token"`
+	Token     string `yaml:"token"` // local agentgw /ws auth token
 	NodesFile string `yaml:"nodes_file"`
 	SSHKey    string `yaml:"ssh_key"` // path to default SSH private key
 }

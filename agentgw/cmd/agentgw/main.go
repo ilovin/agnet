@@ -65,10 +65,11 @@ func main() {
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
+		hubBase := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub base URL, e.g. wss://domain:8443 (env AGENTGW_HUB)")
 		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		showQR := fs.Bool("qr", false, "print connection QR code to terminal after startup")
 		fs.Parse(args[1:])
-		runServer(*tunnelURL, *tunnelToken, *appURL, *showQR)
+		runServer(*tunnelURL, *tunnelToken, *hubBase, *appURL, *showQR)
 	case "qr":
 		fs := flag.NewFlagSet("qr", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
@@ -78,6 +79,7 @@ func main() {
 		printQRFromConfig(*tunnelURL, *tunnelToken, *appURL)
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
+		hubURL := fs.String("hub", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnelhub URL for registration (env AGENTGW_TUNNEL_URL)")
 		fs.Parse(args[1:])
 		if os.Getenv("OPENSSO_CLIENT_ID") != "" {
 			cfg := oauth.DefaultConfig()
@@ -92,16 +94,24 @@ func main() {
 			fmt.Printf("Login successful! userId=%s\n", result.UserID)
 			fmt.Printf("Token saved to: %s\n", path)
 		} else {
-			auth, err := oauth.DoLocalLogin()
+			auth, err := oauth.DoLocalLogin(*hubURL)
 			if err != nil {
 				log.Fatalf("login failed: %v", err)
 			}
-			fmt.Printf("\nLocal login credentials:\n")
+			fmt.Printf("\nRegistered successfully!\n")
 			fmt.Printf("  userId: %s\n", auth.UserID)
 			fmt.Printf("  token:  %s\n", auth.Token)
 			fmt.Printf("Saved to: %s\n", oauth.LocalAuthFilePath())
-			fmt.Println("\nUse these values in the app to connect.")
+			fmt.Println("\nCredentials will be used automatically by 'agentgw start'.")
 		}
+	case "logout":
+		fs := flag.NewFlagSet("logout", flag.ExitOnError)
+		hubURL := fs.String("hub", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnelhub URL for unregistration (env AGENTGW_TUNNEL_URL)")
+		fs.Parse(args[1:])
+		if err := oauth.DoLocalLogout(*hubURL); err != nil {
+			log.Fatalf("logout failed: %v", err)
+		}
+		fmt.Println("Unregistered successfully.")
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
@@ -113,23 +123,33 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Print(`Usage: agentgw <start|login|qr|version|help>
+	fmt.Print(`Usage: agentgw <start|login|logout|qr|version|help>
 
 Commands:
   start    Start the gateway server
-  login    Authenticate with OpenSSO and save token locally
+  login    Register with tunnelhub and save credentials locally
+  logout   Unregister from tunnelhub and delete local credentials
   qr       Print connection QR code to terminal now
   version  Show version
   help     Show this help message
 
 Start flags:
-  --tunnel-url string    Tunnel hub URL (overrides AGENTGW_TUNNEL_URL)
-  --tunnel-token string  Tunnel auth token (overrides AGENTGW_TUNNEL_TOKEN)
-  --app-url string       App-facing hub URL for QR code, if different from tunnel-url (overrides AGENTGW_APP_URL)
+  --hub string           Tunnelhub base URL, auto-constructs tunnel-url from saved credentials (env AGENTGW_HUB)
+  --tunnel-url string    Full tunnel hub URL, overrides --hub (env AGENTGW_TUNNEL_URL)
+  --tunnel-token string  Tunnel auth token, overrides saved credentials (env AGENTGW_TUNNEL_TOKEN)
+  --app-url string       App-facing hub URL for QR code (env AGENTGW_APP_URL)
   --qr                   Print connection QR code to terminal after startup
 
+Login flags:
+  --hub string           Tunnelhub base URL for registration (env AGENTGW_TUNNEL_URL)
+
+Quick start:
+  agentgw login --hub wss://domain:8443
+  agentgw start --hub wss://domain:8443 --qr
+
 Environment:
-  AGENTGW_TUNNEL_URL    Tunnel hub URL
+  AGENTGW_HUB           Tunnelhub base URL (used by both login and start)
+  AGENTGW_TUNNEL_URL    Full tunnel hub URL (overrides AGENTGW_HUB)
   AGENTGW_TUNNEL_TOKEN  Tunnel auth token
   AGENTGW_APP_URL       App-facing hub URL (e.g. wss://domain:8443/ws for SNI bypass)
 `)
@@ -154,7 +174,7 @@ func checkToken(r *http.Request, token string) bool {
 	return t == token
 }
 
-func runServer(tunnelURLFlag, tunnelTokenFlag, appURLFlag string, showQR bool) {
+func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, showQR bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -207,29 +227,47 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, appURLFlag string, showQR bool) {
 	mgr.ConnectAll()
 
 	// Start reverse tunnel client if configured.
+	// Tunnel token is embedded into the URL query so that URL + token
+	// travel together as a single unit (e.g. ?token=xxx).
 	tunnelURL := tunnelURLFlag
 	if tunnelURL == "" {
 		tunnelURL = os.Getenv("AGENTGW_TUNNEL_URL")
 	}
-	tunnelToken := tunnelTokenFlag
-	if tunnelToken == "" {
-		tunnelToken = os.Getenv("AGENTGW_TUNNEL_TOKEN")
+
+	// Auto-load credentials from local_auth.json for --hub mode
+	var localAuth *oauth.LocalAuth
+	if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil {
+		localAuth = la
 	}
-	if tunnelToken == "" {
-		if lr, err := oauth.LoadLoginResult(oauth.TokenFilePath()); err == nil && lr.AccessToken != "" {
-			tunnelToken = lr.AccessToken
-			log.Printf("[agentgw] loaded tunnel token from oauth.json for user=%s", lr.UserID)
-		}
+
+	// Resolve tunnel token
+	tunnelToken := ""
+	if localAuth != nil && localAuth.Token != "" {
+		tunnelToken = localAuth.Token
+	} else if lr, err := oauth.LoadLoginResult(oauth.TokenFilePath()); err == nil && lr.AccessToken != "" {
+		tunnelToken = lr.AccessToken
 	}
-	if tunnelToken == "" {
-		if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil && la.Token != "" {
-			tunnelToken = la.Token
-			log.Printf("[agentgw] loaded tunnel token from local_auth.json for user=%s", la.UserID)
-		}
+
+	// Auto-construct tunnel URL from --hub + userId if --tunnel-url not given
+	hubBase := hubBaseFlag
+	if hubBase == "" {
+		hubBase = os.Getenv("AGENTGW_HUB")
 	}
+	if tunnelURL == "" && hubBase != "" && localAuth != nil {
+		tunnelURL = strings.TrimRight(hubBase, "/") + "/api/v1/stream"
+		log.Printf("[agentgw] constructed tunnel URL: %s", tunnelURL)
+	}
+
+	// Auto-construct app URL from hub base if not given
+	if appURLFlag == "" && hubBase != "" {
+		appURLFlag = strings.TrimRight(hubBase, "/") + "/api/v1/ws"
+		log.Printf("[agentgw] constructed app URL: %s", appURLFlag)
+	}
+
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
 	if tunnelURL != "" {
 		restartTunnel(tunnelURL, tunnelToken, localAddr, cfg.Token)
+		currentTunnelToken = tunnelToken
 	}
 
 	// Admin endpoint to get or hot-update tunnel URL without restarting agentgw.
@@ -324,12 +362,16 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, appURLFlag string, showQR bool) {
 	}
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
+	userID := ""
+	if localAuth != nil {
+		userID = localAuth.UserID
+	}
 	if showQR {
-		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag)
+		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag, userID)
 	}
 
 	// Handle on-demand QR requests via SIGUSR1.
-	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag)
+	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag, userID)
 
 	err = http.Serve(ln, nil)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -439,7 +481,32 @@ func findStaticDir() string {
 	return ""
 }
 
-func printQRCode(port int, token, tunnelURL, tunnelToken, appURL string) {
+func buildRemoteQRURL(tunnelURL, appURL, userID string) string {
+	if tunnelURL == "" {
+		return ""
+	}
+
+	urlToParse := appURL
+	if urlToParse == "" {
+		urlToParse = tunnelURL
+	}
+	u, err := url.Parse(urlToParse)
+	if err != nil {
+		return ""
+	}
+
+	if userID == "" {
+		userID = "default"
+	}
+
+	scheme := "wss"
+	if u.Scheme == "ws" {
+		scheme = "ws"
+	}
+	return fmt.Sprintf("%s://%s/api/v1/ws/%s", scheme, u.Host, userID)
+}
+
+func printQRCode(port int, token, tunnelURL, tunnelToken, appURL, userID string) {
 	localIP := getLocalIP()
 	if localIP == "" {
 		fmt.Println("Unable to determine local IP address")
@@ -448,27 +515,8 @@ func printQRCode(port int, token, tunnelURL, tunnelToken, appURL string) {
 	localURL := fmt.Sprintf("ws://%s:%d/ws|%s", localIP, port, token)
 	urls := []string{localURL}
 	if tunnelURL != "" && tunnelToken != "" {
-		// Use appURL if provided, otherwise fall back to tunnelURL
-		urlToParse := appURL
-		if urlToParse == "" {
-			urlToParse = tunnelURL
-		}
-		u, err := url.Parse(urlToParse)
-		if err == nil {
-			// Extract userId from tunnelURL (not appURL, as appURL might be IP-based)
-			tunnelU, _ := url.Parse(tunnelURL)
-			userID := "default"
-			if tunnelU != nil {
-				if uid := tunnelU.Query().Get("userId"); uid != "" {
-					userID = uid
-				}
-			}
-			scheme := "wss"
-			if u.Scheme == "ws" {
-				scheme = "ws"
-			}
-			remoteURL := fmt.Sprintf("%s://%s/ws/%s|%s", scheme, u.Host, userID, tunnelToken)
-			urls = append(urls, remoteURL)
+		if remoteURL := buildRemoteQRURL(tunnelURL, appURL, userID); remoteURL != "" {
+			urls = append(urls, remoteURL+"|"+tunnelToken)
 		}
 	}
 	for i, qrURL := range urls {
@@ -507,7 +555,11 @@ func printQRFromConfig(tunnelURL, tunnelToken, appURL string) {
 			tunnelToken = tok
 		}
 	}
-	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURL)
+	userID := ""
+	if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil {
+		userID = la.UserID
+	}
+	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURL, userID)
 }
 
 func fetchTunnelConfigFromRunningServer(port int, token string) (string, string) {
@@ -535,11 +587,11 @@ func fetchTunnelConfigFromRunningServer(port int, token string) (string, string)
 	return body.TunnelURL, body.TunnelToken
 }
 
-func handleQRSignals(port int, token, tunnelURL, tunnelToken, appURL string) {
+func handleQRSignals(port int, token, tunnelURL, tunnelToken, appURL, userID string) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGUSR1)
 	for range ch {
-		printQRCode(port, token, tunnelURL, tunnelToken, appURL)
+		printQRCode(port, token, tunnelURL, tunnelToken, appURL, userID)
 	}
 }
 
