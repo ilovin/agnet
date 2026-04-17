@@ -17,11 +17,62 @@ AGENTGW_DIR="./agentgw"
 AGENTAPP_DIR="./agentapp"
 LOCAL_BIN="$AGENTD_DIR/agentd"
 LINUX_BIN="$AGENTD_DIR/agentd-linux"
+GW_BIN="$AGENTGW_DIR/agentgw"
+GW_LINUX_BIN="$AGENTGW_DIR/agentgw-linux"
 APK_OUTPUT="$AGENTGW_DIR/agentapp.apk"
 IPA_OUTPUT="$AGENTGW_DIR/agentapp.ipa"
 WEB_STATIC_DIR="$AGENTGW_DIR/static"
 REMOTE_HOST="${REMOTE_HOST:-ws}"
 REMOTE_LOG="/tmp/agentd.log"
+
+binary_hash_file() {
+    local output="$1"
+    echo "${output}.buildhash"
+}
+
+compute_source_hash() {
+    python3 - "$@" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+paths = [pathlib.Path(p) for p in sys.argv[1:]]
+files = []
+for root in paths:
+    if root.is_file():
+        files.append(root)
+        continue
+    if root.is_dir():
+        for path in root.rglob('*'):
+            if path.is_file() and path.suffix in {'.go'}:
+                files.append(path)
+for path in sorted(set(files), key=lambda p: str(p)):
+    rel = str(path).replace('\\', '/')
+    sys.stdout.write(rel + '\n')
+    with path.open('rb') as f:
+        sys.stdout.flush()
+        data = f.read()
+    sys.stdout.buffer.write(data)
+PY
+}
+
+binary_up_to_date() {
+    local output="$1"
+    shift
+    [[ -f "$output" ]] || return 1
+    local hash_file expected actual
+    hash_file="$(binary_hash_file "$output")"
+    [[ -f "$hash_file" ]] || return 1
+    expected="$(<"$hash_file")"
+    actual="$(compute_source_hash "$@" | shasum -a 256 | awk '{print $1}')"
+    [[ -n "$expected" && "$expected" == "$actual" ]]
+}
+
+record_binary_hash() {
+    local output="$1"
+    shift
+    compute_source_hash "$@" | shasum -a 256 | awk '{print $1}' > "$(binary_hash_file "$output")"
+}
 
 # Check if an output file is up-to-date versus its source files.
 # Usage: up_to_date <output> <find_args...>
@@ -41,21 +92,22 @@ Usage: ./scripts/deploy.sh [TARGET]
 Build and deploy agentd / agentgw / agentapp for development.
 After building APK & IPA, automatically detects connected mobile devices
 and installs the artifacts (Android via adb, iOS via ios-deploy).
+Go binaries are rebuilt only when the source-content hash changes.
 
 TARGETS:
-  all              Build macOS + Linux + APK + IPA, deploy local + remote, restart agentgw (default)
-  build            Build agentd (macOS + Linux), APK and IPA; auto-install to connected devices
-  local            Build macOS agentd, restart local agentd, restart agentgw
-  ws               Build Linux agentd, deploy to remote \$REMOTE_HOST, restart agentgw
+  all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
+  build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
+  local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
+  ws               Build Linux agentd, deploy to remote $REMOTE_HOST, restart agentgw
   apk              Build APK only and auto-install to connected Android devices
   ipa              Build IPA only and auto-install to connected iOS devices
-  flutter-android  Use \`flutter install\` to flash Android (auto-detects device)
-  flutter-ios      Use \`flutter install\` to flash iOS (auto-detects device)
+  flutter-android  Use `flutter install` to flash Android (auto-detects device)
+  flutter-ios      Use `flutter install` to flash iOS (auto-detects device)
   sim              Build and install to iOS Simulator via xcrun simctl
   cfgutil          Install existing IPA via Apple Configurator 2 (cfgutil)
   web              Build Flutter Web and copy to agentgw/static
   mobile           Install existing APK/IPA to connected devices without rebuilding
-  gw               Restart agentgw only
+  gw               Build and restart agentgw only
   help             Show this help message
 
 ENVIRONMENT:
@@ -88,23 +140,47 @@ EOF
 }
 
 build_mac() {
-    if up_to_date "$LOCAL_BIN" agentd -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \); then
+    if binary_up_to_date "$LOCAL_BIN" agentd agentd/go.mod agentd/go.sum; then
         echo "[deploy] macOS binary up-to-date, skipping build"
         return 0
     fi
     echo "[deploy] Building agentd for macOS..."
     (cd "$AGENTD_DIR" && go build -o agentd ./cmd/agentd/)
+    record_binary_hash "$LOCAL_BIN" agentd agentd/go.mod agentd/go.sum
     echo "[deploy] macOS binary: $(ls -lh "$LOCAL_BIN" | awk '{print $5}')"
 }
 
 build_linux() {
-    if up_to_date "$LINUX_BIN" agentd -type f \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \); then
+    if binary_up_to_date "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum; then
         echo "[deploy] Linux binary up-to-date, skipping build"
         return 0
     fi
     echo "[deploy] Building agentd for Linux amd64..."
     (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -o agentd-linux ./cmd/agentd/)
+    record_binary_hash "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum
     echo "[deploy] Linux binary: $(ls -lh "$LINUX_BIN" | awk '{print $5}')"
+}
+
+build_gw_mac() {
+    if binary_up_to_date "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
+        echo "[deploy] macOS gw binary up-to-date, skipping build"
+        return 0
+    fi
+    echo "[deploy] Building agentgw for macOS..."
+    (cd "$AGENTGW_DIR" && go build -o agentgw ./cmd/agentgw/)
+    record_binary_hash "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum
+    echo "[deploy] macOS gw binary: $(ls -lh "$GW_BIN" | awk '{print $5}')"
+}
+
+build_gw_linux() {
+    if binary_up_to_date "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
+        echo "[deploy] Linux gw binary up-to-date, skipping build"
+        return 0
+    fi
+    echo "[deploy] Building agentgw for Linux amd64..."
+    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o agentgw-linux ./cmd/agentgw/)
+    record_binary_hash "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum
+    echo "[deploy] Linux gw binary: $(ls -lh "$GW_LINUX_BIN" | awk '{print $5}')"
 }
 
 build_apk() {
@@ -361,20 +437,25 @@ deploy_mobile() {
 }
 
 build_all() {
-    # Build macOS, Linux, APK, IPA and Web in parallel
-    local mac_pid linux_pid apk_pid ipa_pid web_pid mac_ok=0 linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0
+    # Build agentd, agentgw, APK, IPA and Web in parallel
+    local mac_pid linux_pid gw_mac_pid gw_linux_pid apk_pid ipa_pid web_pid
+    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0
     build_mac & mac_pid=$!
     build_linux & linux_pid=$!
+    build_gw_mac & gw_mac_pid=$!
+    build_gw_linux & gw_linux_pid=$!
     build_apk & apk_pid=$!
     build_ipa & ipa_pid=$!
     build_web & web_pid=$!
     wait "$mac_pid" && mac_ok=1 || true
     wait "$linux_pid" && linux_ok=1 || true
+    wait "$gw_mac_pid" && gw_mac_ok=1 || true
+    wait "$gw_linux_pid" && gw_linux_ok=1 || true
     wait "$apk_pid" && apk_ok=1 || true
     wait "$ipa_pid" && ipa_ok=1 || true
     wait "$web_pid" && web_ok=1 || true
-    echo "[deploy] Build results: mac=$mac_ok linux=$linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok"
-    [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $apk_ok -eq 1 ]]
+    echo "[deploy] Build results: mac=$mac_ok linux=$linux_ok gw_mac=$gw_mac_ok gw_linux=$gw_linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok"
+    [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_ok -eq 1 && $apk_ok -eq 1 ]]
 }
 
 deploy_local() {
@@ -445,6 +526,7 @@ deploy_all() {
 }
 
 restart_agentgw() {
+    build_gw_mac
     build_web
     echo "[deploy] Restarting agentgw (to reconnect WS tunnels to agentd)..."
     pkill -f "agentgw start" 2>/dev/null || true
@@ -500,6 +582,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         local)
             build_mac
+            build_gw_mac
             deploy_local
             restart_agentgw
             ;;
@@ -509,6 +592,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             restart_agentgw
             ;;
         gw)
+            build_gw_mac
             restart_agentgw
             ;;
         all)
