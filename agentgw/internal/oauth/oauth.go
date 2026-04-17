@@ -242,6 +242,15 @@ func (c Config) fetchProfile(accessToken string) (*Profile, error) {
 		return nil, fmt.Errorf("profile request failed (%d): %s", resp.StatusCode, string(body))
 	}
 
+	// The profile API may return HTTP 200 with an error JSON.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("parse profile: %w", err)
+	}
+	if errMsg, ok := raw["error"].(string); ok && errMsg != "" {
+		return nil, fmt.Errorf("profile api error: %s", errMsg)
+	}
+
 	var p Profile
 	if err := json.Unmarshal(body, &p); err != nil {
 		return nil, fmt.Errorf("parse profile: %w", err)
