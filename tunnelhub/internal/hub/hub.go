@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/phone-talk/tunnelhub/internal/sso"
 )
 
 var upgrader = websocket.Upgrader{
@@ -22,16 +23,47 @@ type tunnelEntry struct {
 
 // Hub bridges agentapp connections to local agentgw via reverse tunnels.
 type Hub struct {
-	mu      sync.RWMutex
-	tunnels map[string]*tunnelEntry // userID -> agentgw reverse ws
-	users   map[string]string       // userID -> password
+	mu        sync.RWMutex
+	tunnels   map[string]*tunnelEntry // userID -> agentgw reverse ws
+	users     map[string]string       // userID -> password (local mode)
+	validator *sso.Validator          // nil when OpenSSO is disabled
 }
 
-func New(users map[string]string) *Hub {
+func New(users map[string]string, validator *sso.Validator) *Hub {
 	return &Hub{
-		tunnels: make(map[string]*tunnelEntry),
-		users:   users,
+		tunnels:   make(map[string]*tunnelEntry),
+		users:     users,
+		validator: validator,
 	}
+}
+
+// auth validates the request and returns the resolved userID.
+func (h *Hub) auth(r *http.Request) (string, bool) {
+	token := extractToken(r)
+	if token == "" {
+		return "", false
+	}
+
+	// OpenSSO mode takes precedence when configured.
+	if h.validator != nil {
+		profile, err := h.validator.Validate(token)
+		if err != nil {
+			log.Printf("[Hub] sso validation failed: %v", err)
+			return "", false
+		}
+		return profile.UserID, true
+	}
+
+	// Fallback to local static user map (LAN / simple mode).
+	userID := r.URL.Query().Get("userId")
+	if userID == "" {
+		userID = "default"
+	}
+	pass, ok := h.users[userID]
+	if !ok || token != pass {
+		return "", false
+	}
+	return userID, true
 }
 
 // RegisterTunnel handles the outbound WebSocket from user-local agentgw.
@@ -127,14 +159,31 @@ func (h *Hub) BridgeApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := r.URL.Query().Get("token")
+	token := extractToken(r)
 	if token == "" {
-		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	}
-	pass, ok := h.users[userID]
-	if !ok || token != pass {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+
+	// OpenSSO mode
+	if h.validator != nil {
+		profile, err := h.validator.Validate(token)
+		if err != nil {
+			log.Printf("[Hub] app sso validation failed: %v", err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if profile.UserID != userID {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		// Local static mode
+		pass, ok := h.users[userID]
+		if !ok || token != pass {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	h.mu.RLock()
@@ -182,21 +231,10 @@ func (h *Hub) BridgeApp(w http.ResponseWriter, r *http.Request) {
 	entry.mu.Unlock()
 }
 
-func (h *Hub) auth(r *http.Request) (string, bool) {
+func extractToken(r *http.Request) string {
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		token = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	}
-	userID := r.URL.Query().Get("userId")
-	if userID == "" {
-		userID = "default"
-	}
-	pass, ok := h.users[userID]
-	if !ok {
-		return "", false
-	}
-	if token != pass {
-		return "", false
-	}
-	return userID, true
+	return token
 }

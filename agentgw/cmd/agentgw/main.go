@@ -21,6 +21,7 @@ import (
 	"github.com/phone-talk/agentgw/internal/config"
 	"github.com/phone-talk/agentgw/internal/node"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
+	"github.com/phone-talk/agentgw/internal/oauth"
 	"github.com/phone-talk/agentgw/internal/tunnel"
 	"github.com/phone-talk/agentgw/internal/ws"
 	"github.com/skip2/go-qrcode"
@@ -73,6 +74,20 @@ func main() {
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
 		fs.Parse(args[1:])
 		printQRFromConfig(*tunnelURL, *tunnelToken)
+	case "login":
+		fs := flag.NewFlagSet("login", flag.ExitOnError)
+		fs.Parse(args[1:])
+		cfg := oauth.DefaultConfig()
+		result, err := oauth.DoLogin(cfg)
+		if err != nil {
+			log.Fatalf("login failed: %v", err)
+		}
+		path := oauth.TokenFilePath()
+		if err := result.Save(path); err != nil {
+			log.Fatalf("save token: %v", err)
+		}
+		fmt.Printf("Login successful! userId=%s\n", result.UserID)
+		fmt.Printf("Token saved to: %s\n", path)
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
@@ -84,10 +99,11 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Print(`Usage: agentgw <start|qr|version|help>
+	fmt.Print(`Usage: agentgw <start|login|qr|version|help>
 
 Commands:
   start    Start the gateway server
+  login    Authenticate with OpenSSO and save token locally
   qr       Print connection QR code to terminal now
   version  Show version
   help     Show this help message
@@ -182,6 +198,12 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 	tunnelToken := tunnelTokenFlag
 	if tunnelToken == "" {
 		tunnelToken = os.Getenv("AGENTGW_TUNNEL_TOKEN")
+	}
+	if tunnelToken == "" {
+		if lr, err := oauth.LoadLoginResult(oauth.TokenFilePath()); err == nil && lr.AccessToken != "" {
+			tunnelToken = lr.AccessToken
+			log.Printf("[agentgw] loaded tunnel token from oauth.json for user=%s", lr.UserID)
+		}
 	}
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
 	if tunnelURL != "" {

@@ -15,17 +15,21 @@ spec:
     spec:
       containers:
         - name: tunnelhub
-          image: adas-img.nioint.com/aa-perception/tunnelhub:v0.0.2
+          image: adas-img.nioint.com/aa-perception/tunnelhub:v0.0.3
           ports:
             - containerPort: 7374
           env:
             - name: PORT
               value: "7374"
+            - name: OPENSSO_PROFILE_URL
+              value: "https://signin.nio.com/oauth2/profile"
+            # Optional: keep local fallback users for emergency access
             - name: USERS
               valueFrom:
                 secretKeyRef:
                   name: phonetalk-tunnelhub-secret
                   key: users
+                  optional: true
           resources:
             requests:
               memory: "64Mi"

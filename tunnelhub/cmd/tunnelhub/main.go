@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/phone-talk/tunnelhub/internal/hub"
+	"github.com/phone-talk/tunnelhub/internal/sso"
 )
 
 func parseUsers(s string) map[string]string {
@@ -40,7 +41,13 @@ func main() {
 		users = map[string]string{"default": secret}
 	}
 
-	h := hub.New(users)
+	var validator *sso.Validator
+	if os.Getenv("OPENSSO_PROFILE_URL") != "" {
+		validator = sso.NewValidator()
+		log.Println("[tunnelhub] OpenSSO validation enabled")
+	}
+
+	h := hub.New(users, validator)
 
 	// agentgw local outbound connections
 	http.HandleFunc("/tunnel/register", h.RegisterTunnel)
