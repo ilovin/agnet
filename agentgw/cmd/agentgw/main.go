@@ -65,29 +65,43 @@ func main() {
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
+		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		showQR := fs.Bool("qr", false, "print connection QR code to terminal after startup")
 		fs.Parse(args[1:])
-		runServer(*tunnelURL, *tunnelToken, *showQR)
+		runServer(*tunnelURL, *tunnelToken, *appURL, *showQR)
 	case "qr":
 		fs := flag.NewFlagSet("qr", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
+		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		fs.Parse(args[1:])
-		printQRFromConfig(*tunnelURL, *tunnelToken)
+		printQRFromConfig(*tunnelURL, *tunnelToken, *appURL)
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
 		fs.Parse(args[1:])
-		cfg := oauth.DefaultConfig()
-		result, err := oauth.DoLogin(cfg)
-		if err != nil {
-			log.Fatalf("login failed: %v", err)
+		if os.Getenv("OPENSSO_CLIENT_ID") != "" {
+			cfg := oauth.DefaultConfig()
+			result, err := oauth.DoLogin(cfg)
+			if err != nil {
+				log.Fatalf("login failed: %v", err)
+			}
+			path := oauth.TokenFilePath()
+			if err := result.Save(path); err != nil {
+				log.Fatalf("save token: %v", err)
+			}
+			fmt.Printf("Login successful! userId=%s\n", result.UserID)
+			fmt.Printf("Token saved to: %s\n", path)
+		} else {
+			auth, err := oauth.DoLocalLogin()
+			if err != nil {
+				log.Fatalf("login failed: %v", err)
+			}
+			fmt.Printf("\nLocal login credentials:\n")
+			fmt.Printf("  userId: %s\n", auth.UserID)
+			fmt.Printf("  token:  %s\n", auth.Token)
+			fmt.Printf("Saved to: %s\n", oauth.LocalAuthFilePath())
+			fmt.Println("\nUse these values in the app to connect.")
 		}
-		path := oauth.TokenFilePath()
-		if err := result.Save(path); err != nil {
-			log.Fatalf("save token: %v", err)
-		}
-		fmt.Printf("Login successful! userId=%s\n", result.UserID)
-		fmt.Printf("Token saved to: %s\n", path)
 	case "version":
 		fmt.Println("agentgw v0.1.0")
 	case "help", "--help", "-h":
@@ -111,11 +125,13 @@ Commands:
 Start flags:
   --tunnel-url string    Tunnel hub URL (overrides AGENTGW_TUNNEL_URL)
   --tunnel-token string  Tunnel auth token (overrides AGENTGW_TUNNEL_TOKEN)
+  --app-url string       App-facing hub URL for QR code, if different from tunnel-url (overrides AGENTGW_APP_URL)
   --qr                   Print connection QR code to terminal after startup
 
 Environment:
   AGENTGW_TUNNEL_URL    Tunnel hub URL
   AGENTGW_TUNNEL_TOKEN  Tunnel auth token
+  AGENTGW_APP_URL       App-facing hub URL (e.g. wss://domain:8443/ws for SNI bypass)
 `)
 }
 
@@ -138,7 +154,7 @@ func checkToken(r *http.Request, token string) bool {
 	return t == token
 }
 
-func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
+func runServer(tunnelURLFlag, tunnelTokenFlag, appURLFlag string, showQR bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -203,6 +219,12 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 		if lr, err := oauth.LoadLoginResult(oauth.TokenFilePath()); err == nil && lr.AccessToken != "" {
 			tunnelToken = lr.AccessToken
 			log.Printf("[agentgw] loaded tunnel token from oauth.json for user=%s", lr.UserID)
+		}
+	}
+	if tunnelToken == "" {
+		if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil && la.Token != "" {
+			tunnelToken = la.Token
+			log.Printf("[agentgw] loaded tunnel token from local_auth.json for user=%s", la.UserID)
 		}
 	}
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
@@ -303,11 +325,11 @@ func runServer(tunnelURLFlag, tunnelTokenFlag string, showQR bool) {
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
 	if showQR {
-		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
+		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag)
 	}
 
 	// Handle on-demand QR requests via SIGUSR1.
-	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
+	go handleQRSignals(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag)
 
 	err = http.Serve(ln, nil)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -417,7 +439,7 @@ func findStaticDir() string {
 	return ""
 }
 
-func printQRCode(port int, token, tunnelURL, tunnelToken string) {
+func printQRCode(port int, token, tunnelURL, tunnelToken, appURL string) {
 	localIP := getLocalIP()
 	if localIP == "" {
 		fmt.Println("Unable to determine local IP address")
@@ -426,11 +448,20 @@ func printQRCode(port int, token, tunnelURL, tunnelToken string) {
 	localURL := fmt.Sprintf("ws://%s:%d/ws|%s", localIP, port, token)
 	urls := []string{localURL}
 	if tunnelURL != "" && tunnelToken != "" {
-		u, err := url.Parse(tunnelURL)
+		// Use appURL if provided, otherwise fall back to tunnelURL
+		urlToParse := appURL
+		if urlToParse == "" {
+			urlToParse = tunnelURL
+		}
+		u, err := url.Parse(urlToParse)
 		if err == nil {
-			userID := u.Query().Get("userId")
-			if userID == "" {
-				userID = "default"
+			// Extract userId from tunnelURL (not appURL, as appURL might be IP-based)
+			tunnelU, _ := url.Parse(tunnelURL)
+			userID := "default"
+			if tunnelU != nil {
+				if uid := tunnelU.Query().Get("userId"); uid != "" {
+					userID = uid
+				}
 			}
 			scheme := "wss"
 			if u.Scheme == "ws" {
@@ -457,7 +488,7 @@ func printQRCode(port int, token, tunnelURL, tunnelToken string) {
 	fmt.Println()
 }
 
-func printQRFromConfig(tunnelURL, tunnelToken string) {
+func printQRFromConfig(tunnelURL, tunnelToken, appURL string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -476,7 +507,7 @@ func printQRFromConfig(tunnelURL, tunnelToken string) {
 			tunnelToken = tok
 		}
 	}
-	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken)
+	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURL)
 }
 
 func fetchTunnelConfigFromRunningServer(port int, token string) (string, string) {
@@ -504,11 +535,11 @@ func fetchTunnelConfigFromRunningServer(port int, token string) (string, string)
 	return body.TunnelURL, body.TunnelToken
 }
 
-func handleQRSignals(port int, token, tunnelURL, tunnelToken string) {
+func handleQRSignals(port int, token, tunnelURL, tunnelToken, appURL string) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGUSR1)
 	for range ch {
-		printQRCode(port, token, tunnelURL, tunnelToken)
+		printQRCode(port, token, tunnelURL, tunnelToken, appURL)
 	}
 }
 

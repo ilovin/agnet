@@ -112,10 +112,13 @@ func (c *Client) runOnce() error {
 		for {
 			t, data, err := conn.ReadMessage()
 			if err != nil {
+				log.Printf("[Tunnel] hub→local read error: %v", err)
 				errCh <- err
 				return
 			}
+			log.Printf("[Tunnel] hub→local type=%d len=%d", t, len(data))
 			if err := localConn.WriteMessage(t, data); err != nil {
+				log.Printf("[Tunnel] local write error: %v", err)
 				errCh <- err
 				return
 			}
@@ -125,10 +128,13 @@ func (c *Client) runOnce() error {
 		for {
 			t, data, err := localConn.ReadMessage()
 			if err != nil {
+				log.Printf("[Tunnel] local→hub read error: %v", err)
 				errCh <- err
 				return
 			}
+			log.Printf("[Tunnel] local→hub type=%d len=%d", t, len(data))
 			if err := conn.WriteMessage(t, data); err != nil {
+				log.Printf("[Tunnel] hub write error: %v", err)
 				errCh <- err
 				return
 			}

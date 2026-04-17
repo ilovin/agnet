@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:developer' as dev;
+import 'dart:io';
 import 'dart:math';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 
 /// A single JSON-RPC message received from the server.
 /// Can be a response (has id + result/error) or a push event (has method, no id).
@@ -95,9 +98,27 @@ class WsClient {
     ChannelConnector? channelConnector,
     ReconnectBackoff? backoff,
     ReconnectTimerFactory? reconnectTimerFactory,
-  }) : _channelConnector = channelConnector ?? WebSocketChannel.connect,
+  }) : _channelConnector = channelConnector ?? _defaultConnector,
        _backoff = backoff ?? ReconnectBackoff(),
        _reconnectTimerFactory = reconnectTimerFactory ?? _defaultReconnectTimerFactory;
+
+  static WebSocketChannel _defaultConnector(Uri uri) {
+    final client = HttpClient();
+    client.badCertificateCallback = (_, __, ___) => true;
+    return IOWebSocketChannel.connect(uri, customClient: client);
+  }
+
+  /// Resolve domain to IP for wss:// on port 8443 to bypass SNI-based DPI blocking.
+  static Future<Uri> _resolveIfNeeded(Uri uri) async {
+    if (uri.scheme != 'wss' || uri.port != 8443) return uri;
+    try {
+      final addresses = await InternetAddress.lookup(uri.host);
+      if (addresses.isNotEmpty) {
+        return uri.replace(host: addresses.first.address);
+      }
+    } catch (_) {}
+    return uri;
+  }
 
   /// Connect and start listening. Reconnects automatically on disconnect.
   Future<void> connect({Duration timeout = const Duration(seconds: 15)}) async {
@@ -108,7 +129,9 @@ class WsClient {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     try {
-      final uri = Uri.parse(url).replace(queryParameters: {'token': token});
+      var uri = Uri.parse(url).replace(queryParameters: {'token': token});
+      // Resolve domain to IP for port 8443 to bypass SNI-based DPI blocking
+      uri = await _resolveIfNeeded(uri);
       final channel = _channelConnector(uri);
       _channel = channel;
       await channel.ready.timeout(
@@ -127,11 +150,18 @@ class WsClient {
 
       _sub = channel.stream.listen(
         _onData,
-        onError: (_) => _scheduleReconnect(),
-        onDone: _scheduleReconnect,
+        onError: (err) {
+          dev.log('[WsClient] stream error: $err');
+          _scheduleReconnect();
+        },
+        onDone: () {
+          dev.log('[WsClient] stream done, connected=$_connected');
+          _scheduleReconnect();
+        },
         cancelOnError: true,
       );
     } catch (e) {
+      dev.log('[WsClient] connect error: $e');
       _reconnecting = false;
       _scheduleReconnect();
       // Rethrow so callers know the initial connection failed.
@@ -140,10 +170,12 @@ class WsClient {
   }
 
   void _onData(dynamic raw) {
+    dev.log('[WsClient] onData: ${raw.runtimeType} len=${raw is String ? raw.length : '?'}');
     WsMessage msg;
     try {
       msg = parseMessage(raw as String);
-    } catch (_) {
+    } catch (e) {
+      dev.log('[WsClient] parse error: $e, raw=$raw');
       return;
     }
 
@@ -172,6 +204,7 @@ class WsClient {
     if (_disposed || _manualDisconnect) return;
     if (_reconnecting) return; // single-flight guard
     _reconnecting = true;
+    dev.log('[WsClient] scheduling reconnect in ${_backoff.next().inSeconds}s');
 
     _teardownTransport();
     _reconnectingCtrl.add(true);
