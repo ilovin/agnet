@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as dev;
-import 'dart:io';
 import 'dart:math';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
-import 'package:web_socket_channel/io.dart';
+
+import 'ws_connector.dart' as ws_connector;
 
 /// A single JSON-RPC message received from the server.
 /// Can be a response (has id + result/error) or a push event (has method, no id).
@@ -46,7 +46,7 @@ class ReconnectBackoff {
 }
 
 typedef EventCallback = void Function(WsMessage event);
-typedef ChannelConnector = WebSocketChannel Function(Uri uri);
+typedef ChannelConnector = WebSocketChannel Function(Uri uri, {Map<String, dynamic>? headers});
 typedef ReconnectTimerFactory = Timer Function(
   Duration delay,
   void Function() callback,
@@ -102,21 +102,13 @@ class WsClient {
        _backoff = backoff ?? ReconnectBackoff(),
        _reconnectTimerFactory = reconnectTimerFactory ?? _defaultReconnectTimerFactory;
 
-  static WebSocketChannel _defaultConnector(Uri uri) {
-    final client = HttpClient();
-    client.badCertificateCallback = (_, __, ___) => true;
-    return IOWebSocketChannel.connect(uri, customClient: client);
+  static WebSocketChannel _defaultConnector(Uri uri, {Map<String, dynamic>? headers}) {
+    return ws_connector.connect(uri, headers: headers);
   }
 
   /// Resolve domain to IP for wss:// on port 8443 to bypass SNI-based DPI blocking.
+  /// On web this is a no-op (browser handles DNS/SNI).
   static Future<Uri> _resolveIfNeeded(Uri uri) async {
-    if (uri.scheme != 'wss' || uri.port != 8443) return uri;
-    try {
-      final addresses = await InternetAddress.lookup(uri.host);
-      if (addresses.isNotEmpty) {
-        return uri.replace(host: addresses.first.address);
-      }
-    } catch (_) {}
     return uri;
   }
 
@@ -129,10 +121,12 @@ class WsClient {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     try {
-      var uri = Uri.parse(url).replace(queryParameters: {'token': token});
+      var uri = Uri.parse(url);
       // Resolve domain to IP for port 8443 to bypass SNI-based DPI blocking
       uri = await _resolveIfNeeded(uri);
-      final channel = _channelConnector(uri);
+      // Pass token via Authorization header (IO) or fallback to query (web)
+      final headers = {'Authorization': 'Bearer $token'};
+      final channel = _channelConnector(uri, headers: headers);
       _channel = channel;
       await channel.ready.timeout(
         timeout,

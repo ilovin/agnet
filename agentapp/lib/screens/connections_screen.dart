@@ -318,7 +318,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
     if ((lower.contains('websocket') && lower.contains('404')) ||
         lower.contains('404 not found') ||
         lower.contains('not upgraded to websocket')) {
-      return '连接失败：WebSocket 路径错误。请确认 URL 以 /ws 结尾。';
+      return '连接失败：WebSocket 路径错误。请确认 URL 以 /api/v1/ws 结尾。';
     }
 
     if (error is TimeoutException ||

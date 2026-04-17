@@ -54,12 +54,18 @@ class AgentApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
     return MaterialApp.router(
       title: 'Agent Manager',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        colorScheme: colorScheme,
         useMaterial3: true,
         fontFamily: 'Noto Sans SC',
+        textSelectionTheme: TextSelectionThemeData(
+          selectionColor: colorScheme.primary.withValues(alpha: 0.30),
+          cursorColor: colorScheme.primary,
+          selectionHandleColor: colorScheme.primary,
+        ),
       ),
       routerConfig: _router,
     );

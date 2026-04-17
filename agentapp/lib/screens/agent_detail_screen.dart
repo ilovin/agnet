@@ -2696,19 +2696,16 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
           ),
           const SizedBox(width: 8),
           Flexible(
-            child: InkWell(
+            child: GestureDetector(
               onTap: () {
                 widget.onToggle?.call();
                 setState(() => _expanded = !_expanded);
               },
-              borderRadius: BorderRadius.circular(8),
-              child: AnimatedCrossFade(
-                firstChild: _buildCollapsed(scheme),
-                secondChild: _buildExpanded(scheme),
-                crossFadeState: _expanded
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
+              child: AnimatedSize(
                 duration: const Duration(milliseconds: 200),
+                curve: Curves.easeInOut,
+                alignment: Alignment.topCenter,
+                child: _buildContent(scheme),
               ),
             ),
           ),
@@ -2717,54 +2714,8 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
     );
   }
 
-  Widget _buildCollapsed(ColorScheme scheme) {
+  Widget _buildContent(ColorScheme scheme) {
     final preview = widget.collapsedPreview?.trim() ?? '';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.chevron_right, size: 16, color: widget.color),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.header,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (preview.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    preview,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildExpanded(ColorScheme scheme) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -2777,24 +2728,46 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
         children: [
           Row(
             children: [
-              Icon(Icons.expand_more, size: 16, color: widget.color),
+              AnimatedRotation(
+                turns: _expanded ? 0.25 : 0,
+                duration: const Duration(milliseconds: 200),
+                child: Icon(Icons.chevron_right, size: 16, color: widget.color),
+              ),
               const SizedBox(width: 6),
-              Text(
-                widget.header,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w500,
+              Expanded(
+                child: Text(
+                  widget.header,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: scheme.onSurfaceVariant,
+                    fontWeight: _expanded ? FontWeight.w500 : FontWeight.normal,
+                  ),
+                  maxLines: _expanded ? null : 1,
+                  overflow: _expanded ? null : TextOverflow.ellipsis,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 6),
-          _MarkdownContent(
-            text: widget.content,
-            fontSize: 12,
-            textColor: scheme.onSurfaceVariant,
-          ),
+          if (!_expanded && preview.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              preview,
+              style: TextStyle(
+                fontSize: 12,
+                color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          if (_expanded) ...[
+            const SizedBox(height: 6),
+            _MarkdownContent(
+              text: widget.content,
+              fontSize: 12,
+              textColor: scheme.onSurfaceVariant,
+            ),
+          ],
         ],
       ),
     );
@@ -2967,6 +2940,16 @@ class _ActivityBlockState extends State<_ActivityBlock> {
     final scheme = Theme.of(context).colorScheme;
     final items = _parseActivities();
 
+    final latest = items.isNotEmpty ? items.last : null;
+    String preview = '助手活动';
+    if (latest != null) {
+      final tn = (latest['toolName'] as String?) ?? '';
+      final t = (latest['title'] as String?) ?? '';
+      preview = tn.isNotEmpty && t.isNotEmpty
+          ? '$tn: $t'
+          : (tn.isNotEmpty ? tn : t);
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
       child: Row(
@@ -2984,93 +2967,64 @@ class _ActivityBlockState extends State<_ActivityBlock> {
           ),
           const SizedBox(width: 8),
           Flexible(
-            child: InkWell(
+            child: GestureDetector(
               onTap: () {
                 widget.onToggle?.call();
                 setState(() => _expanded = !_expanded);
               },
-              borderRadius: BorderRadius.circular(12),
-              child: AnimatedCrossFade(
-                firstChild: _buildCollapsed(scheme, items),
-                secondChild: _buildExpanded(scheme, items),
-                crossFadeState: _expanded
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
+              child: AnimatedSize(
                 duration: const Duration(milliseconds: 200),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildCollapsed(ColorScheme scheme, List<Map<String, dynamic>> items) {
-    final latest = items.isNotEmpty ? items.last : null;
-    String preview = '助手活动';
-    if (latest != null) {
-      final tn = (latest['toolName'] as String?) ?? '';
-      final t = (latest['title'] as String?) ?? '';
-      preview = tn.isNotEmpty && t.isNotEmpty
-          ? '$tn: $t'
-          : (tn.isNotEmpty ? tn : t);
-    }
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.chevron_right, size: 16, color: scheme.primary),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              preview,
-              style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildExpanded(ColorScheme scheme, List<Map<String, dynamic>> items) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.expand_more, size: 16, color: scheme.primary),
-              const SizedBox(width: 6),
-              Text(
-                '助手活动',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: scheme.onSurfaceVariant,
-                  fontWeight: FontWeight.w600,
+                curve: Curves.easeInOut,
+                alignment: Alignment.topCenter,
+                child: Container(
+                  padding: _expanded
+                      ? const EdgeInsets.all(10)
+                      : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: scheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          AnimatedRotation(
+                            turns: _expanded ? 0.25 : 0,
+                            duration: const Duration(milliseconds: 200),
+                            child: Icon(Icons.chevron_right, size: 16, color: scheme.primary),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              _expanded ? '助手活动' : preview,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: scheme.onSurfaceVariant,
+                                fontWeight: _expanded ? FontWeight.w600 : FontWeight.normal,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (_expanded) ...[
+                        const SizedBox(height: 8),
+                        ...items.map(
+                          (item) => _ActivityCard(
+                            kind: (item['kind'] as String?) ?? 'activity',
+                            toolName: (item['toolName'] as String?) ?? '',
+                            title: (item['title'] as String?) ?? '',
+                            content: (item['content'] as String?) ?? '',
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          ...items.map(
-            (item) => _ActivityCard(
-              kind: (item['kind'] as String?) ?? 'activity',
-              toolName: (item['toolName'] as String?) ?? '',
-              title: (item['title'] as String?) ?? '',
-              content: (item['content'] as String?) ?? '',
             ),
           ),
         ],
