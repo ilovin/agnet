@@ -30,6 +30,7 @@ import (
 var activeTunnel *tunnel.Client
 var currentTunnelURL string
 var currentTunnelToken string
+var currentRealityCfg *tunnel.RealityConfig
 
 func restartTunnel(url, token, localAddr, localToken string) {
 	currentTunnelURL = url
@@ -39,6 +40,9 @@ func restartTunnel(url, token, localAddr, localToken string) {
 	}
 	if url != "" {
 		activeTunnel = tunnel.NewClient(url, token, localAddr, localToken)
+		if currentRealityCfg != nil {
+			activeTunnel.SetReality(currentRealityCfg)
+		}
 		go activeTunnel.Start()
 		log.Printf("[agentgw] tunnel client started: %s -> %s", url, localAddr)
 	} else {
@@ -67,9 +71,20 @@ func main() {
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
 		hubBase := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub base URL, e.g. wss://domain:8443 (env AGENTGW_HUB)")
 		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
+		realityPub := fs.String("reality-pub", os.Getenv("AGENTGW_REALITY_PUB"), "REALITY public key base64 (env AGENTGW_REALITY_PUB)")
+		realitySID := fs.String("reality-sid", os.Getenv("AGENTGW_REALITY_SID"), "REALITY short ID hex (env AGENTGW_REALITY_SID)")
+		realitySNI := fs.String("reality-sni", os.Getenv("AGENTGW_REALITY_SNI"), "REALITY server name (env AGENTGW_REALITY_SNI)")
 		showQR := fs.Bool("qr", false, "print connection QR code to terminal after startup")
 		fs.Parse(args[1:])
-		runServer(*tunnelURL, *tunnelToken, *hubBase, *appURL, *showQR)
+		var rcfg *tunnel.RealityConfig
+		if *realityPub != "" && *realitySNI != "" {
+			rcfg = &tunnel.RealityConfig{
+				PublicKey:   *realityPub,
+				ShortId:    *realitySID,
+				ServerName: *realitySNI,
+			}
+		}
+		runServer(*tunnelURL, *tunnelToken, *hubBase, *appURL, rcfg, *showQR)
 	case "qr":
 		fs := flag.NewFlagSet("qr", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
@@ -79,7 +94,7 @@ func main() {
 		printQRFromConfig(*tunnelURL, *tunnelToken, *appURL)
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
-		hubURL := fs.String("hub", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnelhub URL for registration (env AGENTGW_TUNNEL_URL)")
+		hubURL := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub URL for registration (env AGENTGW_HUB)")
 		fs.Parse(args[1:])
 		if os.Getenv("OPENSSO_CLIENT_ID") != "" {
 			cfg := oauth.DefaultConfig()
@@ -106,7 +121,7 @@ func main() {
 		}
 	case "logout":
 		fs := flag.NewFlagSet("logout", flag.ExitOnError)
-		hubURL := fs.String("hub", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnelhub URL for unregistration (env AGENTGW_TUNNEL_URL)")
+		hubURL := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub URL for unregistration (env AGENTGW_HUB)")
 		fs.Parse(args[1:])
 		if err := oauth.DoLocalLogout(*hubURL); err != nil {
 			log.Fatalf("logout failed: %v", err)
@@ -138,20 +153,29 @@ Start flags:
   --tunnel-url string    Full tunnel hub URL, overrides --hub (env AGENTGW_TUNNEL_URL)
   --tunnel-token string  Tunnel auth token, overrides saved credentials (env AGENTGW_TUNNEL_TOKEN)
   --app-url string       App-facing hub URL for QR code (env AGENTGW_APP_URL)
+  --reality-pub string   REALITY public key base64 (env AGENTGW_REALITY_PUB)
+  --reality-sid string   REALITY short ID hex (env AGENTGW_REALITY_SID)
+  --reality-sni string   REALITY server name / SNI (env AGENTGW_REALITY_SNI)
   --qr                   Print connection QR code to terminal after startup
 
 Login flags:
-  --hub string           Tunnelhub base URL for registration (env AGENTGW_TUNNEL_URL)
+  --hub string           Tunnelhub base URL for registration (env AGENTGW_HUB)
 
 Quick start:
-  agentgw login --hub wss://domain:8443
-  agentgw start --hub wss://domain:8443 --qr
+  agentgw login --hub https://ilovin.xyz:8443
+  agentgw start --hub https://ilovin.xyz:8443 --qr
+
+REALITY mode (anti-detection):
+  agentgw start --hub https://domain:443 \
+    --reality-pub <base64-key> --reality-sid <hex-id> --reality-sni www.bing.com --qr
 
 Environment:
   AGENTGW_HUB           Tunnelhub base URL (used by both login and start)
   AGENTGW_TUNNEL_URL    Full tunnel hub URL (overrides AGENTGW_HUB)
-  AGENTGW_TUNNEL_TOKEN  Tunnel auth token
-  AGENTGW_APP_URL       App-facing hub URL (e.g. wss://domain:8443/ws for SNI bypass)
+  AGENTGW_APP_URL       App-facing hub URL for QR code
+  AGENTGW_REALITY_PUB   REALITY public key (base64)
+  AGENTGW_REALITY_SID   REALITY short ID (hex)
+  AGENTGW_REALITY_SNI   REALITY server name for TLS SNI
 `)
 }
 
@@ -174,7 +198,7 @@ func checkToken(r *http.Request, token string) bool {
 	return t == token
 }
 
-func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, showQR bool) {
+func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, realityCfg *tunnel.RealityConfig, showQR bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
@@ -254,17 +278,21 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, s
 		hubBase = os.Getenv("AGENTGW_HUB")
 	}
 	if tunnelURL == "" && hubBase != "" && localAuth != nil {
-		tunnelURL = strings.TrimRight(hubBase, "/") + "/api/v1/stream"
+		tunnelURL = strings.TrimRight(hubBase, "/")
 		log.Printf("[agentgw] constructed tunnel URL: %s", tunnelURL)
 	}
 
 	// Auto-construct app URL from hub base if not given
 	if appURLFlag == "" && hubBase != "" {
-		appURLFlag = strings.TrimRight(hubBase, "/") + "/api/v1/ws"
+		appURLFlag = strings.TrimRight(hubBase, "/")
 		log.Printf("[agentgw] constructed app URL: %s", appURLFlag)
 	}
 
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
+	if realityCfg != nil {
+		currentRealityCfg = realityCfg
+		log.Printf("[agentgw] REALITY enabled (sni=%s)", realityCfg.ServerName)
+	}
 	if tunnelURL != "" {
 		restartTunnel(tunnelURL, tunnelToken, localAddr, cfg.Token)
 		currentTunnelToken = tunnelToken
@@ -503,7 +531,12 @@ func buildRemoteQRURL(tunnelURL, appURL, userID string) string {
 	if u.Scheme == "ws" {
 		scheme = "ws"
 	}
-	return fmt.Sprintf("%s://%s/api/v1/ws/%s", scheme, u.Host, userID)
+
+	// Strip port so the app connects on default HTTPS port (443) through Caddy,
+	// not directly to the tunnel port (e.g. 8443).
+	host := u.Hostname()
+
+	return fmt.Sprintf("%s://%s/ws/%s", scheme, host, userID)
 }
 
 func printQRCode(port int, token, tunnelURL, tunnelToken, appURL, userID string) {

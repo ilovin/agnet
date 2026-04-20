@@ -1075,10 +1075,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _showJumpToLatest = showJump;
       });
     }
+    // Trigger load-more when scrolled near the top
+    if (_scrollCtrl.offset < 200 && !_loadingOlder && _hasMoreHistory) {
+      _loadOlderHistory();
+    }
   }
 
+  static const _pageSize = 30;
+
   Future<void> _loadHistory() async {
-    if (_isLoadingFreshData) return; // Prevent concurrent loads
+    if (_isLoadingFreshData) return;
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
@@ -1090,8 +1096,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
-        'limit': 200,
-      });
+        'limit': _pageSize,
+      }, timeout: const Duration(seconds: 5));
       final raw = result is Map ? result : <String, dynamic>{};
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
@@ -1111,7 +1117,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             _oldestSeq = firstSeqFromResp > 0
                 ? firstSeqFromResp
                 : oldestConversationSeq(_rawEvents);
-            _hasMoreHistory = _oldestSeq > 1;
+            _hasMoreHistory = _oldestSeq > 1 && events.length >= _pageSize;
           } else {
             _oldestSeq = 0;
             _hasMoreHistory = false;
@@ -1133,6 +1139,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         setState(() {
           _initialLoading = false;
           _isLoadingFreshData = false;
+          if (_rawEvents.isEmpty) {
+            _lastError = '加载失败，点击重试';
+          }
         });
       }
     }
@@ -1185,7 +1194,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'nodeId': widget.nodeId,
         'agentId': widget.agentId,
         'before': _oldestSeq,
-        'limit': 200,
+        'limit': _pageSize,
       });
       final raw = result is Map ? result : <String, dynamic>{};
       final events = (raw['events'] as List?) ?? [];
@@ -1204,7 +1213,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       setState(() {
         _rawEvents = [...older, ..._rawEvents];
         _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? _oldestSeq);
-        _hasMoreHistory = _oldestSeq > 1 && older.length >= 200;
+        _hasMoreHistory = _oldestSeq > 1 && older.length >= _pageSize;
         _loadingOlder = false;
       });
       _touchMessageCache();
@@ -1824,6 +1833,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           'name': newName,
         });
         setState(() => _agentName = newName);
+        ref.read(nodesProvider.notifier).renameAgent(widget.nodeId, widget.agentId, newName);
       } catch (e) {
         debugPrint('rename agent error: $e');
       }
@@ -1842,10 +1852,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final showPermissionOverlay = hasPendingPermissionPrompt(_rawEvents);
     final provider = agent?.provider ?? '';
 
-    // Find the last assistant message index for highlighting
+    // Find the last assistant text message index for highlighting.
+    // Skip tool calls/results and activity blocks — only highlight real text.
     int lastAssistantIndex = -1;
     for (int i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role == 'assistant') {
+      if (messages[i].role == 'assistant' &&
+          !messages[i].isToolCall &&
+          !messages[i].isActivityBlock) {
         lastAssistantIndex = i;
         break;
       }
@@ -1968,6 +1981,23 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               children: [
                 _initialLoading
                     ? const Center(child: CircularProgressIndicator())
+                    : (_rawEvents.isEmpty && _lastError != null)
+                    ? Center(
+                        child: GestureDetector(
+                          onTap: _loadHistory,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.refresh, color: Colors.grey, size: 32),
+                              const SizedBox(height: 8),
+                              Text(
+                                _lastError!,
+                                style: const TextStyle(color: Colors.grey),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
                     : messages.isEmpty
                     ? const Center(
                         child: Text(
@@ -1984,7 +2014,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           }
                           return false;
                         },
-                        child: ListView.builder(
+                        child: SelectionArea(
+                          child: ListView.builder(
                           controller: _scrollCtrl,
                           padding: const EdgeInsets.all(12),
                           itemCount:
@@ -2045,6 +2076,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                               },
                             );
                           },
+                        ),
                         ),
                       ),
                 // Refresh button (above jump to bottom)

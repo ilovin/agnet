@@ -46,7 +46,7 @@ class ReconnectBackoff {
 }
 
 typedef EventCallback = void Function(WsMessage event);
-typedef ChannelConnector = WebSocketChannel Function(Uri uri, {Map<String, dynamic>? headers});
+typedef ChannelConnector = Future<WebSocketChannel> Function(Uri uri, {Map<String, dynamic>? headers});
 typedef ReconnectTimerFactory = Timer Function(
   Duration delay,
   void Function() callback,
@@ -76,11 +76,11 @@ class WsClient {
   final Map<int, Completer<dynamic>> _pending = {};
   final List<EventCallback> _eventListeners = [];
 
-  // Heartbeat
-  Timer? _pingTimer;
+  // Event-driven keepalive: only ping when stale before sending
   Timer? _pingTimeout;
-  static const _pingInterval = Duration(seconds: 30);
-  static const _pingTimeoutDuration = Duration(seconds: 15);
+  DateTime _lastReceivedAt = DateTime.now();
+  static const _staleThreshold = Duration(seconds: 60);
+  static const _pingTimeoutDuration = Duration(seconds: 10);
 
   // Connection state stream
   final _connectedCtrl = StreamController<bool>.broadcast();
@@ -102,7 +102,7 @@ class WsClient {
        _backoff = backoff ?? ReconnectBackoff(),
        _reconnectTimerFactory = reconnectTimerFactory ?? _defaultReconnectTimerFactory;
 
-  static WebSocketChannel _defaultConnector(Uri uri, {Map<String, dynamic>? headers}) {
+  static Future<WebSocketChannel> _defaultConnector(Uri uri, {Map<String, dynamic>? headers}) {
     return ws_connector.connect(uri, headers: headers);
   }
 
@@ -124,9 +124,16 @@ class WsClient {
       var uri = Uri.parse(url);
       // Resolve domain to IP for port 8443 to bypass SNI-based DPI blocking
       uri = await _resolveIfNeeded(uri);
-      // Pass token via Authorization header (IO) or fallback to query (web)
+      // Pass token via Authorization header (IO) and query parameter (web).
+      // Browsers cannot set custom headers on WebSocket connections, so the
+      // query param is required for the web build.
       final headers = {'Authorization': 'Bearer $token'};
-      final channel = _channelConnector(uri, headers: headers);
+      if (!uri.queryParameters.containsKey('token')) {
+        uri = uri.replace(
+          queryParameters: {...uri.queryParameters, 'token': token},
+        );
+      }
+      final channel = await _channelConnector(uri, headers: headers);
       _channel = channel;
       await channel.ready.timeout(
         timeout,
@@ -140,7 +147,7 @@ class WsClient {
       _backoff.reset();
       _reconnecting = false;
 
-      _startPingTimer();
+      _lastReceivedAt = DateTime.now();
 
       _sub = channel.stream.listen(
         _onData,
@@ -155,7 +162,7 @@ class WsClient {
         cancelOnError: true,
       );
     } catch (e) {
-      dev.log('[WsClient] connect error: $e');
+      dev.log('[WsClient] connect error: $e (url=$url)');
       _reconnecting = false;
       _scheduleReconnect();
       // Rethrow so callers know the initial connection failed.
@@ -165,6 +172,7 @@ class WsClient {
 
   void _onData(dynamic raw) {
     dev.log('[WsClient] onData: ${raw.runtimeType} len=${raw is String ? raw.length : '?'}');
+    _lastReceivedAt = DateTime.now();
     WsMessage msg;
     try {
       msg = parseMessage(raw as String);
@@ -213,7 +221,7 @@ class WsClient {
   }
 
   void _teardownTransport() {
-    _stopPingTimer();
+    _stopPingTimeout();
     if (_connected) {
       _connected = false;
       _connectedCtrl.add(false);
@@ -242,29 +250,25 @@ class WsClient {
     }
   }
 
-  // ── Heartbeat (application-level JSON-RPC ping) ─────────────────────────
+  // ── Event-driven keepalive ─────────────────────────────────────────────
 
-  void _startPingTimer() {
-    _stopPingTimer();
-    _pingTimer = Timer.periodic(_pingInterval, (_) => _sendPing());
-  }
-
-  void _stopPingTimer() {
-    _pingTimer?.cancel();
-    _pingTimer = null;
+  void _stopPingTimeout() {
     _pingTimeout?.cancel();
     _pingTimeout = null;
   }
 
-  void _sendPing() {
+  bool get _isStale =>
+      DateTime.now().difference(_lastReceivedAt) > _staleThreshold;
+
+  Future<void> _ensureAlive() async {
     if (!_connected || _channel == null) return;
+    if (!_isStale) return;
     final id = _nextId++;
     final completer = Completer<dynamic>();
     _pending[id] = completer;
     final raw = jsonEncode(buildRequest(id, 'rpc.ping', {}));
     _channel?.sink.add(raw);
 
-    // Start timeout: if no response within 10s, force reconnect
     _pingTimeout?.cancel();
     _pingTimeout = Timer(_pingTimeoutDuration, () {
       _pending.remove(id);
@@ -274,13 +278,11 @@ class WsClient {
       _scheduleReconnect();
     });
 
-    // On successful pong response, cancel the timeout
-    completer.future.then((_) {
+    try {
+      await completer.future;
       _pingTimeout?.cancel();
       _pingTimeout = null;
-    }).catchError((_) {
-      // Error already handled by timeout or disconnect
-    });
+    } catch (_) {}
   }
 
   /// Register a callback for server push events.
@@ -291,7 +293,8 @@ class WsClient {
     String method,
     Map<String, dynamic> params, {
     Duration timeout = const Duration(seconds: 10),
-  }) {
+  }) async {
+    await _ensureAlive();
     final id = _nextId++;
     final completer = Completer<dynamic>();
     _pending[id] = completer;

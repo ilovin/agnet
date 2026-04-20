@@ -62,7 +62,7 @@ class AgentApp extends StatelessWidget {
         useMaterial3: true,
         fontFamily: 'Noto Sans SC',
         textSelectionTheme: TextSelectionThemeData(
-          selectionColor: colorScheme.primary.withValues(alpha: 0.30),
+          selectionColor: colorScheme.primary.withValues(alpha: 0.50),
           cursorColor: colorScheme.primary,
           selectionHandleColor: colorScheme.primary,
         ),
