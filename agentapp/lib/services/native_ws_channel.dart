@@ -97,6 +97,7 @@ class _NativeSink extends DelegatingStreamSink implements WebSocketSink {
 
   @override
   Future close([int? closeCode, String? closeReason]) {
+    _channel._sub.cancel();
     return NativeWebSocketChannel._methodChannel
         .invokeMethod('close', {'id': _channel._id});
   }

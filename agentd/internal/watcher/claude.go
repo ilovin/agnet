@@ -76,9 +76,9 @@ func (w *ClaudeWatcher) Stop() {
 }
 
 func (w *ClaudeWatcher) loop() {
-	ticker := time.NewTicker(300 * time.Millisecond)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	refreshTicker := time.NewTicker(5 * time.Second)
+	refreshTicker := time.NewTicker(15 * time.Second)
 	defer refreshTicker.Stop()
 	for {
 		select {
@@ -93,9 +93,10 @@ func (w *ClaudeWatcher) loop() {
 }
 
 // refreshSessionFile keeps the watcher bound to the live session file.
-// Prefer the exact session file from ~/.claude/sessions/<pid>.json when available,
-// which lets us follow real session transitions (for example after /clear)
-// without hopping to unrelated jsonl files that happen to get a newer mtime.
+// It follows PID map transitions (e.g. after /clear creates a new session)
+// via ~/.claude/sessions/<pid>.json. When no PID map exists the watcher
+// stays on its current file to avoid hopping to unrelated sessions in the
+// same project directory (which causes cross-talk with multiple CLIs).
 func (w *ClaudeWatcher) refreshSessionFile() {
 	if mapped := w.pidMappedSessionFile(); mapped != "" {
 		if mapped != w.path {
@@ -103,43 +104,9 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		}
 		return
 	}
-	if w.workDir == "" {
-		return
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
-	projectsDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
-
-	// Fallback: find the most recently modified .jsonl in the project directory.
-	// This keeps older sessions without a pid map working, while exact pid mapping
-	// above protects the normal live-session attach path from rebinding.
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return
-	}
-
-	var bestPath string
-	var bestMtime time.Time
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
-		mt := fi.ModTime()
-		if mt.After(bestMtime) {
-			bestMtime = mt
-			bestPath = filepath.Join(projectsDir, e.Name())
-		}
-	}
-
-	if bestPath != "" && bestPath != w.path {
-		w.switchToFile(bestPath)
-	}
+	// No PID map: stay on current file. Switching by mtime is unsafe when
+	// multiple Claude instances share the same project directory because the
+	// most-recently-modified file may belong to a different CLI instance.
 }
 
 func (w *ClaudeWatcher) pidMappedSessionFile() string {
@@ -229,8 +196,9 @@ func (w *ClaudeWatcher) poll() error {
 type claudeLine struct {
 	Type    string `json:"type"`
 	Message struct {
-		Role    string      `json:"role"`
-		Content interface{} `json:"content"` // Can be string or array
+		Role       string      `json:"role"`
+		Content    interface{} `json:"content"`     // Can be string or array
+		StopReason string      `json:"stop_reason"` // "end_turn", "tool_use", or empty if still streaming
 	} `json:"message"`
 }
 
@@ -341,8 +309,13 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 				s := StatusWorking
 				ev.StatusChange = &s
 			} else if isTextStop {
-				s := StatusStandby
-				ev.StatusChange = &s
+				if line.Message.StopReason == "" {
+					s := StatusWorking
+					ev.StatusChange = &s
+				} else if line.Message.StopReason == "end_turn" {
+					s := StatusStandby
+					ev.StatusChange = &s
+				}
 			}
 		}
 	default:

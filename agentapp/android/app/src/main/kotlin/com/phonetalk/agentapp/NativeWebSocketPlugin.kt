@@ -26,7 +26,7 @@ class NativeWebSocketPlugin private constructor(
         private var instance: NativeWebSocketPlugin? = null
 
         fun register(engine: FlutterEngine, context: Context) {
-            if (instance != null) return
+            instance?.cleanup()
             instance = NativeWebSocketPlugin(engine, context)
         }
     }
@@ -37,6 +37,7 @@ class NativeWebSocketPlugin private constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
+        val self = this
         MethodChannel(engine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -77,7 +78,7 @@ class NativeWebSocketPlugin private constructor(
             .setStreamHandler(object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, sink: EventChannel.EventSink) {
                     eventSink = sink
-                    instance?.drainQueue(sink)
+                    self.drainQueue(sink)
                 }
                 override fun onCancel(arguments: Any?) {
                     eventSink = null
@@ -169,12 +170,21 @@ function wsClose(){if(ws)ws.close()}
 
         fun close() {
             mainHandler.post {
+                connections.remove(id)
                 webView?.evaluateJavascript("wsClose()", null)
                 webView?.stopLoading()
                 webView?.destroy()
                 webView = null
             }
         }
+    }
+
+    fun cleanup() {
+        for (conn in connections.values) {
+            conn.close()
+        }
+        connections.clear()
+        eventSink = null
     }
 
     inner class Bridge(private val connId: Long) {
