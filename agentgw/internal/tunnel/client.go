@@ -1,7 +1,16 @@
 package tunnel
 
 import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/binary"
+	"fmt"
+	"io"
 	"log"
+	"math/rand"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -9,24 +18,25 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Client maintains an outbound WebSocket to TunnelHub and bridges traffic
-// to the local agentgw WebSocket server.
+const (
+	grpcFrameHeader = 5
+	maxFrameSize    = 4 * 1024 * 1024
+	chromeUA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+)
+
 type Client struct {
 	hubURL     string
 	token      string
 	localAddr  string
 	localToken string
 	mu         sync.Mutex
-	conn       *websocket.Conn
+	cancel     context.CancelFunc
 	done       chan struct{}
 	wg         sync.WaitGroup
+	reality    *RealityConfig
+	httpClient *http.Client
 }
 
-// NewClient creates a tunnel client.
-// hubURL: wss://hub.corp.com/tunnel/register?userId=alice
-// token:  shared secret or JWT for tunnel auth
-// localAddr: localhost:8383 (local agentgw ws address)
-// localToken: auth token for local agentgw /ws endpoint
 func NewClient(hubURL, token, localAddr, localToken string) *Client {
 	return &Client{
 		hubURL:     hubURL,
@@ -34,13 +44,28 @@ func NewClient(hubURL, token, localAddr, localToken string) *Client {
 		localAddr:  localAddr,
 		localToken: localToken,
 		done:       make(chan struct{}),
+		httpClient: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     90 * time.Second,
+				ForceAttemptHTTP2:   true,
+			},
+			Timeout: 0, // no timeout for streaming
+		},
 	}
 }
 
-// Start connects to the hub and begins forwarding. Blocks until Stop is called.
 func (c *Client) Start() {
 	c.wg.Add(1)
 	defer c.wg.Done()
+
+	backoff := time.Duration(0)
+	const (
+		initialBackoff = 3 * time.Second
+		maxBackoff     = 60 * time.Second
+	)
+
 	for {
 		select {
 		case <-c.done:
@@ -48,84 +73,117 @@ func (c *Client) Start() {
 		default:
 		}
 		if err := c.runOnce(); err != nil {
-			log.Printf("[Tunnel] error: %v, reconnecting in 5s...", err)
-		}
-		select {
-		case <-c.done:
-			return
-		case <-time.After(5 * time.Second):
+			if backoff == 0 {
+				backoff = initialBackoff
+			} else {
+				backoff = backoff * 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			jitter := time.Duration(rand.Int63n(int64(backoff) / 3))
+			delay := backoff + jitter
+			log.Printf("[Tunnel] error: %v, reconnecting in %v...", err, delay.Round(time.Millisecond))
+			select {
+			case <-c.done:
+				return
+			case <-time.After(delay):
+			}
+		} else {
+			backoff = 0
 		}
 	}
 }
 
-// Stop shuts down the tunnel client.
 func (c *Client) Stop() {
 	close(c.done)
 	c.mu.Lock()
-	if c.conn != nil {
-		c.conn.Close()
+	if c.cancel != nil {
+		c.cancel()
 	}
 	c.mu.Unlock()
 	c.wg.Wait()
 }
 
 func (c *Client) runOnce() error {
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
-
-	headers := http.Header{}
-	if c.token != "" {
-		headers.Set("Authorization", "Bearer "+c.token)
-	}
-
-	conn, _, err := dialer.Dial(c.hubURL, headers)
-	if err != nil {
-		return err
-	}
-
+	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
-	c.conn = conn
+	c.cancel = cancel
 	c.mu.Unlock()
+	defer cancel()
 
-	log.Printf("[Tunnel] connected to hub %s", c.hubURL)
+	// Open server-streaming connection to hub (Register).
+	// Hub streams app→gw messages down this response body.
+	pr, pw := io.Pipe()
+	registerURL := c.hubURL + "/api.v1.TunnelService/Register"
+	req, err := http.NewRequestWithContext(ctx, "POST", registerURL, pr)
+	if err != nil {
+		pw.Close()
+		return fmt.Errorf("build register request: %w", err)
+	}
+	c.setHeaders(req)
+	req.Header.Set("Content-Type", "application/grpc-web+proto")
 
+	resp, err := c.getHTTPClient().Do(req)
+	if err != nil {
+		pw.Close()
+		return fmt.Errorf("register stream: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		pw.Close()
+		return fmt.Errorf("register status: %d", resp.StatusCode)
+	}
+
+	log.Printf("[Tunnel] gRPC-Web stream connected to hub %s", c.hubURL)
+
+	// Connect to local agentgw WebSocket
 	localConn, err := c.dialLocal()
 	if err != nil {
-		conn.Close()
-		return err
+		resp.Body.Close()
+		pw.Close()
+		return fmt.Errorf("dial local: %w", err)
 	}
 
 	log.Printf("[Tunnel] bridged to local %s", c.localAddr)
 
 	errCh := make(chan error, 2)
+
+	// hub→local: read gRPC-Web frames from streaming response, forward to local WS
 	go func() {
+		defer resp.Body.Close()
+		r := bufio.NewReader(resp.Body)
 		for {
-			t, data, err := conn.ReadMessage()
+			payload, err := decodeFrame(r)
 			if err != nil {
-				log.Printf("[Tunnel] hub→local read error: %v", err)
-				errCh <- err
+				if err == io.EOF || ctx.Err() != nil {
+					errCh <- nil
+				} else {
+					errCh <- fmt.Errorf("hub→local read: %w", err)
+				}
 				return
 			}
-			log.Printf("[Tunnel] hub→local type=%d len=%d", t, len(data))
-			if err := localConn.WriteMessage(t, data); err != nil {
-				log.Printf("[Tunnel] local write error: %v", err)
-				errCh <- err
+			log.Printf("[Tunnel] hub→local len=%d", len(payload))
+			if err := localConn.WriteMessage(websocket.TextMessage, payload); err != nil {
+				errCh <- fmt.Errorf("local write: %w", err)
 				return
 			}
 		}
 	}()
+
+	// local→hub: read from local WS, send as gRPC-Web frames via the request body pipe
 	go func() {
+		defer pw.Close()
 		for {
-			t, data, err := localConn.ReadMessage()
+			_, data, err := localConn.ReadMessage()
 			if err != nil {
-				log.Printf("[Tunnel] local→hub read error: %v", err)
-				errCh <- err
+				errCh <- fmt.Errorf("local→hub read: %w", err)
 				return
 			}
-			log.Printf("[Tunnel] local→hub type=%d len=%d", t, len(data))
-			if err := conn.WriteMessage(t, data); err != nil {
-				log.Printf("[Tunnel] hub write error: %v", err)
-				errCh <- err
+			log.Printf("[Tunnel] local→hub len=%d", len(data))
+			frame := encodeFrame(data)
+			if _, err := pw.Write(frame); err != nil {
+				errCh <- fmt.Errorf("hub write: %w", err)
 				return
 			}
 		}
@@ -137,10 +195,40 @@ func (c *Client) runOnce() error {
 		err = nil
 	}
 
-	conn.Close()
+	cancel()
 	localConn.Close()
+	resp.Body.Close()
+	pw.Close()
 	log.Printf("[Tunnel] disconnected from hub")
 	return err
+}
+
+func (c *Client) getHTTPClient() *http.Client {
+	c.mu.Lock()
+	rcfg := c.reality
+	c.mu.Unlock()
+
+	if rcfg != nil {
+		return c.realityHTTPClient(rcfg)
+	}
+	return c.httpClient
+}
+
+func (c *Client) setHeaders(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	req.Header.Set("User-Agent", chromeUA)
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	c.mu.Lock()
+	rcfg := c.reality
+	c.mu.Unlock()
+	if rcfg != nil {
+		req.Header.Set("Origin", "https://"+rcfg.ServerName)
+	} else {
+		req.Header.Set("Origin", "https://"+hostFromURL(c.hubURL))
+	}
 }
 
 func (c *Client) dialLocal() (*websocket.Conn, error) {
@@ -152,4 +240,81 @@ func (c *Client) dialLocal() (*websocket.Conn, error) {
 		return nil, err
 	}
 	return wsConn, nil
+}
+
+func encodeFrame(payload []byte) []byte {
+	frame := make([]byte, grpcFrameHeader+len(payload))
+	frame[0] = 0x00 // data frame
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
+	copy(frame[5:], payload)
+	return frame
+}
+
+func decodeFrame(r *bufio.Reader) ([]byte, error) {
+	hdr := make([]byte, grpcFrameHeader)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return nil, err
+	}
+	if hdr[0] == 0x80 {
+		// trailers frame — stream ended
+		return nil, io.EOF
+	}
+	length := binary.BigEndian.Uint32(hdr[1:5])
+	if length > maxFrameSize {
+		return nil, fmt.Errorf("frame too large: %d", length)
+	}
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func hostFromURL(rawURL string) string {
+	for i := 0; i < len(rawURL); i++ {
+		if rawURL[i] == '/' && i+1 < len(rawURL) && rawURL[i+1] == '/' {
+			rest := rawURL[i+2:]
+			for j := 0; j < len(rest); j++ {
+				if rest[j] == '/' || rest[j] == '?' {
+					return rest[:j]
+				}
+			}
+			return rest
+		}
+	}
+	return rawURL
+}
+
+// sendToHub sends a single message to hub via POST (used for tunnel→app forwarding).
+func (c *Client) sendToHub(ctx context.Context, data []byte) error {
+	sendURL := c.hubURL + "/api.v1.TunnelService/Send"
+	req, err := http.NewRequestWithContext(ctx, "POST", sendURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	c.setHeaders(req)
+	req.Header.Set("Content-Type", "application/grpc-web+proto")
+	resp, err := c.getHTTPClient().Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("send status: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// realityHTTPClient returns an HTTP client that dials through REALITY+uTLS.
+func (c *Client) realityHTTPClient(cfg *RealityConfig) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialReality(ctx, addr, cfg)
+			},
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		Timeout: 0,
+	}
 }

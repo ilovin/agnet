@@ -156,8 +156,8 @@ show_url() {
     echo "[cloudflared] Tunnel URL: $url"
     echo ""
     echo "Agentgw connection examples:"
-    echo "  agentgw start --tunnel-url \"${url}/tunnel/register?userId=<username>\""
-    echo "  App WS URL: wss://${url#https://}/ws/<username>?token=<password>"
+    echo "  agentgw start --hub \"${url}\" --qr"
+    echo "  App WS URL: wss://${url#https://}/api.v1.AgentService/Stream/<username>"
   else
     echo "[cloudflared] Tunnel URL not yet available. Check: tail -f $CF_LOG_FILE"
   fi

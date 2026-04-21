@@ -52,7 +52,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       final uri = Uri.parse(wsUrl);
       final scheme = uri.scheme == 'wss' ? 'https' : 'http';
-      return '$scheme://${uri.host}:${uri.port}';
+      final defaultPort = uri.scheme == 'wss' ? 443 : 80;
+      if (uri.port > 0 && uri.port != defaultPort) {
+        return '$scheme://${uri.host}:${uri.port}';
+      }
+      return '$scheme://${uri.host}';
     } catch (_) {
       return null;
     }

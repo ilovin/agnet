@@ -1856,9 +1856,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   @override
   Widget build(BuildContext context) {
     final agent = widget.agent;
-    final displayTitle = agent.projectName != null && agent.projectName!.isNotEmpty
-        ? '${agent.projectName} (${agent.provider})'
-        : agent.name;
+    final displayTitle = agent.name.isNotEmpty ? agent.name : (agent.projectName ?? '');
 
     final subtitleText = '${agent.provider} · ${_statusLabel}';
 

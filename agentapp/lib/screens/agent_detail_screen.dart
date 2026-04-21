@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -14,6 +15,8 @@ import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../theme/agent_status_theme.dart';
+import '../utils/ansi_span.dart';
+import '../utils/highlight.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
 /// Handles complex sequences including claude-code specific output.
@@ -2014,8 +2017,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           }
                           return false;
                         },
-                        child: SelectionArea(
-                          child: ListView.builder(
+                        child: ListView.builder(
                           controller: _scrollCtrl,
                           padding: const EdgeInsets.all(12),
                           itemCount:
@@ -2076,7 +2078,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                               },
                             );
                           },
-                        ),
                         ),
                       ),
                 // Refresh button (above jump to bottom)
@@ -2890,7 +2891,12 @@ class _ActivityCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+        border: Border(
+          left: BorderSide(color: color.withValues(alpha: 0.7), width: 3),
+          top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+          right: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+          bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2938,6 +2944,38 @@ class _ActivityBlock extends StatefulWidget {
 class _ActivityBlockState extends State<_ActivityBlock> {
   bool _expanded = false;
 
+  Color _dominantColor() {
+    final items = _parseActivities();
+    for (final item in items.reversed) {
+      final name = ((item['toolName'] as String?) ?? '').isNotEmpty
+          ? item['toolName'] as String
+          : (item['title'] as String?) ?? '';
+      switch (item['toolName'] as String? ?? '') {
+        case 'Bash':
+          return Colors.blue;
+        case 'Read':
+          return Colors.indigo;
+        case 'Grep':
+          return Colors.amber;
+        case 'Edit':
+        case 'Write':
+          return Colors.orange;
+        case 'Agent':
+          return Colors.purple;
+        case 'SendMessage':
+          return Colors.teal;
+        case 'TaskCreate':
+        case 'TaskUpdate':
+        case 'TaskList':
+        case 'TodoWrite':
+          return Colors.green;
+        default:
+          if (name.toLowerCase().contains('skill')) return Colors.deepPurple;
+      }
+    }
+    return Colors.grey;
+  }
+
   List<Map<String, dynamic>> _parseActivities() {
     if (widget.message.kind == 'activity_list') {
       return widget.message.activities;
@@ -2971,6 +3009,7 @@ class _ActivityBlockState extends State<_ActivityBlock> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final items = _parseActivities();
+    final accentColor = _dominantColor();
 
     final latest = items.isNotEmpty ? items.last : null;
     String preview = '助手活动';
@@ -2990,11 +3029,11 @@ class _ActivityBlockState extends State<_ActivityBlock> {
         children: [
           CircleAvatar(
             radius: 16,
-            backgroundColor: scheme.primaryContainer,
+            backgroundColor: accentColor.withValues(alpha: 0.15),
             child: Icon(
               Icons.build,
               size: 18,
-              color: scheme.onPrimaryContainer,
+              color: accentColor,
             ),
           ),
           const SizedBox(width: 8),
@@ -3015,7 +3054,12 @@ class _ActivityBlockState extends State<_ActivityBlock> {
                   decoration: BoxDecoration(
                     color: scheme.surfaceContainerLow,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.3)),
+                    border: Border(
+                      left: BorderSide(color: accentColor.withValues(alpha: 0.7), width: 3),
+                      top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+                      right: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+                      bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+                    ),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3300,17 +3344,18 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    // Raw ANSI output has different styling (dimmed, smaller)
+    // Raw ANSI output: dark terminal-like background
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     final bgColor = isUser
         ? scheme.primaryContainer
         : isRaw
-        ? scheme.surfaceContainerLow
+        ? (isDark ? const Color(0xFF1A1A2E) : const Color(0xFF1E1E2E))
         : scheme.surfaceContainerHighest;
 
     final textColor = isUser
         ? scheme.onPrimaryContainer
         : isRaw
-        ? scheme.onSurfaceVariant.withValues(alpha: 0.7)
+        ? const Color(0xFFE5E5E5)
         : scheme.onSurface;
 
     return Padding(
@@ -3325,13 +3370,13 @@ class _MessageBubble extends StatelessWidget {
             CircleAvatar(
               radius: isRaw ? 12 : 16,
               backgroundColor: isRaw
-                  ? scheme.surfaceContainerHighest
+                  ? const Color(0xFF1A1A2E)
                   : scheme.primaryContainer,
               child: Icon(
                 isRaw ? Icons.terminal : Icons.smart_toy,
                 size: isRaw ? 14 : 18,
                 color: isRaw
-                    ? scheme.onSurfaceVariant
+                    ? const Color(0xFF23D18B)
                     : scheme.onPrimaryContainer,
               ),
             ),
@@ -3353,7 +3398,7 @@ class _MessageBubble extends StatelessWidget {
                 ),
                 border: isRaw
                     ? Border.all(
-                        color: scheme.outlineVariant.withValues(alpha: 0.3),
+                        color: const Color(0xFF23D18B).withValues(alpha: 0.2),
                         width: 1,
                       )
                     : (isLastAssistant
@@ -3373,7 +3418,7 @@ class _MessageBubble extends StatelessWidget {
                         'Terminal',
                         style: TextStyle(
                           fontSize: 10,
-                          color: scheme.onSurfaceVariant.withValues(alpha: 0.5),
+                          color: const Color(0xFF23D18B).withValues(alpha: 0.7),
                           fontStyle: FontStyle.italic,
                         ),
                       ),
@@ -3431,7 +3476,128 @@ class _MessageBubble extends StatelessWidget {
   }
 }
 
-/// Markdown content widget with syntax highlighting and security settings.
+class _ExpandableCodeBuilder extends MarkdownElementBuilder {
+  final double fontSize;
+  final bool isDark;
+  _ExpandableCodeBuilder({required this.fontSize, required this.isDark});
+
+  @override
+  Widget visitElementAfterWithContext(BuildContext context, md.Element element, _, __) {
+    final code = element.textContent;
+    final lines = '\n'.allMatches(code).length + 1;
+    final collapsedLines = 8;
+    if (lines <= collapsedLines) {
+      return _codeBlock(code, fontSize, isDark);
+    }
+    return _ExpandableCodeBlock(code: code, fontSize: fontSize, isDark: isDark, collapsedLines: collapsedLines);
+  }
+}
+
+class _ExpandableCodeBlock extends StatefulWidget {
+  final String code;
+  final double fontSize;
+  final bool isDark;
+  final int collapsedLines;
+  const _ExpandableCodeBlock({required this.code, required this.fontSize, required this.isDark, required this.collapsedLines});
+
+  @override
+  State<_ExpandableCodeBlock> createState() => _ExpandableCodeBlockState();
+}
+
+class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final collapsedCode = _expanded
+        ? widget.code
+        : widget.code.split('\n').take(widget.collapsedLines).join('\n');
+
+    return Container(
+      decoration: BoxDecoration(
+        color: widget.isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: SelectableText.rich(
+              TextSpan(
+                children: [
+                  highlightCode(collapsedCode, isDark: widget.isDark),
+                ],
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: widget.fontSize - 1,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ),
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                decoration: BoxDecoration(
+                  border: Border(top: BorderSide(color: scheme.outlineVariant)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _expanded ? Icons.expand_less : Icons.expand_more,
+                      size: 16,
+                      color: scheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      _expanded ? '收起' : '展开全部',
+                      style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _codeBlock(String code, double fontSize, bool isDark) {
+  return Container(
+    decoration: BoxDecoration(
+      color: isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
+      borderRadius: BorderRadius.circular(8),
+    ),
+    margin: const EdgeInsets.symmetric(vertical: 4),
+    padding: const EdgeInsets.all(12),
+    child: SelectableText.rich(
+      TextSpan(
+        children: [
+          highlightCode(code, isDark: isDark),
+        ],
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: fontSize - 1,
+          height: 1.4,
+        ),
+      ),
+    ),
+  );
+}
+
+/// Markdown content widget that renders into a single SelectableText
+/// so that the entire response is selectable across paragraphs.
+/// Falls back to MarkdownBody only for complex content (code blocks, tables).
 class _MarkdownContent extends StatelessWidget {
   final String text;
   final double fontSize;
@@ -3448,100 +3614,122 @@ class _MarkdownContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    // For raw terminal output, use plain text to preserve formatting
     if (isRaw) {
-      return SelectableText(
-        text,
-        style: TextStyle(
+      return SelectableText.rich(
+        parseAnsiToSpan(
+          text,
+          defaultColor: textColor,
           fontSize: fontSize,
-          color: textColor,
-          height: 1.4,
         ),
       );
     }
 
-    return MarkdownBody(
-      data: text,
-      selectable: true,
-      styleSheet: MarkdownStyleSheet(
-        p: TextStyle(fontSize: fontSize, color: textColor, height: 1.4),
-        h1: TextStyle(
-          fontSize: fontSize + 8,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        h2: TextStyle(
-          fontSize: fontSize + 6,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        h3: TextStyle(
-          fontSize: fontSize + 4,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        h4: TextStyle(
-          fontSize: fontSize + 2,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        h5: TextStyle(
-          fontSize: fontSize + 1,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        h6: TextStyle(
-          fontSize: fontSize,
-          fontWeight: FontWeight.bold,
-          color: textColor,
-          height: 1.4,
-        ),
-        code: TextStyle(
-          fontSize: fontSize - 1,
-          color: textColor,
-          backgroundColor: scheme.surfaceContainerHighest,
-        ),
-        codeblockDecoration: BoxDecoration(
-          color: isDark ? Colors.grey.shade900 : Colors.grey.shade100,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        codeblockPadding: const EdgeInsets.all(12),
-        blockquote: TextStyle(
-          fontSize: fontSize,
-          color: textColor.withValues(alpha: 0.8),
-          fontStyle: FontStyle.italic,
-          height: 1.4,
-        ),
-        blockquoteDecoration: BoxDecoration(
-          border: Border(
-            left: BorderSide(
-              color: scheme.primary.withValues(alpha: 0.5),
-              width: 4,
+    // Use MarkdownBody for complex markdown (code blocks, tables, headings).
+    // Simple text (most assistant responses) gets SelectableText for full selection.
+    final hasComplexMarkdown = text.contains('```') ||
+        text.contains(RegExp(r'^#{1,6}\s', multiLine: true)) ||
+        text.contains(RegExp(r'^\|', multiLine: true));
+
+    if (hasComplexMarkdown) {
+      final isDark = Theme.of(context).brightness == Brightness.dark;
+      return SelectionArea(
+        child: MarkdownBody(
+          data: text,
+          selectable: true,
+          builders: {
+            'pre': _ExpandableCodeBuilder(fontSize: fontSize, isDark: isDark),
+          },
+          styleSheet: MarkdownStyleSheet(
+            p: TextStyle(fontSize: fontSize, color: textColor, height: 1.4),
+            h1: TextStyle(fontSize: fontSize + 8, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
+            h2: TextStyle(fontSize: fontSize + 6, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
+            h3: TextStyle(fontSize: fontSize + 4, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
+            h4: TextStyle(fontSize: fontSize + 2, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
+            code: TextStyle(
+              fontSize: fontSize - 1,
+              color: isDark ? const Color(0xFF98C379) : const Color(0xFF50A14F),
+              backgroundColor: isDark ? const Color(0xFF282C34) : Colors.grey.shade200,
             ),
+            codeblockDecoration: BoxDecoration(
+              color: isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            codeblockPadding: const EdgeInsets.all(12),
+            blockquote: TextStyle(fontSize: fontSize, color: textColor.withValues(alpha: 0.8), fontStyle: FontStyle.italic, height: 1.4),
+            blockquoteDecoration: BoxDecoration(
+              border: Border(left: BorderSide(color: scheme.primary.withValues(alpha: 0.5), width: 4)),
+            ),
+            blockquotePadding: const EdgeInsets.only(left: 12),
+            listBullet: TextStyle(fontSize: fontSize, color: textColor),
+            a: TextStyle(fontSize: fontSize, color: scheme.primary, decoration: TextDecoration.underline),
           ),
+          onTapLink: (text, href, title) async {
+            if (href == null) return;
+            final uri = Uri.tryParse(href);
+            if (uri != null) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          },
         ),
-        blockquotePadding: const EdgeInsets.only(left: 12),
-        listBullet: TextStyle(fontSize: fontSize, color: textColor),
-        a: TextStyle(
-          fontSize: fontSize,
-          color: scheme.primary,
-          decoration: TextDecoration.underline,
-        ),
-      ),
-      onTapLink: (text, href, title) async {
-        if (href == null) return;
-        final uri = Uri.tryParse(href);
-        if (uri != null) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-        }
-      },
+      );
+    }
+
+    // Simple text: render inline markdown (bold, italic, inline code) into TextSpans.
+    final isDarkSimple = Theme.of(context).brightness == Brightness.dark;
+    return SelectableText.rich(
+      _buildTextSpan(text, fontSize, textColor, scheme, isDarkSimple),
+    );
+  }
+
+  TextSpan _buildTextSpan(String data, double fontSize, Color color, ColorScheme scheme, bool isDark) {
+    final spans = <TextSpan>[];
+    // Process inline markdown: **bold**, *italic*, `code`, [links](url)
+    final regex = RegExp(r'(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`([^`]+)`)|(\[(.+?)\]\((.+?)\))');
+    var lastEnd = 0;
+
+    for (final match in regex.allMatches(data)) {
+      // Add plain text before this match
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(text: data.substring(lastEnd, match.start)));
+      }
+
+      if (match[2] != null) {
+        // **bold**
+        spans.add(TextSpan(text: match[2]!, style: TextStyle(fontWeight: FontWeight.bold)));
+      } else if (match[4] != null) {
+        // *italic*
+        spans.add(TextSpan(text: match[4]!, style: TextStyle(fontStyle: FontStyle.italic)));
+      } else if (match[6] != null) {
+        // `code`
+        spans.add(TextSpan(
+          text: match[6]!,
+          style: TextStyle(
+            fontFamily: 'monospace',
+            fontSize: fontSize - 1,
+            color: isDark ? const Color(0xFF98C379) : const Color(0xFF50A14F),
+            backgroundColor: isDark ? const Color(0xFF282C34) : Colors.grey.shade200,
+          ),
+        ));
+      } else if (match[8] != null) {
+        // [link](url)
+        spans.add(TextSpan(
+          text: match[8]!,
+          style: TextStyle(color: scheme.primary, decoration: TextDecoration.underline),
+        ));
+      }
+
+      lastEnd = match.end;
+    }
+
+    // Add remaining plain text
+    if (lastEnd < data.length) {
+      spans.add(TextSpan(text: data.substring(lastEnd)));
+    }
+
+    return TextSpan(
+      style: TextStyle(fontSize: fontSize, color: color, height: 1.4),
+      children: spans.isEmpty ? [TextSpan(text: data)] : spans,
     );
   }
 }

@@ -21,7 +21,7 @@ RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
 GW_PORT=7374
-DEFAULT_HUB_URL="wss://ilovin.xyz:8443"
+DEFAULT_HUB_URL="https://ilovin.xyz:8443"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
@@ -30,6 +30,11 @@ TUNNEL_URL=""
 APP_URL=""
 REGISTERED_USER=""
 REGISTERED_TOKEN=""
+
+# REALITY defaults (matching tunnelhub server config)
+REALITY_PUB="${AGENTGW_REALITY_PUB:-}"
+REALITY_SID="${AGENTGW_REALITY_SID:-}"
+REALITY_SNI="${AGENTGW_REALITY_SNI:-www.google.com}"
 
 show_help() {
   cat <<'EOF'
@@ -44,18 +49,20 @@ COMMANDS:
 
 OPTIONS (for install):
   --token TOKEN      Pre-set authentication token
-  --hub URL          Tunnelhub base URL (e.g. wss://domain:8443)
-  --tunnel-url URL   Full tunnel register URL (overrides --hub)
+  --hub URL          Tunnelhub base URL (e.g. https://ilovin.xyz:8443)
+  --tunnel-url URL   Full tunnel URL (overrides --hub)
   --app-url URL      App-facing remote URL for QR/websocket
   --local-only       Only setup local agentgw, skip remote deployment
   --no-browser       Don't open browser after installation
   -h, --help         Show this help message and exit
 
 ENVIRONMENT:
-  AGENTGW_HUB           Optional tunnelhub base URL (default: wss://ilovin.xyz:8443)
-  AGENTGW_TUNNEL_URL    Optional full tunnel register URL (overrides AGENTGW_HUB)
-  AGENTGW_APP_URL       Optional app-facing remote URL (e.g. wss://hub.example.com:8443/ws)
-  AGENTGW_TUNNEL_TOKEN  Optional tunnel auth token
+  AGENTGW_HUB              Tunnelhub base URL (default: https://ilovin.xyz:8443)
+  AGENTGW_TUNNEL_URL       Full tunnel URL (overrides AGENTGW_HUB)
+  AGENTGW_APP_URL          App-facing remote URL
+  AGENTGW_REALITY_PUB      REALITY public key (base64)
+  AGENTGW_REALITY_SID      REALITY short ID (hex)
+  AGENTGW_REALITY_SNI      REALITY server name (default: www.google.com)
 
 EXAMPLES:
   ./install.sh
@@ -361,19 +368,20 @@ PY
 }
 
 build_remote_ws_url() {
-  local register_url="$1" app_url="$2"
-  [[ -z "$register_url" ]] && return
-  python3 - "$register_url" "$app_url" <<'PY'
-from urllib.parse import urlparse, parse_qs
+  local hub_url="$1" app_url="$2" user_id="$3"
+  [[ -z "$hub_url" ]] && return
+  python3 - "$hub_url" "$app_url" "$user_id" <<'PY'
+from urllib.parse import urlparse
 import sys
-register_url, app_url = sys.argv[1], sys.argv[2]
-base = app_url or register_url
+hub_url, app_url, user_id = sys.argv[1], sys.argv[2], sys.argv[3]
+base = app_url or hub_url
 u = urlparse(base)
 if not u.scheme or not u.netloc:
     sys.exit(0)
-user_id = parse_qs(urlparse(register_url).query).get('userId', ['default'])[0] or 'default'
-scheme = 'wss' if u.scheme == 'wss' else 'ws'
-print(f"{scheme}://{u.netloc}/ws/{user_id}")
+if not user_id:
+    user_id = 'default'
+scheme = 'wss' if u.scheme in ('wss', 'https') else 'ws'
+print(f"{scheme}://{u.netloc}/api.v1.AgentService/Stream/{user_id}")
 PY
 }
 
@@ -616,11 +624,15 @@ if [[ -n "$HUB_URL" ]]; then
     fi
   fi
 
-  if [[ -z "$TUNNEL_URL" && -n "$HUB_URL" && -n "$REGISTERED_USER" ]]; then
-    TUNNEL_URL="${HUB_URL%/}/tunnel/register?userId=${REGISTERED_USER}"
-  fi
   if [[ -z "$APP_URL" && -n "$HUB_URL" ]]; then
-    APP_URL="${HUB_URL%/}/ws"
+    APP_URL="${HUB_URL%/}"
+    # App connects via standard TLS on 8443 (WebSocket).
+    # agentgw connects via REALITY on 443 (gRPC-Web).
+    if [[ "$APP_URL" == *":443" ]]; then
+      APP_URL="${APP_URL%:443}:8443"
+    elif [[ "$APP_URL" == https://* ]] && [[ "$APP_URL" != *:[0-9]* ]]; then
+      APP_URL="${APP_URL}:8443"
+    fi
   fi
   if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
     TOKEN="$REGISTERED_TOKEN"
@@ -665,19 +677,13 @@ else
 fi
 
 # ── 6. Persist runtime env ─────────────────────────────────────────
-# Embed tunnel token directly into the URL so URL + token travel as one unit
-if [[ -n "$TUNNEL_URL" && -n "$REGISTERED_TOKEN" ]]; then
-  if [[ "$TUNNEL_URL" != *"token="* ]]; then
-    sep="?"
-    [[ "$TUNNEL_URL" == *"?"* ]] && sep="&"
-    TUNNEL_URL="${TUNNEL_URL}${sep}token=${REGISTERED_TOKEN}"
-  fi
-fi
-
 cat > "$RUNTIME_ENV_FILE" <<EOF
 AGENTGW_HUB=${HUB_URL}
 AGENTGW_TUNNEL_URL=${TUNNEL_URL}
 AGENTGW_APP_URL=${APP_URL}
+AGENTGW_REALITY_PUB=${REALITY_PUB}
+AGENTGW_REALITY_SID=${REALITY_SID}
+AGENTGW_REALITY_SNI=${REALITY_SNI}
 EOF
 chmod 600 "$RUNTIME_ENV_FILE"
 
@@ -706,6 +712,12 @@ if [[ -n "$TUNNEL_URL" ]]; then
 fi
 if [[ -n "$APP_URL" ]]; then
   AGENTGW_START_ARGS+=(--app-url "$APP_URL")
+fi
+if [[ -n "$REALITY_PUB" && -n "$REALITY_SNI" ]]; then
+  AGENTGW_START_ARGS+=(--reality-pub "$REALITY_PUB" --reality-sni "$REALITY_SNI")
+  if [[ -n "$REALITY_SID" ]]; then
+    AGENTGW_START_ARGS+=(--reality-sid "$REALITY_SID")
+  fi
 fi
 
 nohup "$INSTALL_DIR/agentgw" "${AGENTGW_START_ARGS[@]}" > /tmp/agentgw.log 2>&1 &
@@ -760,17 +772,17 @@ if [[ -n "$TAILSCALE_IP" && -n "$LAN_IP" && "$TAILSCALE_IP" != "$LAN_IP" ]]; the
 fi
 
 TUNNEL_USER="$REGISTERED_USER"
+if [[ -z "$TUNNEL_USER" ]]; then
+  # Try loading from local_auth.json
+  TUNNEL_USER="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['userId'])" "$INSTALL_DIR/local_auth.json" 2>/dev/null || true)"
+fi
 if [[ -z "$TUNNEL_URL" ]]; then
   TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
 fi
 if [[ -z "$APP_URL" ]]; then
   APP_URL="${AGENTGW_APP_URL:-}"
 fi
-if [[ -z "$TUNNEL_USER" && -n "$TUNNEL_URL" ]]; then
-  # Extract userId from query string if present
-  TUNNEL_USER="$(echo "$TUNNEL_URL" | sed -n 's/.*[?&]userId=\([^&]*\).*/\1/p')"
-fi
-REMOTE_WS_URL="$(build_remote_ws_url "$TUNNEL_URL" "$APP_URL")"
+REMOTE_WS_URL="$(build_remote_ws_url "$HUB_URL" "$APP_URL" "$TUNNEL_USER")"
 LOCAL_WS_URL="ws://${LOCAL_IP}:${GW_PORT}/ws"
 
 echo ""
@@ -789,7 +801,7 @@ echo ""
 if [[ -n "$REMOTE_WS_URL" ]]; then
   echo -e "${CYAN}🌐 远程连接（通过 tunnelhub）:${NC}"
   echo "  URL:   ${REMOTE_WS_URL}"
-  echo "  Token: ${TOKEN}"
+  echo "  Token: ${REGISTERED_TOKEN:-$TOKEN}"
   if [[ -n "$TUNNEL_USER" ]]; then
     echo "  User:  ${TUNNEL_USER}"
   fi
@@ -809,7 +821,7 @@ generate_qr "${LOCAL_WS_URL}|${TOKEN}"
 if [[ -n "$REMOTE_WS_URL" ]]; then
   echo ""
   echo -e "${CYAN}[远程] 跨网络使用:${NC}"
-  generate_qr "${REMOTE_WS_URL}|${TOKEN}"
+  generate_qr "${REMOTE_WS_URL}|${REGISTERED_TOKEN:-$TOKEN}"
 fi
 
 # Open browser
@@ -836,12 +848,15 @@ echo "  📋 日志: tail -f /tmp/agentgw.log"
 echo "  🔄 重启: ./install.sh restart"
 echo "  ⏹  停止: ./install.sh stop"
 echo "  ℹ️  状态: ./install.sh status"
-if [[ -n "$TUNNEL_URL" ]]; then
+if [[ -n "$HUB_URL" ]]; then
   echo ""
   echo "  agentgw 已使用以下隧道配置："
-  echo "    AGENTGW_TUNNEL_URL=${TUNNEL_URL}"
+  echo "    AGENTGW_HUB=${HUB_URL}"
   if [[ -n "$APP_URL" ]]; then
     echo "    AGENTGW_APP_URL=${APP_URL}"
+  fi
+  if [[ -n "$REALITY_PUB" ]]; then
+    echo "    REALITY: SNI=${REALITY_SNI}"
   fi
 fi
 echo ""
