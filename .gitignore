@@ -6,14 +6,11 @@
 /progress.md
 /test_plan.md
 
-# Go binaries
-agentd/agentd
-agentd/agentd-linux
-agentd/agentd-linux-new
-agentd/agentd.bak
-agentd/EOF
-agentgw/agentgw
-agentgw/agentapp.apk
+# Build output
+/out/
+
+# Build hash files
+*.buildhash
 
 # Flutter build
 agentapp/build/
@@ -21,9 +18,6 @@ agentapp/.dart_tool/
 agentapp/.flutter-plugins
 agentapp/.flutter-plugins-dependencies
 agentapp/ios/Flutter/flutter_export_environment.sh
-
-# Web build artifacts in static dir
-agentgw/static/
 
 # Dev scripts
 agentgw/scripts/

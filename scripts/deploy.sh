@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy agentd + build APK / IPA + auto-flash to connected devices
+# Deploy agentd + agentgw + mobile apps to local/remote targets
 #
 # Lessons learned (baked into the script):
 #   1. Remote agentd must run as the normal user (NOT sudo).
@@ -12,239 +12,64 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-AGENTD_DIR="./agentd"
-AGENTGW_DIR="./agentgw"
-AGENTAPP_DIR="./agentapp"
-LOCAL_BIN="$AGENTD_DIR/agentd"
-LINUX_BIN="$AGENTD_DIR/agentd-linux"
-GW_BIN="$AGENTGW_DIR/agentgw"
-GW_LINUX_BIN="$AGENTGW_DIR/agentgw-linux"
-APK_OUTPUT="$AGENTGW_DIR/agentapp.apk"
-IPA_OUTPUT="$AGENTGW_DIR/agentapp.ipa"
-WEB_STATIC_DIR="$AGENTGW_DIR/static"
+# Source build functions (incremental caching, parallel builds)
+source scripts/build.sh
+
+# After sourcing build.sh, these variables point to out/ directory:
+# LOCAL_BIN, LINUX_BIN, GW_BIN, APK_OUTPUT, etc.
+
 REMOTE_HOST="${REMOTE_HOST:-ws}"
 REMOTE_LOG="/tmp/agentd.log"
 
-binary_hash_file() {
-    local output="$1"
-    echo "${output}.buildhash"
-}
+# ── Device detection ──────────────────────────────────────────────────
 
-compute_source_hash() {
-    python3 - "$@" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-paths = [pathlib.Path(p) for p in sys.argv[1:]]
-files = []
-for root in paths:
-    if root.is_file():
-        files.append(root)
-        continue
-    if root.is_dir():
-        for path in root.rglob('*'):
-            if path.is_file() and path.suffix in {'.go'}:
-                files.append(path)
-for path in sorted(set(files), key=lambda p: str(p)):
-    rel = str(path).replace('\\', '/')
-    sys.stdout.write(rel + '\n')
-    with path.open('rb') as f:
-        sys.stdout.flush()
-        data = f.read()
-    sys.stdout.buffer.write(data)
-PY
-}
-
-binary_up_to_date() {
-    local output="$1"
-    shift
-    [[ -f "$output" ]] || return 1
-    local hash_file expected actual
-    hash_file="$(binary_hash_file "$output")"
-    [[ -f "$hash_file" ]] || return 1
-    expected="$(<"$hash_file")"
-    actual="$(compute_source_hash "$@" | shasum -a 256 | awk '{print $1}')"
-    [[ -n "$expected" && "$expected" == "$actual" ]]
-}
-
-record_binary_hash() {
-    local output="$1"
-    shift
-    compute_source_hash "$@" | shasum -a 256 | awk '{print $1}' > "$(binary_hash_file "$output")"
-}
-
-# Check if an output file is up-to-date versus its source files.
-# Usage: up_to_date <output> <find_args...>
-up_to_date() {
-    local output="$1"
-    shift
-    [[ ! -f "$output" ]] && return 1
-    local newer
-    newer=$(find "$@" -newer "$output" -print 2>/dev/null | head -1)
-    [[ -z "$newer" ]]
-}
-
-show_help() {
-  cat <<EOF
-Usage: ./scripts/deploy.sh [TARGET]
-
-Build and deploy agentd / agentgw / agentapp for development.
-After building APK & IPA, automatically detects connected mobile devices
-and installs the artifacts (Android via adb, iOS via ios-deploy).
-Go binaries are rebuilt only when the source-content hash changes.
-
-TARGETS:
-  all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
-  build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
-  local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
-  ws               Build Linux agentd, deploy to remote $REMOTE_HOST, restart agentgw
-  apk              Build APK only and auto-install to connected Android devices
-  ipa              Build IPA only and auto-install to connected iOS devices
-  flutter-android  Use `flutter install` to flash Android (auto-detects device)
-  flutter-ios      Use `flutter install` to flash iOS (auto-detects device)
-  sim              Build and install to iOS Simulator via xcrun simctl
-  cfgutil          Install existing IPA via Apple Configurator 2 (cfgutil)
-  web              Build Flutter Web and copy to agentgw/static
-  mobile           Install existing APK/IPA to connected devices without rebuilding
-  gw               Build and restart agentgw only
-  help             Show this help message
-
-ENVIRONMENT:
-  REMOTE_HOST            Remote SSH host for 'ws' target (default: ws)
-  AGENTGW_TUNNEL_URL     Optional tunnel hub URL (e.g. wss://hub.example.com/tunnel/register?userId=alice)
-  AGENTGW_TUNNEL_TOKEN   Optional tunnel auth token
-
-EXAMPLES:
-  # Full dev cycle (default)
-  ./scripts/deploy.sh
-
-  # Build everything and flash to connected phones
-  ./scripts/deploy.sh build
-
-  # Deploy only the remote ws node
-  REMOTE_HOST=prod ./scripts/deploy.sh ws
-
-  # Quick gateway restart after config change
-  ./scripts/deploy.sh gw
-
-  # Install already-built APK/IPA to devices
-  ./scripts/deploy.sh mobile
-
-  # Use flutter install for iOS (useful when ios-deploy fails)
-  ./scripts/deploy.sh flutter-ios
-
-  # Install to iOS Simulator
-  ./scripts/deploy.sh sim
-EOF
-}
-
-build_mac() {
-    if binary_up_to_date "$LOCAL_BIN" agentd agentd/go.mod agentd/go.sum; then
-        echo "[deploy] macOS binary up-to-date, skipping build"
-        return 0
+detect_android_devices() {
+    if ! command -v adb &>/dev/null; then
+        return
     fi
-    echo "[deploy] Building agentd for macOS..."
-    (cd "$AGENTD_DIR" && go build -o agentd ./cmd/agentd/)
-    record_binary_hash "$LOCAL_BIN" agentd agentd/go.mod agentd/go.sum
-    echo "[deploy] macOS binary: $(ls -lh "$LOCAL_BIN" | awk '{print $5}')"
+    adb devices 2>/dev/null | grep -v "List" | grep "device$" | awk '{print $1}'
 }
 
-build_linux() {
-    if binary_up_to_date "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum; then
-        echo "[deploy] Linux binary up-to-date, skipping build"
-        return 0
+detect_ios_devices() {
+    if command -v ios-deploy &>/dev/null; then
+        ios-deploy -c 2>/dev/null | grep -oE '^[0-9a-f-]{36,}' || true
+        return
     fi
-    echo "[deploy] Building agentd for Linux amd64..."
-    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -o agentd-linux ./cmd/agentd/)
-    record_binary_hash "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum
-    echo "[deploy] Linux binary: $(ls -lh "$LINUX_BIN" | awk '{print $5}')"
-}
-
-build_gw_mac() {
-    if binary_up_to_date "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
-        echo "[deploy] macOS gw binary up-to-date, skipping build"
-        return 0
+    if command -v idevice_id &>/dev/null; then
+        idevice_id -l 2>/dev/null || true
+        return
     fi
-    echo "[deploy] Building agentgw for macOS..."
-    (cd "$AGENTGW_DIR" && go build -o agentgw ./cmd/agentgw/)
-    record_binary_hash "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum
-    echo "[deploy] macOS gw binary: $(ls -lh "$GW_BIN" | awk '{print $5}')"
-}
-
-build_gw_linux() {
-    if binary_up_to_date "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
-        echo "[deploy] Linux gw binary up-to-date, skipping build"
-        return 0
-    fi
-    echo "[deploy] Building agentgw for Linux amd64..."
-    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o agentgw-linux ./cmd/agentgw/)
-    record_binary_hash "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum
-    echo "[deploy] Linux gw binary: $(ls -lh "$GW_LINUX_BIN" | awk '{print $5}')"
-}
-
-build_apk() {
-    local needs_build=false
-    if ! up_to_date "$APK_OUTPUT" agentapp/lib -type f -name '*.dart'; then
-        needs_build=true
-    fi
-    if ! up_to_date "$APK_OUTPUT" agentapp/pubspec.yaml; then
-        needs_build=true
-    fi
-    if ! up_to_date "$APK_OUTPUT" agentapp/pubspec.lock; then
-        needs_build=true
-    fi
-    if [[ "$needs_build" == false ]]; then
-        echo "[deploy] APK up-to-date, skipping build"
-        return 0
-    fi
-    echo "[deploy] Building APK..."
-    (cd "$AGENTAPP_DIR" && flutter build apk --release --no-tree-shake-icons)
-    local apk="$AGENTAPP_DIR/build/app/outputs/flutter-apk/app-release.apk"
-    if [[ -f "$apk" ]]; then
-        ln -f "$apk" "$APK_OUTPUT" 2>/dev/null || cp "$apk" "$APK_OUTPUT"
-        echo "[deploy] APK: $(ls -lh "$APK_OUTPUT" | awk '{print $5}')"
-    else
-        echo "[deploy] ERROR: APK not found at $apk"
-        return 1
+    if command -v cfgutil &>/dev/null; then
+        cfgutil list 2>/dev/null | grep -E "ECID:" | awk '{print $2}' || true
     fi
 }
 
-build_ipa() {
-    if ! command -v xcodebuild &>/dev/null; then
-        echo "[deploy] Skipping IPA (Xcode not found)"
-        return 0
+detect_devices() {
+    local android_devs ios_devs
+    android_devs=$(detect_android_devices)
+    ios_devs=$(detect_ios_devices)
+
+    local count=0
+    if [[ -n "$android_devs" ]]; then
+        local n
+        n=$(echo "$android_devs" | wc -l | tr -d ' ')
+        echo "[deploy] Android devices: $n"
+        echo "$android_devs" | while read -r d; do echo "  - $d"; done
+        count=$((count + n))
     fi
-    if up_to_date "$IPA_OUTPUT" agentapp/lib -type f -name '*.dart' agentapp/pubspec.yaml agentapp/pubspec.lock; then
-        echo "[deploy] IPA up-to-date, skipping build"
-        return 0
+    if [[ -n "$ios_devs" ]]; then
+        local n
+        n=$(echo "$ios_devs" | wc -l | tr -d ' ')
+        echo "[deploy] iOS devices: $n"
+        echo "$ios_devs" | while read -r d; do echo "  - $d"; done
+        count=$((count + n))
     fi
-    echo "[deploy] Building iOS IPA..."
-    (cd "$AGENTAPP_DIR" && flutter build ipa --release --export-method ad-hoc 2>/dev/null) || {
-        echo "[deploy] WARNING: iOS IPA build failed (needs Apple Developer account / provisioning profile)"
-        return 0
-    }
-    local ipa
-    ipa=$(ls -t "$AGENTAPP_DIR/build/ios/ipa/"*.ipa 2>/dev/null | head -1)
-    if [[ -n "$ipa" && -f "$ipa" ]]; then
-        cp "$ipa" "$IPA_OUTPUT"
-        echo "[deploy] IPA: $(ls -lh "$IPA_OUTPUT" | awk '{print $5}')"
-    else
-        echo "[deploy] WARNING: IPA not found after build"
+    if [[ $count -eq 0 ]]; then
+        echo "[deploy] No mobile devices detected"
     fi
 }
 
-build_web() {
-    if up_to_date "$WEB_STATIC_DIR/index.html" agentapp/lib -type f -name '*.dart' agentapp/pubspec.yaml agentapp/pubspec.lock; then
-        echo "[deploy] Web static up-to-date, skipping build"
-        return 0
-    fi
-    echo "[deploy] Building Flutter Web..."
-    (cd "$AGENTAPP_DIR" && flutter build web --release --no-tree-shake-icons)
-    rm -rf "$WEB_STATIC_DIR"
-    cp -r "$AGENTAPP_DIR/build/web" "$WEB_STATIC_DIR"
-    echo "[deploy] Web static copied to $WEB_STATIC_DIR"
-}
+# ── Mobile install functions ──────────────────────────────────────────
 
 install_android() {
     if ! command -v adb &>/dev/null; then
@@ -253,7 +78,7 @@ install_android() {
         return
     fi
     local devices
-    devices=$(adb devices | grep -v "List" | grep "device$" | awk '{print $1}')
+    devices=$(detect_android_devices)
     if [[ -z "$devices" ]]; then
         echo "[deploy] No Android device connected via adb, trying flutter install..."
         install_android_flutter
@@ -276,7 +101,6 @@ install_android() {
             echo "[deploy] WARNING: adb install failed on $device"
         fi
     done
-    # If all adb installs failed, fallback to flutter install
     if [[ $ok -eq 0 ]]; then
         echo "[deploy] All adb installs failed, trying flutter install..."
         install_android_flutter
@@ -327,7 +151,6 @@ install_ios() {
         return
     fi
 
-    # No device found via ios-deploy/idevice_id, try cfgutil
     if $has_cfgutil; then
         echo "[deploy] No device from ios-deploy, trying cfgutil (Apple Configurator 2)..."
         local ecids
@@ -342,7 +165,6 @@ install_ios() {
         fi
     fi
 
-    # Last resort: flutter install
     echo "[deploy] No iOS device connected via ios-deploy/ideviceinstaller/cfgutil, trying flutter install..."
     install_ios_flutter
 }
@@ -436,27 +258,7 @@ deploy_mobile() {
     install_ios
 }
 
-build_all() {
-    # Build agentd, agentgw, APK, IPA and Web in parallel
-    local mac_pid linux_pid gw_mac_pid gw_linux_pid apk_pid ipa_pid web_pid
-    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0
-    build_mac & mac_pid=$!
-    build_linux & linux_pid=$!
-    build_gw_mac & gw_mac_pid=$!
-    build_gw_linux & gw_linux_pid=$!
-    build_apk & apk_pid=$!
-    build_ipa & ipa_pid=$!
-    build_web & web_pid=$!
-    wait "$mac_pid" && mac_ok=1 || true
-    wait "$linux_pid" && linux_ok=1 || true
-    wait "$gw_mac_pid" && gw_mac_ok=1 || true
-    wait "$gw_linux_pid" && gw_linux_ok=1 || true
-    wait "$apk_pid" && apk_ok=1 || true
-    wait "$ipa_pid" && ipa_ok=1 || true
-    wait "$web_pid" && web_ok=1 || true
-    echo "[deploy] Build results: mac=$mac_ok linux=$linux_ok gw_mac=$gw_mac_ok gw_linux=$gw_linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok"
-    [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_ok -eq 1 && $apk_ok -eq 1 ]]
-}
+# ── Server deploy functions ───────────────────────────────────────────
 
 deploy_local() {
     echo "[deploy] Restarting local agentd..."
@@ -492,31 +294,23 @@ deploy_local() {
 
 deploy_remote() {
     echo "[deploy] Deploying to $REMOTE_HOST (as user, NOT sudo)..."
-    # Upload to temp name (can't overwrite running binary)
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/bin" || return 1
     scp -o ConnectTimeout=5 "$LINUX_BIN" "$REMOTE_HOST:~/bin/agentd-new" || return 1
 
-    # Stop old agentd (try user-owned first, then root-owned as fallback)
     echo "[deploy] Stopping remote agentd..."
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "pkill -f '[a]gentd start' 2>/dev/null; sudo pkill -f '[a]gentd start' 2>/dev/null; sleep 1" || true
 
-    # Replace old binary and start as normal user.
-    # Use bash -c with double-fork + setsid so the process fully detaches
-    # from the SSH session. A simple nohup & disown can still hang because
-    # the background process inherits the SSH file descriptors.
     echo "[deploy] Replacing binary and starting remote agentd..."
     ssh -o ConnectTimeout=5 -o ServerAliveInterval=5 "$REMOTE_HOST" \
         "mv ~/bin/agentd-new ~/bin/agentd && chmod +x ~/bin/agentd && \
          bash -c 'nohup ~/bin/agentd start > $REMOTE_LOG 2>&1 </dev/null & \
                    disown; exit 0'" || true
-    # Give the remote process time to start (SSH returns immediately)
     sleep 3
     echo "[deploy] Checking remote status..."
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "if pgrep -u \$(whoami) -f 'agentd start' > /dev/null; then echo 'OK (running as user)'; else echo 'WARN: may be running as root'; fi; tail -3 $REMOTE_LOG" || true
 }
 
 deploy_all() {
-    # Deploy local and remote in parallel
     local local_pid remote_pid local_ok=0 remote_ok=0
     deploy_local & local_pid=$!
     deploy_remote & remote_pid=$!
@@ -525,13 +319,24 @@ deploy_all() {
     [[ $local_ok -eq 1 && $remote_ok -eq 1 ]]
 }
 
+# ── Gateway management ────────────────────────────────────────────────
+
 restart_agentgw() {
-    build_gw_mac
+    build_agentgw_mac
     build_web
-    echo "[deploy] Restarting agentgw (to reconnect WS tunnels to agentd)..."
+    echo "[deploy] Restarting agentgw (to reconnect tunnels to agentd)..."
     pkill -f "agentgw start" 2>/dev/null || true
     sleep 1
-    nohup "$AGENTGW_DIR/agentgw" start > /tmp/agentgw.log 2>&1 &
+    local -a env_args=()
+    local runtime_env="$HOME/.agentgw/runtime.env"
+    if [[ -f "$runtime_env" ]]; then
+        env_args+=(env)
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            env_args+=("$line")
+        done < "$runtime_env"
+    fi
+    nohup "${env_args[@]}" "$GW_BIN" start --qr > /tmp/agentgw.log 2>&1 &
     sleep 2
     if pgrep -f "agentgw start" > /dev/null; then
         echo "[deploy] agentgw started (PID $(pgrep -f "agentgw start"))"
@@ -542,12 +347,74 @@ restart_agentgw() {
     fi
 }
 
+# ── Help ──────────────────────────────────────────────────────────────
+
+show_deploy_help() {
+  cat <<EOF
+Usage: ./scripts/deploy.sh [TARGET]
+
+Build and deploy agentd / agentgw / agentapp for development.
+After building APK & IPA, automatically detects connected mobile devices
+and installs the artifacts (Android via adb, iOS via ios-deploy).
+Go binaries are rebuilt only when the source-content hash changes.
+
+TARGETS:
+  all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
+  build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
+  local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
+  ws               Build Linux agentd, deploy to remote \$REMOTE_HOST, restart agentgw
+  apk              Build APK only and auto-install to connected Android devices
+  ipa              Build IPA only and auto-install to connected iOS devices
+  flutter-android  Use \`flutter install\` to flash Android (auto-detects device)
+  flutter-ios      Use \`flutter install\` to flash iOS (auto-detects device)
+  sim              Build and install to iOS Simulator via xcrun simctl
+  cfgutil          Install existing IPA via Apple Configurator 2 (cfgutil)
+  web              Build Flutter Web and copy to agentgw/static
+  mobile           Install existing APK/IPA to connected devices without rebuilding
+  devices          Detect and list connected mobile devices
+  gw               Build and restart agentgw only
+  help             Show this help message
+
+ENVIRONMENT:
+  REMOTE_HOST            Remote SSH host for 'ws' target (default: ws)
+  AGENTGW_HUB            Tunnelhub base URL (e.g. https://8.146.236.75:443)
+  AGENTGW_TUNNEL_URL     Full tunnel URL (overrides AGENTGW_HUB)
+
+EXAMPLES:
+  # Full dev cycle (default)
+  ./scripts/deploy.sh
+
+  # Build everything and flash to connected phones
+  ./scripts/deploy.sh build
+
+  # Deploy only the remote ws node
+  REMOTE_HOST=prod ./scripts/deploy.sh ws
+
+  # Quick gateway restart after config change
+  ./scripts/deploy.sh gw
+
+  # Install already-built APK/IPA to devices
+  ./scripts/deploy.sh mobile
+
+  # Check what devices are connected
+  ./scripts/deploy.sh devices
+
+  # Use flutter install for iOS (useful when ios-deploy fails)
+  ./scripts/deploy.sh flutter-ios
+
+  # Install to iOS Simulator
+  ./scripts/deploy.sh sim
+EOF
+}
+
+# ── Main ──────────────────────────────────────────────────────────────
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     TARGET="${1:-all}"
 
     case "$TARGET" in
         help|--help|-h)
-            show_help
+            show_deploy_help
             exit 0
             ;;
         build)
@@ -580,19 +447,22 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         mobile)
             deploy_mobile
             ;;
+        devices)
+            detect_devices
+            ;;
         local)
-            build_mac
-            build_gw_mac
+            build_agentd_mac
+            build_agentgw_mac
             deploy_local
             restart_agentgw
             ;;
         ws)
-            build_linux
+            build_agentd_linux
             deploy_remote
             restart_agentgw
             ;;
         gw)
-            build_gw_mac
+            build_agentgw_mac
             restart_agentgw
             ;;
         all)
