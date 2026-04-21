@@ -57,3 +57,72 @@ func TestSinceReturnsEmpty(t *testing.T) {
 		t.Fatalf("expected 0 events, got %d", len(events))
 	}
 }
+
+func TestUpdateOrAppend(t *testing.T) {
+	buf := eventbuf.New(100)
+
+	// Append first event with msg_id
+	seq1, updated := buf.UpdateOrAppend("msg1", map[string]any{
+		"msg_id": "msg1",
+		"role":   "assistant",
+		"text":   "Hello",
+	})
+	if updated {
+		t.Error("expected first append to not be an update")
+	}
+	if seq1 != 1 {
+		t.Errorf("expected seq 1, got %d", seq1)
+	}
+
+	// Append second event
+	seq2, _ := buf.UpdateOrAppend("msg2", map[string]any{
+		"msg_id": "msg2",
+		"role":   "user",
+		"text":   "Hi",
+	})
+	if seq2 != 2 {
+		t.Errorf("expected seq 2, got %d", seq2)
+	}
+
+	// Update msg1 with new text
+	seq1Updated, wasUpdate := buf.UpdateOrAppend("msg1", map[string]any{
+		"msg_id": "msg1",
+		"role":   "assistant",
+		"text":   "Hello, world!",
+	})
+	if !wasUpdate {
+		t.Error("expected update to return true")
+	}
+	if seq1Updated != seq1 {
+		t.Errorf("expected seq %d (unchanged), got %d", seq1, seq1Updated)
+	}
+
+	// Verify the update took effect
+	events := buf.Since(0)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	// Find msg1
+	for _, e := range events {
+		if e.Data["msg_id"] == "msg1" {
+			if e.Data["text"] != "Hello, world!" {
+				t.Errorf("expected updated text, got %v", e.Data["text"])
+			}
+			if e.Seq != 1 {
+				t.Errorf("expected seq 1 after update, got %d", e.Seq)
+			}
+		}
+	}
+
+	// No msg_id → normal append
+	seq3, wasUpdate3 := buf.UpdateOrAppend("", map[string]any{
+		"role": "assistant",
+		"text": "No msg_id",
+	})
+	if wasUpdate3 {
+		t.Error("expected no update for empty msg_id")
+	}
+	if seq3 != 3 {
+		t.Errorf("expected seq 3, got %d", seq3)
+	}
+}

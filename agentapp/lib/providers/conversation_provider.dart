@@ -19,8 +19,12 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: messages};
   }
 
-  /// Handle a [conversation.message] push event.
+  /// Handle push events: [conversation.message] and [conversation.message_update].
   void handleEvent(WsMessage event) {
+    if (event.method == 'conversation.message_update') {
+      _handleMessageUpdate(event);
+      return;
+    }
     if (event.method != 'conversation.message') return;
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
@@ -31,11 +35,11 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final text = params['text'] as String? ?? '';
     final isPartial = params['partial'] as bool? ?? false;
     final isFinal = params['final'] as bool? ?? false;
+    final msgId = params['msg_id'] as String? ?? '';
 
     // For streaming assistant messages, update the last message if it's also streaming
     if (isPartial && role == MessageRole.assistant) {
       if (existing.isNotEmpty && existing.last.role == MessageRole.assistant) {
-        // Append to the last assistant message
         final last = existing.last;
         existing[existing.length - 1] = MessageModel(
           nodeId: nodeId,
@@ -52,7 +56,6 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     // For final message with full content, replace any partial streaming message
     if (isFinal && role == MessageRole.assistant) {
       if (existing.isNotEmpty && existing.last.role == MessageRole.assistant) {
-        // Replace the last assistant message with the final full text
         final last = existing.last;
         existing[existing.length - 1] = MessageModel(
           nodeId: nodeId,
@@ -66,7 +69,6 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
       }
     }
 
-    // Default: create a new message
     final seq = (params['seq'] as num?)?.toInt() ??
         (existing.isEmpty ? 0 : (existing.last.seq + 1));
     final msg = MessageModel(
@@ -75,8 +77,34 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
       role: role,
       text: text,
       seq: seq,
+      msgId: msgId,
     );
     _appendMessage(msg);
+  }
+
+  void _handleMessageUpdate(WsMessage event) {
+    final params = event.params as Map<String, dynamic>;
+    final nodeId = params['nodeId'] as String? ?? '';
+    final agentId = params['agentId'] as String? ?? '';
+    final msgId = params['msg_id'] as String? ?? '';
+    final newText = params['text'] as String? ?? '';
+    final newSeq = (params['seq'] as num?)?.toInt() ?? 0;
+    final key = (nodeId, agentId);
+    final existing = List<MessageModel>.from(state[key] ?? []);
+
+    // Find message by msg_id and update its text
+    bool updated = false;
+    for (int i = 0; i < existing.length; i++) {
+      if (existing[i].msgId == msgId && msgId.isNotEmpty) {
+        existing[i] = existing[i].copyWith(text: newText, seq: newSeq);
+        updated = true;
+        break;
+      }
+    }
+
+    if (updated) {
+      state = {...state, key: existing};
+    }
   }
 
   void _appendMessage(MessageModel msg) {

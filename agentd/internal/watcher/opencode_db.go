@@ -21,7 +21,15 @@ type OpenCodeDBWatcher struct {
 	callback  func(ConversationEvent)
 	stop      chan struct{}
 	once      sync.Once
-	lastMsgID string // track last seen message ID to avoid duplicates
+	lastMsgID string // track last fully processed message ID
+	db        *sql.DB // persistent connection
+	dbMu      sync.Mutex
+
+	// Streaming message tracking: opencode writes parts progressively,
+	// so the most recent message may receive new parts between polls.
+	// We keep re-querying it until a newer message appears.
+	streamingMsgID   string // msgID of the message still receiving parts
+	streamingMsgText string // last emitted text for the streaming message
 }
 
 // NewOpenCodeDBWatcher creates a watcher that reads conversation data from
@@ -58,22 +66,43 @@ func FindOpenCodeDB() string {
 	return ""
 }
 
+func (w *OpenCodeDBWatcher) getDB() (*sql.DB, error) {
+	w.dbMu.Lock()
+	defer w.dbMu.Unlock()
+	if w.db != nil {
+		return w.db, nil
+	}
+	db, err := sql.Open("sqlite", w.dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	w.db = db
+	return w.db, nil
+}
+
 func (w *OpenCodeDBWatcher) Start() error {
 	if w.dbPath == "" {
-		return nil // no DB found, nothing to watch
+		return nil
 	}
-	// Load existing messages first
-	w.poll()
 	go w.loop()
 	return nil
 }
 
 func (w *OpenCodeDBWatcher) Stop() {
-	w.once.Do(func() { close(w.stop) })
+	w.once.Do(func() {
+		close(w.stop)
+		w.dbMu.Lock()
+		if w.db != nil {
+			w.db.Close()
+			w.db = nil
+		}
+		w.dbMu.Unlock()
+	})
 }
 
 func (w *OpenCodeDBWatcher) loop() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -97,16 +126,28 @@ type openCodePart struct {
 }
 
 func (w *OpenCodeDBWatcher) poll() {
-	// Open DB in read-only mode to avoid locking issues with opencode
-	db, err := sql.Open("sqlite", w.dbPath+"?mode=ro&_journal_mode=WAL")
+	db, err := w.getDB()
 	if err != nil {
 		return
 	}
-	defer db.Close()
 
-	// Query messages newer than lastMsgID, ordered by time_created
+	// Determine the earliest message to include in the query.
+	// We must include the streaming message (if any) so we can re-check its parts.
+	effectiveLastID := w.lastMsgID
+	if w.streamingMsgID != "" {
+		effectiveLastID = w.streamingMsgID
+	}
+
+	// Phase 1: Collect message IDs and metadata (close rows before querying parts
+	// to avoid deadlocking with MaxOpenConns=1).
+	type msgHeader struct {
+		id   string
+		data string
+	}
+	var headers []msgHeader
+
 	var rows *sql.Rows
-	if w.lastMsgID == "" {
+	if effectiveLastID == "" {
 		rows, err = db.Query(`
 			SELECT m.id, m.data
 			FROM message m
@@ -121,33 +162,44 @@ func (w *OpenCodeDBWatcher) poll() {
 				(SELECT time_created FROM message WHERE id = ?), 0
 			)
 			ORDER BY m.time_created ASC`,
-			w.sessionID, w.lastMsgID)
+			w.sessionID, effectiveLastID)
 	}
 	if err != nil {
 		return
 	}
-	defer rows.Close()
-
 	for rows.Next() {
 		var msgID, msgData string
 		if err := rows.Scan(&msgID, &msgData); err != nil {
 			continue
 		}
-		if msgID == w.lastMsgID {
+		// Skip messages we've already fully processed (not the streaming one)
+		if msgID == w.lastMsgID && msgID != w.streamingMsgID {
 			continue
 		}
+		headers = append(headers, msgHeader{id: msgID, data: msgData})
+	}
+	rows.Close()
 
+	// Phase 2: Query parts for each message.
+	type msgInfo struct {
+		id      string
+		role    string
+		text    string
+		hasTool bool
+	}
+	var msgs []msgInfo
+
+	for _, h := range headers {
 		var msg openCodeMsg
-		if err := json.Unmarshal([]byte(msgData), &msg); err != nil {
+		if err := json.Unmarshal([]byte(h.data), &msg); err != nil {
 			continue
 		}
 
-		// Get parts for this message
 		partRows, err := db.Query(`
 			SELECT data FROM part
 			WHERE message_id = ?
 			ORDER BY time_created ASC`,
-			msgID)
+			h.id)
 		if err != nil {
 			continue
 		}
@@ -174,30 +226,83 @@ func (w *OpenCodeDBWatcher) poll() {
 		}
 		partRows.Close()
 
-		w.lastMsgID = msgID
-
-		// Emit event if there's text content
-		if len(textParts) > 0 {
-			text := ""
-			for i, t := range textParts {
-				if i > 0 {
-					text += "\n"
-				}
-				text += t
+		text := ""
+		for i, t := range textParts {
+			if i > 0 {
+				text += "\n"
 			}
+			text += t
+		}
+		msgs = append(msgs, msgInfo{id: h.id, role: msg.Role, text: text, hasTool: hasToolUse})
+	}
 
+	if len(msgs) == 0 {
+		return
+	}
+
+	// Process all but the last message normally (they are complete).
+	// The last message might still be streaming, so we keep it for re-querying.
+	for i := 0; i < len(msgs)-1; i++ {
+		m := msgs[i]
+		w.lastMsgID = m.id
+		// Clear streaming tracking if this was the streaming message and a newer one exists
+		if m.id == w.streamingMsgID {
+			w.streamingMsgID = ""
+			w.streamingMsgText = ""
+		}
+		if m.text != "" {
 			ev := ConversationEvent{
-				Role: msg.Role,
-				Text: text,
+				Role:  m.role,
+				Text:  m.text,
+				MsgID: m.id,
 			}
-			if msg.Role == "assistant" && hasToolUse {
+			if m.role == "assistant" && m.hasTool {
 				s := StatusWorking
 				ev.StatusChange = &s
 			}
 			w.callback(ev)
 		}
+	}
 
-		w.lastMsgID = msgID
+	// Handle the last message (potentially still streaming)
+	last := msgs[len(msgs)-1]
+
+	if last.id == w.streamingMsgID {
+		// Same message as last poll — check if text changed
+		if last.text == w.streamingMsgText {
+			return // no change, skip
+		}
+		// Text updated — emit update event
+		w.streamingMsgText = last.text
+		if last.text != "" {
+			ev := ConversationEvent{
+				Role:  last.role,
+				Text:  last.text,
+				MsgID: last.id,
+			}
+			if last.role == "assistant" && last.hasTool {
+				s := StatusWorking
+				ev.StatusChange = &s
+			}
+			w.callback(ev)
+		}
+		return
+	}
+
+	// New streaming message
+	w.streamingMsgID = last.id
+	w.streamingMsgText = last.text
+	if last.text != "" {
+		ev := ConversationEvent{
+			Role:  last.role,
+			Text:  last.text,
+			MsgID: last.id,
+		}
+		if last.role == "assistant" && last.hasTool {
+			s := StatusWorking
+			ev.StatusChange = &s
+		}
+		w.callback(ev)
 	}
 }
 
@@ -208,12 +313,18 @@ func OpenCodeDBHistory(sessionID string) ([]ConversationEvent, error) {
 		return nil, nil
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL")
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 
+	// Phase 1: Collect message headers (close rows before querying parts
+	// to avoid deadlocking with nested queries on a single connection).
+	type msgHeader struct {
+		id   string
+		data string
+	}
 	rows, err := db.Query(`
 		SELECT m.id, m.data
 		FROM message m
@@ -223,17 +334,21 @@ func OpenCodeDBHistory(sessionID string) ([]ConversationEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var events []ConversationEvent
+	var headers []msgHeader
 	for rows.Next() {
 		var msgID, msgData string
 		if err := rows.Scan(&msgID, &msgData); err != nil {
 			continue
 		}
+		headers = append(headers, msgHeader{id: msgID, data: msgData})
+	}
+	rows.Close()
 
+	// Phase 2: Query parts for each message.
+	var events []ConversationEvent
+	for _, h := range headers {
 		var msg openCodeMsg
-		if err := json.Unmarshal([]byte(msgData), &msg); err != nil {
+		if err := json.Unmarshal([]byte(h.data), &msg); err != nil {
 			continue
 		}
 
@@ -241,7 +356,7 @@ func OpenCodeDBHistory(sessionID string) ([]ConversationEvent, error) {
 			SELECT data FROM part
 			WHERE message_id = ?
 			ORDER BY time_created ASC`,
-			msgID)
+			h.id)
 		if err != nil {
 			continue
 		}
@@ -271,8 +386,9 @@ func OpenCodeDBHistory(sessionID string) ([]ConversationEvent, error) {
 				text += t
 			}
 			events = append(events, ConversationEvent{
-				Role: msg.Role,
-				Text: text,
+				Role:  msg.Role,
+				Text:  text,
+				MsgID: h.id,
 			})
 		}
 	}

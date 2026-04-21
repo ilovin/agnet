@@ -192,6 +192,25 @@ func (m *Manager) appendAndPersistEvent(agentID string, ag *Agent, data map[stri
 	return seq
 }
 
+// updateOrAppendEvent handles streaming message updates: if data contains a
+// msg_id matching an existing event, it updates in place (buffer + store) and
+// returns (existingSeq, true). Otherwise it appends a new event.
+func (m *Manager) updateOrAppendEvent(agentID string, ag *Agent, data map[string]any) (uint64, bool) {
+	msgID, _ := data["msg_id"].(string)
+	seq, updated := ag.EventBuf().UpdateOrAppend(msgID, data)
+	if updated {
+		data["seq"] = seq
+		if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
+			log.Printf("update conversation event agent=%s seq=%d: %v", agentID, seq, err)
+		}
+	} else {
+		if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
+			log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
+		}
+	}
+	return seq, updated
+}
+
 func maybeExtractSessionIDFromRaw(text string) string {
 	if text == "" {
 		return ""
@@ -1866,6 +1885,12 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	sessionID := strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
 
 	applyAttachMetadata := func(ag *Agent) {
+		// Don't downgrade from tmux to watcher: when multiple processes
+		// share the same session (e.g. opencode main + daemon), the one
+		// in tmux should win.
+		if ag.AttachMode() == "tmux" && info.AttachMode() != "tmux" {
+			return
+		}
 		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
 	}
 
@@ -2030,6 +2055,9 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 			"text": e.Text,
 			"raw":  false,
 		}
+		if e.MsgID != "" {
+			data["msg_id"] = e.MsgID
+		}
 		if e.ToolSummary != "" {
 			data["toolSummary"] = e.ToolSummary
 		}
@@ -2041,12 +2069,34 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 				ag.setStatus(StatusIdle)
 			}
 		}
-		m.appendAndPersistEvent(agentID, ag, data)
+
+		// For events with a MsgID (opencode streaming), use update-or-append
+		// so the same message gets its text replaced as more parts arrive.
+		var isUpdate bool
+		if e.MsgID != "" {
+			var seq uint64
+			seq, isUpdate = m.updateOrAppendEvent(agentID, ag, data)
+			data["seq"] = seq
+		} else {
+			seq := m.appendAndPersistEvent(agentID, ag, data)
+			data["seq"] = seq
+		}
+
 		m.mu.RLock()
 		cb := m.onOutput
 		m.mu.RUnlock()
 		if cb != nil {
-			cb(agentID, data)
+			if isUpdate {
+				cb(agentID, map[string]any{
+					"_update": true,
+					"agentId": agentID,
+					"msg_id":  e.MsgID,
+					"text":    e.Text,
+					"seq":     data["seq"],
+				})
+			} else {
+				cb(agentID, data)
+			}
 		}
 	}
 }
@@ -2078,7 +2128,7 @@ func (m *Manager) findOpenCodeSessionID(pid int) string {
 		return ""
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL")
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
 	if err != nil {
 		return ""
 	}
@@ -2126,7 +2176,7 @@ func getWorkingDirectory(pid int) (string, error) {
 // PeriodicScanAndAttach runs periodically to discover new Claude/OpenCode processes
 // and attach to them as new agents.
 func (m *Manager) PeriodicScanAndAttach() {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(120 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {

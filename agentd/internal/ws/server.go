@@ -58,6 +58,21 @@ func New(mgr *agent.Manager, token string) *Server {
 	}
 	// Wire PTY output → broadcast to all WS clients
 	mgr.SetOnOutput(func(agentID string, data map[string]any) {
+		// Handle message updates (streaming text that grew)
+		if isUpdate, _ := data["_update"].(bool); isUpdate {
+			params := map[string]any{
+				"agentId": agentID,
+				"msg_id":  data["msg_id"],
+				"text":    data["text"],
+				"seq":     data["seq"],
+			}
+			srv.broadcast(RPCEvent{
+				JSONRPC: "2.0",
+				Method:  "conversation.message_update",
+				Params:  params,
+			}, nil)
+			return
+		}
 		params := map[string]any{
 			"agentId": agentID,
 			"role":    data["role"],
@@ -66,6 +81,12 @@ func New(mgr *agent.Manager, token string) *Server {
 		// Pass through raw flag if present
 		if raw, ok := data["raw"].(bool); ok {
 			params["raw"] = raw
+		}
+		if seq, ok := data["seq"]; ok {
+			params["seq"] = seq
+		}
+		if msgID, ok := data["msg_id"].(string); ok && msgID != "" {
+			params["msg_id"] = msgID
 		}
 		srv.broadcast(RPCEvent{
 			JSONRPC: "2.0",

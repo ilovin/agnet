@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -33,11 +34,12 @@ type ConversationEventRecord struct {
 // Store wraps a SQLite database for agent metadata.
 type Store struct {
 	db *sql.DB
+	mu sync.Mutex // serialize writes to avoid SQLITE_BUSY
 }
 
 // Open opens (or creates) a SQLite database at path and runs migrations.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -83,6 +85,8 @@ func (s *Store) migrate() error {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) SaveAgent(r AgentRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO agents (id, name, provider, work_dir, resume_session_id, pid) VALUES (?,?,?,?,?,?)`,
 		r.ID, r.Name, r.Provider, r.WorkDir, r.ResumeSessionID, r.PID,
@@ -111,6 +115,8 @@ func (s *Store) ListAgents() ([]AgentRecord, error) {
 }
 
 func (s *Store) UpdateAgentName(id, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.Exec(`UPDATE agents SET name=? WHERE id=?`, name, id)
 	if err != nil {
 		return fmt.Errorf("update name for agent %s: %w", id, err)
@@ -119,6 +125,8 @@ func (s *Store) UpdateAgentName(id, name string) error {
 }
 
 func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result, err := s.db.Exec(`UPDATE agents SET resume_session_id=? WHERE id=?`, sessionID, id)
 	if err != nil {
 		return fmt.Errorf("update resume session for agent %s: %w", id, err)
@@ -131,6 +139,8 @@ func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
 }
 
 func (s *Store) UpdateAgentProvider(id, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result, err := s.db.Exec(`UPDATE agents SET provider=? WHERE id=?`, provider, id)
 	if err != nil {
 		return fmt.Errorf("update provider: %w", err)
@@ -143,6 +153,8 @@ func (s *Store) UpdateAgentProvider(id, provider string) error {
 }
 
 func (s *Store) DeleteAgent(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result, err := s.db.Exec(`DELETE FROM agents WHERE id=?`, id)
 	if err != nil {
 		return fmt.Errorf("delete agent %s: %w", id, err)
@@ -155,6 +167,8 @@ func (s *Store) DeleteAgent(id string) error {
 }
 
 func (s *Store) SaveConversationEvent(agentID string, seq uint64, data map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if agentID == "" {
 		return fmt.Errorf("agent id is required")
 	}

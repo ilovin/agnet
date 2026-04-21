@@ -81,3 +81,36 @@ func (eb *EventBuffer) InitSeq(lastSeq uint64) {
 	defer eb.mu.Unlock()
 	eb.seq = lastSeq
 }
+
+// UpdateOrAppend either updates an existing event with the given msgID (scanning
+// backwards from the most recent) or appends a new event. Returns the event's
+// sequence number and true if an existing event was updated.
+func (eb *EventBuffer) UpdateOrAppend(msgID string, data map[string]any) (uint64, bool) {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+
+	if msgID != "" {
+		// Scan backwards to find existing event with same msg_id
+		for i := eb.count - 1; i >= 0; i-- {
+			idx := (eb.head + i) % eb.cap
+			existingMsgID, _ := eb.buf[idx].Data["msg_id"].(string)
+			if existingMsgID == msgID {
+				eb.buf[idx].Data = data
+				eb.buf[idx].Data["seq"] = eb.buf[idx].Seq
+				return eb.buf[idx].Seq, true
+			}
+		}
+	}
+
+	// Not found — append new event
+	eb.seq++
+	e := Event{Seq: eb.seq, Data: data}
+	if eb.count < eb.cap {
+		eb.buf[(eb.head+eb.count)%eb.cap] = e
+		eb.count++
+	} else {
+		eb.buf[eb.head] = e
+		eb.head = (eb.head + 1) % eb.cap
+	}
+	return eb.seq, false
+}

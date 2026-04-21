@@ -667,6 +667,14 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 		return okResp(req.ID, map[string]any{"id": id}), nil
 	}
 
+	// OpenCode agents switch modes via Tab key (plan ↔ build).
+	if ag.Provider == "opencode" && permissionMode != "" && !modelSpecified && !providerSpecified {
+		if err := ag.WriteInput("\t"); err != nil {
+			return errResp(req.ID, -32000, "write tab: "+err.Error()), nil
+		}
+		return okResp(req.ID, map[string]any{"id": id}), nil
+	}
+
 	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
@@ -787,8 +795,11 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	attachMode := ag.AttachMode()
 	isTmuxAttached := attachMode == "tmux"
-	// Guard againstRestart/Start on attached non-tmux agents (read-only watcher attach)
-	if attachMode != "" && !isTmuxAttached {
+	isOpenCode := ag.Provider == "opencode"
+	// Guard against Restart/Start on attached non-tmux agents (read-only watcher attach).
+	// OpenCode agents are exempt: openCodeSendWithResume uses `opencode run --session`,
+	// not PTY input, so the read-only watcher attach does not apply.
+	if attachMode != "" && !isTmuxAttached && !isOpenCode {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
 			reason = "attached session is read-only"
@@ -797,7 +808,6 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	}
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
 	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
-	isOpenCode := ag.Provider == "opencode"
 
 	// For tmux-attached Claude sessions, write directly to PTY (don't restart)
 	if isTmuxAttached {

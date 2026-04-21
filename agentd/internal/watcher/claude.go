@@ -27,6 +27,7 @@ type ConversationEvent struct {
 	Text         string       // combined text content
 	ToolSummary  string       // human-readable tool call summary (e.g. "Bash: go test ./...")
 	StatusChange *AgentStatus // non-nil when this line changes agent status
+	MsgID        string       // unique message ID for update tracking (opencode DB message.id)
 }
 
 // SessionWatcher is the interface implemented by all session watchers
