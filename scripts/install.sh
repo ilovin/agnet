@@ -153,38 +153,22 @@ detect_binary() {
 
 # Detect local agentd binary (in agentd/ dir, sibling of scripts/)
 detect_local_agentd() {
+  local out_dir="$SCRIPT_DIR/../out"
   local agentd_dir="$SCRIPT_DIR/../agentd"
+  local bin=""
   case "$(uname -s):$(uname -m)" in
-    Darwin:arm64|Darwin:x86_64)
-      if [[ -f "$agentd_dir/agentd-darwin" ]]; then
-        echo "$agentd_dir/agentd-darwin"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
+    Darwin:*)
+      for c in "$out_dir/agentd" "$agentd_dir/agentd-darwin" "$agentd_dir/agentd" "$BIN_DIR/agentd-darwin" "$BIN_DIR/agentd"; do
+        if [[ -f "$c" ]]; then bin="$c"; break; fi
+      done
       ;;
-    Linux:x86_64)
-      if [[ -f "$agentd_dir/agentd-linux-amd64" ]]; then
-        echo "$agentd_dir/agentd-linux-amd64"
-      elif [[ -f "$agentd_dir/agentd-linux" ]]; then
-        echo "$agentd_dir/agentd-linux"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-    Linux:aarch64)
-      if [[ -f "$agentd_dir/agentd-linux" ]]; then
-        echo "$agentd_dir/agentd-linux"
-      elif [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
-      ;;
-    *)
-      # Fallback: any agentd binary
-      if [[ -f "$agentd_dir/agentd" ]]; then
-        echo "$agentd_dir/agentd"
-      fi
+    Linux:x86_64|Linux:aarch64)
+      for c in "$out_dir/agentd-linux" "$agentd_dir/agentd-linux" "$agentd_dir/agentd" "$BIN_DIR/agentd-linux" "$BIN_DIR/agentd"; do
+        if [[ -f "$c" ]]; then bin="$c"; break; fi
+      done
       ;;
   esac
+  echo "$bin"
 }
 
 restart_services() {
