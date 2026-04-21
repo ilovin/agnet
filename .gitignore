@@ -31,5 +31,5 @@ agentgw/scripts/
 .DS_Store
 Thumbs.db
 
-# Claude worktrees
-.claude/worktrees/
+# Claude worktrees and project files
+.claude/
