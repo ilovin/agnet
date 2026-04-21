@@ -17,12 +17,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$SCRIPT_DIR/bin"
 INSTALL_DIR="$HOME/.agentgw"
+RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
 GW_PORT=7374
+DEFAULT_HUB_URL="https://8.146.236.75:443"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
+HUB_URL="$DEFAULT_HUB_URL"
+TUNNEL_URL=""
+APP_URL=""
+REGISTERED_USER=""
+REGISTERED_TOKEN=""
+
+# REALITY defaults (matching tunnelhub server config)
+REALITY_PUB="${AGENTGW_REALITY_PUB:-}"
+REALITY_SID="${AGENTGW_REALITY_SID:-}"
+REALITY_SNI="${AGENTGW_REALITY_SNI:-www.google.com}"
 
 show_help() {
   cat <<'EOF'
@@ -37,9 +49,20 @@ COMMANDS:
 
 OPTIONS (for install):
   --token TOKEN      Pre-set authentication token
+  --hub URL          Tunnelhub base URL (e.g. https://8.146.236.75:443)
+  --tunnel-url URL   Full tunnel URL (overrides --hub)
+  --app-url URL      App-facing remote URL for QR/websocket
   --local-only       Only setup local agentgw, skip remote deployment
   --no-browser       Don't open browser after installation
   -h, --help         Show this help message and exit
+
+ENVIRONMENT:
+  AGENTGW_HUB              Tunnelhub base URL (default: https://8.146.236.75:443)
+  AGENTGW_TUNNEL_URL       Full tunnel URL (overrides AGENTGW_HUB)
+  AGENTGW_APP_URL          App-facing remote URL
+  AGENTGW_REALITY_PUB      REALITY public key (base64)
+  AGENTGW_REALITY_SID      REALITY short ID (hex)
+  AGENTGW_REALITY_SNI      REALITY server name (default: www.google.com)
 
 EXAMPLES:
   ./install.sh
@@ -64,6 +87,12 @@ case "$SUBCMD" in
       case "$1" in
         --token=*) TOKEN="${1#--token=}" ;;
         --token)   shift; TOKEN="${1:-}" ;;
+        --hub=*) HUB_URL="${1#--hub=}" ;;
+        --hub)   shift; HUB_URL="${1:-}" ;;
+        --tunnel-url=*) TUNNEL_URL="${1#--tunnel-url=}" ;;
+        --tunnel-url)   shift; TUNNEL_URL="${1:-}" ;;
+        --app-url=*) APP_URL="${1#--app-url=}" ;;
+        --app-url)   shift; APP_URL="${1:-}" ;;
         --local-only) LOCAL_ONLY=true ;;
         --no-browser) OPEN_BROWSER=false ;;
         --help|-h)
@@ -112,6 +141,52 @@ stop_services() {
   fi
 }
 
+# Detect agentgw binary for current platform
+detect_binary() {
+  case "$(uname -s):$(uname -m)" in
+    Darwin:*)  echo "$BIN_DIR/agentgw-macos-arm64" ;;
+    Linux:x86_64)  echo "$BIN_DIR/agentgw-linux" ;;
+    Linux:aarch64) echo "$BIN_DIR/agentgw-linux" ;;
+    *) echo "" ;;
+  esac
+}
+
+# Detect local agentd binary (in agentd/ dir, sibling of scripts/)
+detect_local_agentd() {
+  local agentd_dir="$SCRIPT_DIR/../agentd"
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64|Darwin:x86_64)
+      if [[ -f "$agentd_dir/agentd-darwin" ]]; then
+        echo "$agentd_dir/agentd-darwin"
+      elif [[ -f "$agentd_dir/agentd" ]]; then
+        echo "$agentd_dir/agentd"
+      fi
+      ;;
+    Linux:x86_64)
+      if [[ -f "$agentd_dir/agentd-linux-amd64" ]]; then
+        echo "$agentd_dir/agentd-linux-amd64"
+      elif [[ -f "$agentd_dir/agentd-linux" ]]; then
+        echo "$agentd_dir/agentd-linux"
+      elif [[ -f "$agentd_dir/agentd" ]]; then
+        echo "$agentd_dir/agentd"
+      fi
+      ;;
+    Linux:aarch64)
+      if [[ -f "$agentd_dir/agentd-linux" ]]; then
+        echo "$agentd_dir/agentd-linux"
+      elif [[ -f "$agentd_dir/agentd" ]]; then
+        echo "$agentd_dir/agentd"
+      fi
+      ;;
+    *)
+      # Fallback: any agentd binary
+      if [[ -f "$agentd_dir/agentd" ]]; then
+        echo "$agentd_dir/agentd"
+      fi
+      ;;
+  esac
+}
+
 restart_services() {
   stop_services
 
@@ -127,9 +202,13 @@ restart_services() {
     chmod +x "$INSTALL_DIR/agentgw"
   fi
 
-  local local_bin="$BIN_DIR/agentd"
-  if [[ -f "$local_bin" ]]; then
-    step "启动本地 agentd..."
+  local local_bin
+  local_bin="$(detect_local_agentd)"
+  if [[ -z "$local_bin" || ! -f "$local_bin" ]]; then
+    warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
+    warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux|-linux-amd64]"
+  else
+    step "启动本地 agentd (${local_bin##*/})..."
     nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
     sleep 2
     if lsof -nP -iTCP:"$AGENTD_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -137,12 +216,18 @@ restart_services() {
     else
       warn "agentd 启动失败，查看日志: tail -f /tmp/agentd-local.log"
     fi
-  else
-    warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
   fi
 
   step "启动 agentgw..."
-  nohup "$gw_bin" start > /tmp/agentgw.log 2>&1 &
+  local -a env_args=()
+  if [[ -f "$RUNTIME_ENV_FILE" ]]; then
+    env_args+=(env)
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      env_args+=("$line")
+    done < "$RUNTIME_ENV_FILE"
+  fi
+  nohup "${env_args[@]}" "$gw_bin" start --qr > /tmp/agentgw.log 2>&1 &
   sleep 2
   local gwpid
   gwpid="$(gateway_pid)"
@@ -203,15 +288,14 @@ esac
 # Normal install flow below
 # ═══════════════════════════════════════════════════════════════════
 
-# ── Detect platform ────────────────────────────────────────────────
-detect_binary() {
-  case "$(uname -s):$(uname -m)" in
-    Darwin:*)  echo "$BIN_DIR/agentgw-macos-arm64" ;;
-    Linux:x86_64)  echo "$BIN_DIR/agentgw-linux" ;;
-    Linux:aarch64) echo "$BIN_DIR/agentgw-linux" ;;
-    *) echo "" ;;
-  esac
-}
+# ── 0. Read existing config (port etc.) ────────────────────────────
+mkdir -p "$INSTALL_DIR"
+if [[ -f "$INSTALL_DIR/config.yaml" ]]; then
+  EXISTING_PORT="$(grep '^port:' "$INSTALL_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//')"
+  if [[ -n "$EXISTING_PORT" ]]; then
+    GW_PORT="$EXISTING_PORT"
+  fi
+fi
 
 # ── Scan SSH config ────────────────────────────────────────────────
 scan_ssh_nodes() {
@@ -264,6 +348,64 @@ deploy_agentd() {
 generate_token() {
   [[ -n "$TOKEN" ]] && { echo "$TOKEN"; return; }
   openssl rand -hex 8 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(8))" 2>/dev/null || echo "agent-$(date +%s)"
+}
+
+extract_json_field() {
+  local path="$1" field="$2"
+  python3 - "$path" "$field" <<'PY'
+import json, sys
+path, field = sys.argv[1], sys.argv[2]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    value = data.get(field, "")
+    if value is None:
+        value = ""
+    print(value)
+except Exception:
+    pass
+PY
+}
+
+build_remote_ws_url() {
+  local hub_url="$1" app_url="$2" user_id="$3"
+  [[ -z "$hub_url" ]] && return
+  python3 - "$hub_url" "$app_url" "$user_id" <<'PY'
+from urllib.parse import urlparse
+import sys
+hub_url, app_url, user_id = sys.argv[1], sys.argv[2], sys.argv[3]
+base = app_url or hub_url
+u = urlparse(base)
+if not u.scheme or not u.netloc:
+    sys.exit(0)
+if not user_id:
+    user_id = 'default'
+scheme = 'wss' if u.scheme in ('wss', 'https') else 'ws'
+print(f"{scheme}://{u.netloc}/api.v1.AgentService/Stream/{user_id}")
+PY
+}
+
+# Save userId + token to local_auth.json
+save_local_auth() {
+  local user="$1" tok="$2" path="$INSTALL_DIR/local_auth.json"
+  python3 - "$user" "$tok" "$path" <<'PY'
+import json, sys, os
+user, tok, path = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, 'w') as f:
+    json.dump({"userId": user, "token": tok}, f)
+PY
+}
+
+register_with_hub() {
+  local gw_bin="$1"
+  local hub_url="$2"
+  [[ -z "$hub_url" ]] && return 0
+  step "注册 agentgw 到 tunnelhub..."
+  if "$gw_bin" login --hub "$hub_url"; then
+    return 0
+  fi
+  return 1
 }
 
 # ── QR code generation ─────────────────────────────────────────────
@@ -350,7 +492,154 @@ if ! $LOCAL_ONLY; then
   fi
 fi
 
-# ── 3. Token ──────────────────────────────────────────────────────
+# ── 3. Resolve tunnel settings / registration ──────────────────────
+if [[ -z "$HUB_URL" ]]; then
+  HUB_URL="${AGENTGW_HUB:-$DEFAULT_HUB_URL}"
+fi
+if [[ -z "$TUNNEL_URL" ]]; then
+  TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
+fi
+if [[ -z "$APP_URL" ]]; then
+  APP_URL="${AGENTGW_APP_URL:-}"
+fi
+
+# Interactive mode selection
+if [[ -z "$TUNNEL_URL" && -z "$APP_URL" ]]; then
+  echo ""
+  echo -e "${CYAN}网络模式选择:${NC}"
+  echo "  [1] 隧道模式 — 通过 tunnelhub 远程访问（需要注册）"
+  echo "  [2] 本地模式 — 仅在局域网内访问，不连接 tunnelhub"
+  echo -n "选择 (默认 1): "
+  read -r MODE_CHOICE
+
+  if [[ "${MODE_CHOICE:-1}" == "2" ]]; then
+    info "使用本地模式"
+    HUB_URL=""
+    TUNNEL_URL=""
+    APP_URL=""
+  fi
+fi
+
+# Tunnel mode: handle credentials
+if [[ -n "$HUB_URL" ]]; then
+  local_auth_path="$INSTALL_DIR/local_auth.json"
+  oauth_path="$INSTALL_DIR/oauth.json"
+  CRED_USERS=()
+  CRED_TOKENS=()
+  CRED_SOURCES=()
+
+  if [[ -f "$local_auth_path" ]]; then
+    u="$(extract_json_field "$local_auth_path" userId)"
+    t="$(extract_json_field "$local_auth_path" token)"
+    if [[ -n "$u" && -n "$t" ]]; then
+      CRED_USERS+=("$u")
+      CRED_TOKENS+=("$t")
+      CRED_SOURCES+=("local_auth.json")
+    fi
+  fi
+
+  if [[ -f "$oauth_path" ]]; then
+    u="$(extract_json_field "$oauth_path" userId)"
+    t="$(extract_json_field "$oauth_path" accessToken)"
+    if [[ -n "$u" && -n "$t" ]]; then
+      CRED_USERS+=("$u")
+      CRED_TOKENS+=("$t")
+      CRED_SOURCES+=("oauth.json")
+    fi
+  fi
+
+  if [[ ${#CRED_USERS[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "${CYAN}检测到本地已保存的凭据:${NC}"
+    for i in "${!CRED_USERS[@]}"; do
+      idx=$((i + 1))
+      echo "  [$idx] User: ${CRED_USERS[i]} (来源: ${CRED_SOURCES[i]})"
+    done
+    n=${#CRED_USERS[@]}
+    echo "  [$((n+1))] 重新注册（覆盖现有，生成新 token）"
+    echo "  [$((n+2))] 本地模式（仅局域网，不连接 tunnelhub）"
+    echo -n "请选择 (默认 1): "
+    read -r CHOICE
+    CHOICE="${CHOICE:-1}"
+
+    if [[ "$CHOICE" -ge 1 && "$CHOICE" -le "$n" ]]; then
+      idx=$((CHOICE - 1))
+      REGISTERED_USER="${CRED_USERS[idx]}"
+      REGISTERED_TOKEN="${CRED_TOKENS[idx]}"
+      info "使用本地凭据: $REGISTERED_USER"
+    elif [[ "$CHOICE" == "$((n+1))" ]]; then
+      if register_with_hub "$GW_BIN" "$HUB_URL"; then
+        REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
+        REGISTERED_TOKEN="$(extract_json_field "$local_auth_path" token)"
+      else
+        echo ""
+        warn "重新注册失败（userId 可能已在 hub 上存在）"
+        echo -n "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: "
+        read -r RECOVERY_TOKEN
+        if [[ -n "$RECOVERY_TOKEN" ]]; then
+          echo -n "输入 userId: "
+          read -r RECOVERY_USER
+          if [[ -n "$RECOVERY_USER" ]]; then
+            save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
+            REGISTERED_USER="$RECOVERY_USER"
+            REGISTERED_TOKEN="$RECOVERY_TOKEN"
+            info "已恢复凭据: $RECOVERY_USER"
+          fi
+        else
+          HUB_URL=""
+          TUNNEL_URL=""
+          APP_URL=""
+          warn "切换到本地模式"
+        fi
+      fi
+    else
+      HUB_URL=""
+      TUNNEL_URL=""
+      APP_URL=""
+      info "切换到本地模式"
+    fi
+  else
+    if register_with_hub "$GW_BIN" "$HUB_URL"; then
+      REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
+      REGISTERED_TOKEN="$(extract_json_field "$local_auth_path" token)"
+    else
+      warn "注册失败（userId 可能已在 hub 上存在）"
+      echo -n "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: "
+      read -r RECOVERY_TOKEN
+      if [[ -n "$RECOVERY_TOKEN" ]]; then
+        echo -n "输入 userId: "
+        read -r RECOVERY_USER
+        if [[ -n "$RECOVERY_USER" ]]; then
+          save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
+          REGISTERED_USER="$RECOVERY_USER"
+          REGISTERED_TOKEN="$RECOVERY_TOKEN"
+          info "已恢复凭据: $RECOVERY_USER"
+        fi
+      else
+        HUB_URL=""
+        TUNNEL_URL=""
+        APP_URL=""
+        warn "切换到本地模式"
+      fi
+    fi
+  fi
+
+  if [[ -z "$APP_URL" && -n "$HUB_URL" ]]; then
+    APP_URL="${HUB_URL%/}"
+    # App connects via standard TLS on 8443 (WebSocket).
+    # agentgw connects via REALITY on 443 (gRPC-Web).
+    if [[ "$APP_URL" == *":443" ]]; then
+      APP_URL="${APP_URL%:443}:8443"
+    elif [[ "$APP_URL" == https://* ]] && [[ "$APP_URL" != *:[0-9]* ]]; then
+      APP_URL="${APP_URL}:8443"
+    fi
+  fi
+  if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
+    TOKEN="$REGISTERED_TOKEN"
+  fi
+fi
+
+# ── 4. Token ──────────────────────────────────────────────────────
 # Reuse existing token if config already exists
 if [[ -z "$TOKEN" && -f "$INSTALL_DIR/config.yaml" ]]; then
   EXISTING_TOKEN="$(grep 'token:' "$INSTALL_DIR/config.yaml" 2>/dev/null | head -1 | sed 's/.*token:[[:space:]]*//' | tr -d '"' | tr -d "'")"
@@ -364,9 +653,7 @@ if [[ -z "$TOKEN" ]]; then
   info "生成新 Token: ${TOKEN}"
 fi
 
-# ── 4. Config ─────────────────────────────────────────────────────
-mkdir -p "$INSTALL_DIR"
-
+# ── 5. Config ─────────────────────────────────────────────────────
 # Only write config.yaml if it doesn't exist or token changed
 if [[ ! -f "$INSTALL_DIR/config.yaml" ]]; then
   cat > "$INSTALL_DIR/config.yaml" <<EOF
@@ -380,7 +667,7 @@ EOF
   info "配置: ${INSTALL_DIR}/config.yaml"
 else
   # Update token if changed, preserve rest
-  EXISTING_TOKEN_LINE="$(grep 'token:' "$INSTALL_DIR/config.yaml" | head -1)"
+  EXISTING_TOKEN_LINE="$(grep '^token:' "$INSTALL_DIR/config.yaml" | head -1)"
   NEW_TOKEN_LINE="token: \"${TOKEN}\""
   if [[ "$EXISTING_TOKEN_LINE" != "$NEW_TOKEN_LINE" ]]; then
     sed -i.bak "s|^token:.*|${NEW_TOKEN_LINE}|" "$INSTALL_DIR/config.yaml"
@@ -389,7 +676,18 @@ else
   info "配置已存在，已更新: ${INSTALL_DIR}/config.yaml"
 fi
 
-# ── 5. Start agentgw ──────────────────────────────────────────────
+# ── 6. Persist runtime env ─────────────────────────────────────────
+cat > "$RUNTIME_ENV_FILE" <<EOF
+AGENTGW_HUB=${HUB_URL}
+AGENTGW_TUNNEL_URL=${TUNNEL_URL}
+AGENTGW_APP_URL=${APP_URL}
+AGENTGW_REALITY_PUB=${REALITY_PUB}
+AGENTGW_REALITY_SID=${REALITY_SID}
+AGENTGW_REALITY_SNI=${REALITY_SNI}
+EOF
+chmod 600 "$RUNTIME_ENV_FILE"
+
+# ── 7. Start agentgw ──────────────────────────────────────────────
 cp "$GW_BIN" "$INSTALL_DIR/agentgw"
 chmod +x "$INSTALL_DIR/agentgw"
 
@@ -397,12 +695,32 @@ pkill -f "agentgw start" 2>/dev/null || true
 sleep 1
 
 # Copy static files if available
-if [[ -d "$SCRIPT_DIR/static" ]]; then
-  mkdir -p "$INSTALL_DIR/static"
-  cp -r "$SCRIPT_DIR/static/"* "$INSTALL_DIR/static/" 2>/dev/null || true
+for static_src in "$SCRIPT_DIR/static" "$SCRIPT_DIR/../agentgw/static"; do
+  if [[ -d "$static_src" ]]; then
+    mkdir -p "$INSTALL_DIR/static"
+    cp -r "$static_src/"* "$INSTALL_DIR/static/" 2>/dev/null || true
+    break
+  fi
+done
+
+AGENTGW_START_ARGS=(start --qr)
+if [[ -n "$HUB_URL" ]]; then
+  AGENTGW_START_ARGS+=(--hub "$HUB_URL")
+fi
+if [[ -n "$TUNNEL_URL" ]]; then
+  AGENTGW_START_ARGS+=(--tunnel-url "$TUNNEL_URL")
+fi
+if [[ -n "$APP_URL" ]]; then
+  AGENTGW_START_ARGS+=(--app-url "$APP_URL")
+fi
+if [[ -n "$REALITY_PUB" && -n "$REALITY_SNI" ]]; then
+  AGENTGW_START_ARGS+=(--reality-pub "$REALITY_PUB" --reality-sni "$REALITY_SNI")
+  if [[ -n "$REALITY_SID" ]]; then
+    AGENTGW_START_ARGS+=(--reality-sid "$REALITY_SID")
+  fi
 fi
 
-nohup "$INSTALL_DIR/agentgw" start > /tmp/agentgw.log 2>&1 &
+nohup "$INSTALL_DIR/agentgw" "${AGENTGW_START_ARGS[@]}" > /tmp/agentgw.log 2>&1 &
 GW_PID=$!
 sleep 2
 
@@ -414,7 +732,7 @@ else
   exit 1
 fi
 
-# ── 6. Connection info + QR ──────────────────────────────────────
+# ── 8. Connection info + QR ──────────────────────────────────────
 # Detect all available IPs
 LOCAL_IP=""
 TAILSCALE_IP=""
@@ -453,22 +771,58 @@ if [[ -n "$TAILSCALE_IP" && -n "$LAN_IP" && "$TAILSCALE_IP" != "$LAN_IP" ]]; the
   esac
 fi
 
-GW_URL="ws://${LOCAL_IP}:${GW_PORT}/ws"
-QR_DATA="${GW_URL}|${TOKEN}"
+TUNNEL_USER="$REGISTERED_USER"
+if [[ -z "$TUNNEL_USER" ]]; then
+  # Try loading from local_auth.json
+  TUNNEL_USER="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['userId'])" "$INSTALL_DIR/local_auth.json" 2>/dev/null || true)"
+fi
+if [[ -z "$TUNNEL_URL" ]]; then
+  TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
+fi
+if [[ -z "$APP_URL" ]]; then
+  APP_URL="${AGENTGW_APP_URL:-}"
+fi
+REMOTE_WS_URL="$(build_remote_ws_url "$HUB_URL" "$APP_URL" "$TUNNEL_USER")"
+LOCAL_WS_URL="ws://${LOCAL_IP}:${GW_PORT}/ws"
 
 echo ""
 echo -e "${GREEN}╔════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   🎉 安装完成！                            ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${CYAN}📱 手机连接:${NC}"
-echo "  URL:   ${GW_URL}"
+
+# Always show local connection info
+echo -e "${CYAN}📱 本地连接（同局域网）:${NC}"
+echo "  URL:   ${LOCAL_WS_URL}"
 echo "  Token: ${TOKEN}"
 echo ""
 
-# QR code
+# Show remote tunnel info if available
+if [[ -n "$REMOTE_WS_URL" ]]; then
+  echo -e "${CYAN}🌐 远程连接（通过 tunnelhub）:${NC}"
+  echo "  URL:   ${REMOTE_WS_URL}"
+  echo "  Token: ${REGISTERED_TOKEN:-$TOKEN}"
+  if [[ -n "$TUNNEL_USER" ]]; then
+    echo "  User:  ${TUNNEL_USER}"
+  fi
+  echo ""
+fi
+
+echo -e "${CYAN}💻 本地 Web 控制台:${NC}"
+echo "  http://localhost:${GW_PORT}"
+echo ""
+
+# QR codes — always show local; also show remote if available
 step "二维码（手机扫描即可连接）:"
-generate_qr "$QR_DATA"
+echo ""
+echo -e "${CYAN}[本地] 同局域网使用:${NC}"
+generate_qr "${LOCAL_WS_URL}|${TOKEN}"
+
+if [[ -n "$REMOTE_WS_URL" ]]; then
+  echo ""
+  echo -e "${CYAN}[远程] 跨网络使用:${NC}"
+  generate_qr "${REMOTE_WS_URL}|${REGISTERED_TOKEN:-$TOKEN}"
+fi
 
 # Open browser
 if $OPEN_BROWSER; then
@@ -481,9 +835,28 @@ echo ""
 echo -e "${CYAN}💡 提示:${NC}"
 echo "  📱 手机安装 agentapp.apk → 扫描上方二维码"
 echo "  🌐 浏览器: http://localhost:${GW_PORT}"
+if [[ -n "$REMOTE_WS_URL" ]]; then
+  echo "  🔗 远程连接: ${REMOTE_WS_URL}"
+fi
+if [[ -n "$TUNNEL_USER" ]]; then
+  echo "  🧾 注册用户: ${TUNNEL_USER}"
+fi
 echo "  📝 配置: ${INSTALL_DIR}/config.yaml"
+echo "  🔐 凭据: ${INSTALL_DIR}/local_auth.json"
+echo "  ⚙️  运行环境: ${RUNTIME_ENV_FILE}"
 echo "  📋 日志: tail -f /tmp/agentgw.log"
 echo "  🔄 重启: ./install.sh restart"
 echo "  ⏹  停止: ./install.sh stop"
 echo "  ℹ️  状态: ./install.sh status"
+if [[ -n "$HUB_URL" ]]; then
+  echo ""
+  echo "  agentgw 已使用以下隧道配置："
+  echo "    AGENTGW_HUB=${HUB_URL}"
+  if [[ -n "$APP_URL" ]]; then
+    echo "    AGENTGW_APP_URL=${APP_URL}"
+  fi
+  if [[ -n "$REALITY_PUB" ]]; then
+    echo "    REALITY: SNI=${REALITY_SNI}"
+  fi
+fi
 echo ""

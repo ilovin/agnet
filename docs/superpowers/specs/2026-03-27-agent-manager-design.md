@@ -20,22 +20,24 @@ Agent Manager 是一个多 AI Agent 远程管理系统，支持通过手机 App 
 
 - Agent 审批机制（当前使用 bypass 模式）
 - PTY 终端级别的完整输出展示
-- 公网穿透（通过 Tailscale 解决，不在本系统实现范围内）
 
 ---
 
 ## 2. 网络拓扑
 
+> **注意**：公网穿透已通过 tunnelhub + REALITY 实现，详见 `2026-04-20-anti-detection-grpc-web-reality.md`
+
 ```
-手机 App ──WebSocket (Tailscale)──► 本机 Gateway ──SSH Tunnel + WS──► 远端 agentd1 → claude, opencode
-(Flutter)                           (agentgw, Go)  └──SSH Tunnel + WS──► 远端 agentd2 → claude
-          └──WebSocket 直连 (可选，远端也在 Tailscale 时)──────────────► 远端 agentd
+手机 App ──gRPC-Web/HTTP2──► tunnelhub:443 ──gRPC-Web/HTTP2──► 本机 Gateway ──SSH Tunnel + WS──► 远端 agentd
+(Flutter)                    (REALITY TLS)                     (agentgw, Go)
+                             SNI: www.google.com
 ```
 
 ### 网络可达性
 
-- 本机与远端：通过公网 SSH 互通（无需公网 IP）
-- 手机与本机：通过 Tailscale P2P VPN（无需公网 IP）
+- 本机与远端：通过公网 SSH 互通
+- 手机与本机（局域网）：直连 `ws://<IP>:7374/ws`
+- 手机与本机（跨网络）：通过 tunnelhub 中转，gRPC-Web over REALITY（伪装为 Google 流量）
 - 手机与远端（可选）：远端也加入 Tailscale 时，App 可绕过 Gateway 直连
 
 ### 三个独立组件
@@ -45,6 +47,7 @@ Agent Manager 是一个多 AI Agent 远程管理系统，支持通过手机 App 
 | `agentd` | 每台远端机器 | 7373 | 管理本机 Agent 进程，暴露 WS API |
 | `agentgw` | 本机 | 7374 | 聚合多台 agentd，为 App 提供统一接口，部署远端 agentd |
 | `agentapp` | 手机 | - | UI：监控仪表盘、对话视图、启停控制 |
+| `tunnelhub` | 公网服务器 | 443 | 中转 App ↔ agentgw 流量，REALITY TLS 伪装 |
 
 ---
 
@@ -187,10 +190,11 @@ event: conversation.thinking  {nodeId, agentId}
 
 ### 4.4 连接模式
 
-App 可同时维护两类连接：
+App 可通过三种方式连接：
 
-1. **Gateway 模式**：`ws://<本机 Tailscale IP>:7374`（标准路径，所有功能可用）
-2. **直连模式**：`ws://<远端 Tailscale IP>:7373`（远端也加入 Tailscale 时，绕过 Gateway）
+1. **Gateway 局域网模式**：`ws://<本机 IP>:7374/ws`（同局域网直连，所有功能可用）
+2. **Gateway 远程模式**：`wss://<tunnelhub>:443/api.v1.AgentService/Stream/{userId}`（通过 tunnelhub 中转，REALITY 伪装）
+3. **直连模式**：`ws://<远端 Tailscale IP>:7373`（远端也加入 Tailscale 时，绕过 Gateway）
 
 ---
 
@@ -255,9 +259,10 @@ App
 
 ## 6. 认证与安全
 
-- **传输安全**：agentgw ↔ agentd 通过 SSH Tunnel 加密，App ↔ agentgw 通过 Tailscale 加密（局域网信任）
-- **认证**：静态 token（在 agentd/agentgw 配置文件中设置，App 连接时携带）
+- **传输安全**：agentgw ↔ agentd 通过 SSH Tunnel 加密；App ↔ tunnelhub ↔ agentgw 通过 REALITY + gRPC-Web over HTTP/2 加密（伪装为 Google 流量，详见 `2026-04-20-anti-detection-grpc-web-reality.md`）
+- **认证**：静态 token（在 agentd/agentgw 配置文件中设置，App 连接时通过 `Authorization: Bearer` 头携带）
 - **SSH 密钥**：Gateway 使用本机 SSH 密钥连接远端，密钥存储在本机，不传输到 App
+- **REALITY 密钥**：X25519 密钥对由 tunnelhub 自动生成，公钥需安全分发给 agentgw
 
 ---
 
@@ -278,7 +283,7 @@ App
 | 组件 | 语言/框架 | 关键依赖 |
 |------|---------|---------|
 | agentd | Go | `go-pty`、`gorilla/websocket`、`mattn/go-sqlite3` |
-| agentgw | Go | `golang.org/x/crypto/ssh`、`gorilla/websocket`、`go:embed` |
+| agentgw | Go | `golang.org/x/crypto/ssh`、`gorilla/websocket`、`refraction-networking/utls`、`go:embed` |
 | agentapp | Flutter (Dart) | `web_socket_channel`、`flutter_markdown`、`provider` 或 `riverpod` |
 | 网络层 | Tailscale | 手机与本机之间的 P2P VPN |
 

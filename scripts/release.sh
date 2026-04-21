@@ -9,7 +9,7 @@
 # Output: release/phone-talk-vX.Y.Z.tar.gz
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source scripts/deploy.sh
+source scripts/build.sh
 
 show_help() {
   cat <<'EOF'
@@ -98,7 +98,7 @@ build_agentgw_linux() {
   (cd agentgw && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "../${output}" ./cmd/agentgw/)
 }
 
-build_linux & pid_linux=$!
+build_agentd_linux & pid_linux=$!
 build_agentgw_macos & pid_gw_mac=$!
 build_agentgw_linux & pid_gw_linux=$!
 
@@ -167,15 +167,15 @@ chmod +x "${RELEASE_DIR}/install.sh"
 
 # ── Deploy scripts ─────────────────────────────────────────────────
 mkdir -p "${RELEASE_DIR}/scripts"
-for script in scripts/deploy.sh scripts/deploy-remote.sh scripts/setup.sh scripts/build.sh; do
+for script in scripts/build.sh scripts/deploy.sh scripts/tunnelhub.sh; do
   if [[ -f "$script" ]]; then
     cp "$script" "${RELEASE_DIR}/$script"
     chmod +x "${RELEASE_DIR}/$script"
   fi
 done
 
-if [[ -d "agentgw/static" ]]; then
-  cp -r agentgw/static "${RELEASE_DIR}/static"
+if [[ -d "$WEB_STATIC_DIR" ]]; then
+  cp -r "$WEB_STATIC_DIR" "${RELEASE_DIR}/static"
 fi
 
 # ── README ─────────────────────────────────────────────────────────

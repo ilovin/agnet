@@ -24,22 +24,7 @@ cd phone-talk-v0.1.0
 
 ## 日常管理
 
-agentapp
-agentd
-agentgw
-chrome_ui_report.png
-CLAUDE.md
-CONVERSATION_FIX_STATUS.md
-conversation_ui_test.png
-docs
-findings.md
-progress.md
-release
-scripts
-server.log
-task_plan.md
-TEST_CHECKLIST.md
-TEST_SCRIPTS.md
+
 
 ## 手动添加连接
 

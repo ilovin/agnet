@@ -8,9 +8,9 @@
 
 # Build output
 /out/
-
-# Build hash files
-*.buildhash
+/release/**/*.tar.gz
+/release/**/bin/
+/release/**/static/
 
 # Flutter build
 agentapp/build/
