@@ -214,7 +214,17 @@ build_ipa() {
 }
 
 build_web() {
-    if up_to_date "$WEB_STATIC_DIR/index.html" agentapp/lib -type f -name '*.dart' agentapp/pubspec.yaml agentapp/pubspec.lock; then
+    local needs_build=false
+    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/lib -type f -name '*.dart'; then
+        needs_build=true
+    fi
+    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/pubspec.yaml; then
+        needs_build=true
+    fi
+    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/pubspec.lock; then
+        needs_build=true
+    fi
+    if [[ "$needs_build" == false ]]; then
         echo "[build] Web static up-to-date, skipping"
         return 0
     fi

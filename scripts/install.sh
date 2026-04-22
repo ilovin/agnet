@@ -151,6 +151,48 @@ detect_binary() {
   esac
 }
 
+# Detect local agentgw binary for current platform
+sync_local_agentgw_binary() {
+  local out_dir="$SCRIPT_DIR/../out"
+  local bin=""
+  case "$(uname -s):$(uname -m)" in
+    Darwin:*)
+      for c in "$out_dir/agentgw-macos-arm64" "$out_dir/agentgw" "$BIN_DIR/agentgw-macos-arm64" "$BIN_DIR/agentgw"; do
+        if [[ -f "$c" ]]; then bin="$c"; break; fi
+      done
+      ;;
+    Linux:x86_64|Linux:aarch64)
+      for c in "$out_dir/agentgw-linux" "$out_dir/agentgw" "$BIN_DIR/agentgw-linux" "$BIN_DIR/agentgw"; do
+        if [[ -f "$c" ]]; then bin="$c"; break; fi
+      done
+      ;;
+  esac
+  if [[ -z "$bin" ]]; then
+    err "找不到 agentgw 二进制文件"
+    exit 1
+  fi
+  mkdir -p "$INSTALL_DIR"
+  cp "$bin" "$INSTALL_DIR/agentgw"
+  chmod +x "$INSTALL_DIR/agentgw"
+}
+
+sync_web_static() {
+  local static_src=""
+  local out_static="$SCRIPT_DIR/../out/static"
+  for candidate in "$out_static" "$SCRIPT_DIR/static" "$SCRIPT_DIR/../agentgw/static"; do
+    if [[ -d "$candidate" ]]; then
+      static_src="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$static_src" ]]; then
+    return
+  fi
+  rm -rf "$INSTALL_DIR/static"
+  mkdir -p "$INSTALL_DIR/static"
+  cp -R "$static_src/." "$INSTALL_DIR/static/"
+}
+
 # Detect local agentd binary (in agentd/ dir, sibling of scripts/)
 detect_local_agentd() {
   local out_dir="$SCRIPT_DIR/../out"
@@ -174,17 +216,9 @@ detect_local_agentd() {
 restart_services() {
   stop_services
 
-  local gw_bin
-  gw_bin="$INSTALL_DIR/agentgw"
-  if [[ ! -f "$gw_bin" ]]; then
-    gw_bin="$(detect_binary)"
-    if [[ -z "$gw_bin" || ! -f "$gw_bin" ]]; then
-      err "找不到 agentgw 二进制文件"
-      exit 1
-    fi
-    cp "$gw_bin" "$INSTALL_DIR/agentgw"
-    chmod +x "$INSTALL_DIR/agentgw"
-  fi
+  sync_local_agentgw_binary
+  sync_web_static
+  local gw_bin="$INSTALL_DIR/agentgw"
 
   local local_bin
   local_bin="$(detect_local_agentd)"
@@ -672,20 +706,11 @@ EOF
 chmod 600 "$RUNTIME_ENV_FILE"
 
 # ── 7. Start agentgw ──────────────────────────────────────────────
-cp "$GW_BIN" "$INSTALL_DIR/agentgw"
-chmod +x "$INSTALL_DIR/agentgw"
+sync_local_agentgw_binary
+sync_web_static
 
 pkill -f "agentgw start" 2>/dev/null || true
 sleep 1
-
-# Copy static files if available
-for static_src in "$SCRIPT_DIR/static" "$SCRIPT_DIR/../agentgw/static"; do
-  if [[ -d "$static_src" ]]; then
-    mkdir -p "$INSTALL_DIR/static"
-    cp -r "$static_src/"* "$INSTALL_DIR/static/" 2>/dev/null || true
-    break
-  fi
-done
 
 AGENTGW_START_ARGS=(start --qr)
 if [[ -n "$HUB_URL" ]]; then
