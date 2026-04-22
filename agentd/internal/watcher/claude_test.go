@@ -3,7 +3,6 @@ package watcher
 import (
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -167,7 +166,7 @@ func TestClaudeWatcherStopIdempotent(t *testing.T) {
 	w.Stop() // should be a no-op, not a panic
 }
 
-func TestClaudeWatcherRefreshKeepsPIDMappedSession(t *testing.T) {
+func TestClaudeWatcherRefreshPrefersCurrentTaskSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -178,6 +177,10 @@ func TestClaudeWatcherRefreshKeepsPIDMappedSession(t *testing.T) {
 	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
+	}
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatalf("mkdir tasks dir: %v", err)
 	}
 
 	live := filepath.Join(projectDir, "sess-live.jsonl")
@@ -196,14 +199,18 @@ func TestClaudeWatcherRefreshKeepsPIDMappedSession(t *testing.T) {
 		t.Fatalf("chtimes archived: %v", err)
 	}
 
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatalf("mkdir sessions dir: %v", err)
+	taskDir := filepath.Join(tasksDir, "sess-live")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
 	}
-	pidFile := filepath.Join(sessionsDir, strconv.Itoa(os.Getpid())+".json")
-	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-live"}`), 0o644); err != nil {
-		t.Fatalf("write pid map: %v", err)
+	if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
+		t.Fatalf("write task marker: %v", err)
 	}
+	dirHandle, err := os.Open(taskDir)
+	if err != nil {
+		t.Fatalf("open task dir: %v", err)
+	}
+	defer dirHandle.Close()
 
 	w := NewClaudeWatcher(live, func(ConversationEvent) {})
 	w.SetWorkDir(workDir)
@@ -264,7 +271,7 @@ func TestClaudeWatcherRefreshNoCrossTalk(t *testing.T) {
 	}
 }
 
-func TestClaudeWatcherRefreshFollowsPIDMappedSessionChange(t *testing.T) {
+func TestClaudeWatcherRefreshPrefersMostActiveOpenTask(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -276,38 +283,63 @@ func TestClaudeWatcherRefreshFollowsPIDMappedSessionChange(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatalf("mkdir tasks dir: %v", err)
+	}
 
-	live := filepath.Join(projectDir, "sess-live.jsonl")
-	next := filepath.Join(projectDir, "sess-next.jsonl")
-	if err := os.WriteFile(live, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write live session: %v", err)
-	}
-	if err := os.WriteFile(next, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write next session: %v", err)
-	}
+	sessions := []string{"sess-old", "sess-mid", "sess-live"}
 	baseTime := time.Now()
-	if err := os.Chtimes(next, baseTime, baseTime); err != nil {
-		t.Fatalf("chtimes next: %v", err)
-	}
-	if err := os.Chtimes(live, baseTime.Add(time.Second), baseTime.Add(time.Second)); err != nil {
-		t.Fatalf("chtimes live: %v", err)
-	}
+	var openDirs []*os.File
+	for i, sid := range sessions {
+		sessionFile := filepath.Join(projectDir, sid+".jsonl")
+		if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("write session file: %v", err)
+		}
+		if err := os.Chtimes(sessionFile, baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatalf("chtimes session file: %v", err)
+		}
 
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatalf("mkdir sessions dir: %v", err)
+		taskDir := filepath.Join(tasksDir, sid)
+		if err := os.MkdirAll(taskDir, 0o755); err != nil {
+			t.Fatalf("mkdir task dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
+			t.Fatalf("write highwatermark: %v", err)
+		}
+		if err := os.Chtimes(filepath.Join(taskDir, ".highwatermark"), baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatalf("chtimes highwatermark: %v", err)
+		}
+		if sid == "sess-live" {
+			liveTask := filepath.Join(taskDir, "26.json")
+			if err := os.WriteFile(liveTask, []byte(`{"id":26}`), 0o644); err != nil {
+				t.Fatalf("write live task json: %v", err)
+			}
+			if err := os.Chtimes(liveTask, baseTime.Add(10*time.Second), baseTime.Add(10*time.Second)); err != nil {
+				t.Fatalf("chtimes live task json: %v", err)
+			}
+		}
+		dirHandle, err := os.Open(taskDir)
+		if err != nil {
+			t.Fatalf("open task dir: %v", err)
+		}
+		openDirs = append(openDirs, dirHandle)
 	}
-	pidFile := filepath.Join(sessionsDir, strconv.Itoa(os.Getpid())+".json")
-	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-next"}`), 0o644); err != nil {
-		t.Fatalf("write pid map: %v", err)
-	}
+	defer func() {
+		for _, dirHandle := range openDirs {
+			dirHandle.Close()
+		}
+	}()
 
-	w := NewClaudeWatcher(live, func(ConversationEvent) {})
+	w := NewClaudeWatcher(filepath.Join(projectDir, "sess-old.jsonl"), func(ConversationEvent) {})
 	w.SetWorkDir(workDir)
 	w.SetPID(os.Getpid())
-	w.refreshSessionFile()
+	if sessionID := taskSessionID(tasksDir, filepath.Join("/private", tasksDir, "sess-live", "26.json")); sessionID != "sess-live" {
+		t.Fatalf("expected taskSessionID to normalize /private path, got %q", sessionID)
+	}
 
-	if w.path != next {
-		t.Fatalf("expected watcher to switch to %s, got %s", next, w.path)
+	want := filepath.Join(projectDir, "sess-live.jsonl")
+	if got := w.findSessionFromTasks(); got != want {
+		t.Fatalf("expected watcher to find most active open task %s, got %s", want, got)
 	}
 }

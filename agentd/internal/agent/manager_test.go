@@ -3,6 +3,7 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -104,7 +105,7 @@ func TestAttachedAgentIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestClassifyAttachCandidateUsesUniqueWorkDirFallback(t *testing.T) {
+func TestClassifyAttachCandidateRejectsWorkDirFallback(t *testing.T) {
 	m := newTestManager(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -130,14 +131,177 @@ func TestClassifyAttachCandidateUsesUniqueWorkDirFallback(t *testing.T) {
 		Provider: "claude",
 		WorkDir:  repoDir,
 	})
-	if candidate.Decision != agent.AttachDecisionDisplay {
-		t.Fatalf("expected display decision, got %q", candidate.Decision)
+	if candidate.Decision != agent.AttachDecisionAmbiguous {
+		t.Fatalf("expected ambiguous decision, got %q", candidate.Decision)
 	}
-	if candidate.Process.SessionID != "sess-live" {
-		t.Fatalf("expected derived session id sess-live, got %q", candidate.Process.SessionID)
+	if candidate.Process.SessionID != "" {
+		t.Fatalf("expected no derived session id, got %q", candidate.Process.SessionID)
 	}
-	if candidate.Process.SessionFile != sessionFile {
-		t.Fatalf("expected session file %q, got %q", sessionFile, candidate.Process.SessionFile)
+	if candidate.Process.SessionFile != "" {
+		t.Fatalf("expected no derived session file, got %q", candidate.Process.SessionFile)
+	}
+}
+
+func TestAttachSamePIDSwitchesSessionAndClearsHistory(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	firstSessionFile := filepath.Join(repoDir, "sess-old.jsonl")
+	if err := os.WriteFile(firstSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write first session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: firstSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("initial attach failed: %v", err)
+	}
+
+	originalAutoName := ag.Name
+	if err := m.UpdateResumeSessionID(ag.ID, "sess-old"); err != nil {
+		t.Fatalf("UpdateResumeSessionID failed: %v", err)
+	}
+	if err := m.Rename(ag.ID, "custom title"); err != nil {
+		t.Fatalf("Rename failed: %v", err)
+	}
+	if seq := ag.AppendEvent(map[string]any{"role": "assistant", "text": "stale"}); seq == 0 {
+		t.Fatalf("expected seq > 0")
+	}
+	if _, err := m.LoadPersistedEventsLatest(ag.ID, 10); err != nil {
+		t.Fatalf("expected persisted events API to work before reset: %v", err)
+	}
+	if _, err := m.LoadPersistedEventsSince(ag.ID, 0, 10); err != nil {
+		t.Fatalf("expected persisted events since API to work before reset: %v", err)
+	}
+	if _, err := m.LoadPersistedEventsBefore(ag.ID, 100, 10); err != nil {
+		t.Fatalf("expected persisted events before API to work before reset: %v", err)
+	}
+
+	newSessionFile := filepath.Join(repoDir, "sess-new.jsonl")
+	if err := os.WriteFile(newSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write new session file: %v", err)
+	}
+
+	rebound, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: newSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("reattach failed: %v", err)
+	}
+	if rebound.ID != ag.ID {
+		t.Fatalf("expected same agent id, got %s vs %s", rebound.ID, ag.ID)
+	}
+
+	resumeID, err := m.GetResumeSessionID(ag.ID)
+	if err != nil {
+		t.Fatalf("GetResumeSessionID failed: %v", err)
+	}
+	if resumeID != "sess-new" {
+		t.Fatalf("expected new session id, got %q", resumeID)
+	}
+	if rebound.Name != "custom title" {
+		t.Fatalf("expected custom title to survive session switch, got %q (auto was %q)", rebound.Name, originalAutoName)
+	}
+	if events := rebound.EventBuf().Since(0); len(events) != 0 {
+		t.Fatalf("expected cleared live history, got %d events", len(events))
+	}
+	persisted, err := m.LoadPersistedEventsLatest(ag.ID, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
+	}
+	if len(persisted) != 0 {
+		t.Fatalf("expected cleared persisted history, got %d events", len(persisted))
+	}
+}
+
+func TestAttachSameSessionDifferentPIDCreatesSeparateAgents(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	sessionFile := filepath.Join(repoDir, "sess-live.jsonl")
+	if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	first, err := m.Attach(scanner.ProcessInfo{
+		PID:         6864,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+
+	second, err := m.Attach(scanner.ProcessInfo{
+		PID:         7777,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("second attach failed: %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("expected separate agents for different pids sharing one session, got same id %s", first.ID)
+	}
+
+	agents := m.List()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 managed agents, got %d", len(agents))
+	}
+}
+
+func TestAttachSamePIDSwitchesSessionUpdatesAutoName(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	firstSessionFile := filepath.Join(repoDir, "sess-old.jsonl")
+	if err := os.WriteFile(firstSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write first session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: firstSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("initial attach failed: %v", err)
+	}
+	if err := m.UpdateResumeSessionID(ag.ID, "sess-old"); err != nil {
+		t.Fatalf("UpdateResumeSessionID failed: %v", err)
+	}
+	if got := ag.Name; got != filepath.Base(repoDir)+" - "+strconv.Itoa(ownPID) {
+		t.Fatalf("expected initial auto name, got %q", got)
+	}
+
+	newSessionFile := filepath.Join(repoDir, "sess-new.jsonl")
+	if err := os.WriteFile(newSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write new session file: %v", err)
+	}
+
+	rebound, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: newSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("reattach failed: %v", err)
+	}
+	if rebound.ID != ag.ID {
+		t.Fatalf("expected same agent id, got %s vs %s", rebound.ID, ag.ID)
+	}
+	if rebound.Name != filepath.Base(repoDir)+" - "+strconv.Itoa(ownPID) {
+		t.Fatalf("expected updated auto name to stay pid-based, got %q", rebound.Name)
 	}
 }
 

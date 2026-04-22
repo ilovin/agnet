@@ -18,6 +18,10 @@ func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
 		return nil, err
 	}
 
+	// Build a PID->(ppid,comm) map from a single ps call for ancestor lookups,
+	// instead of spawning one ps per ancestor level in isTrackedAgent.
+	allProcs := s.buildDarwinProcessMap()
+
 	var found []ProcessInfo
 	lines := strings.Split(string(output), "\n")
 
@@ -27,7 +31,7 @@ func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
 			continue
 		}
 
-		info, ok := s.parseDarwinProcess(line)
+		info, ok := s.parseDarwinProcess(line, allProcs)
 		if ok {
 			found = append(found, info)
 		}
@@ -36,8 +40,41 @@ func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
 	return finalizeProcessScan(found), nil
 }
 
+// darwinProcInfo holds minimal info about a process for ancestor lookups.
+type darwinProcInfo struct {
+	ppid int
+	comm string
+}
+
+// buildDarwinProcessMap builds a PID→darwinProcInfo map from a single ps call.
+func (s *Scanner) buildDarwinProcessMap() map[int]darwinProcInfo {
+	cmd := exec.Command("ps", "-eo", "pid,ppid,comm=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	m := make(map[int]darwinProcInfo)
+	for i, line := range strings.Split(string(output), "\n") {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		ppid, err2 := strconv.Atoi(fields[1])
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		m[pid] = darwinProcInfo{ppid: ppid, comm: fields[2]}
+	}
+	return m
+}
+
 // parseDarwinProcess parses a ps output line for Darwin.
-func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
+// allProcs is the pre-built PID map used for ancestor lookups (avoids per-ancestor exec.Command).
+func (s *Scanner) parseDarwinProcess(line string, allProcs map[int]darwinProcInfo) (ProcessInfo, bool) {
 	// Parse: PID  PPID  TTY  COMM  ARGS...
 	fields := strings.Fields(line)
 	if len(fields) < 5 {
@@ -71,22 +108,23 @@ func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
 		return ProcessInfo{}, false
 	}
 
-	// Filter out agentd's own children
-	if ppid > 0 && s.isDarwinAgentd(ppid) {
-		return ProcessInfo{}, false
-	}
+		// Filter out agentd's own children (use allProcs map)
+		if ppid > 0 {
+			if info, ok := allProcs[ppid]; ok && strings.Contains(info.comm, "agentd") {
+				return ProcessInfo{}, false
+			}
+		}
 
-	// Filter out claude -p sub-agents (child processes spawned by Claude Code's Agent tool).
-	// These are not independent sessions — they're tool invocations within a parent session.
-	argsStr := strings.Join(args, " ")
-	if provider == "claude" && (strings.Contains(argsStr, "-p ") || strings.Contains(argsStr, "--output-format")) {
-		return ProcessInfo{}, false
-	}
+		// Filter out claude -p sub-agents (child processes spawned by Claude Code Agent tool).
+		argsStr := strings.Join(args, " ")
+		if provider == "claude" && (strings.Contains(argsStr, "-p ") || strings.Contains(argsStr, "--output-format")) {
+			return ProcessInfo{}, false
+		}
 
-	// Filter out processes whose parent is an already-tracked claude agent.
-	if ppid > 0 && s.isTrackedAgent(ppid) {
-		return ProcessInfo{}, false
-	}
+		// Filter out processes whose ancestor is a claude/opencode agent (uses pre-built map).
+		if ppid > 0 && s.isTrackedAgentCached(ppid, allProcs) {
+			return ProcessInfo{}, false
+		}
 
 	// Get working directory using lsof
 	workDir := s.getDarwinCWD(pid)
@@ -115,41 +153,24 @@ func (s *Scanner) parseDarwinProcess(line string) (ProcessInfo, bool) {
 	}, true
 }
 
-// isDarwinAgentd checks if a process is agentd on macOS.
-func (s *Scanner) isDarwinAgentd(pid int) bool {
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(output), "agentd")
-}
-
-// isTrackedAgent walks up the parent process tree to check if any ancestor
-// is a claude/opencode process. This filters out sub-agents and tool-child
-// processes that should not be managed as independent agents.
-func (s *Scanner) isTrackedAgent(pid int) bool {
+// isTrackedAgentCached walks up the parent process tree using the pre-built
+// allProcs map to check if any ancestor is a claude/opencode process.
+// This replaces the old isTrackedAgent that spawned one exec.Command per ancestor.
+func (s *Scanner) isTrackedAgentCached(pid int, allProcs map[int]darwinProcInfo) bool {
 	visited := map[int]bool{}
 	for p := pid; p > 1; {
 		if visited[p] {
 			return false
 		}
 		visited[p] = true
-		cmd := exec.Command("ps", "-p", strconv.Itoa(p), "-o", "ppid=,comm=")
-		output, err := cmd.Output()
-		if err != nil {
+		info, ok := allProcs[p]
+		if !ok {
 			return false
 		}
-		fields := strings.Fields(strings.TrimSpace(string(output)))
-		if len(fields) < 2 {
-			return false
-		}
-		ppid, _ := strconv.Atoi(fields[0])
-		comm := fields[1]
-		if strings.HasPrefix(comm, "claude") || strings.HasPrefix(comm, "opencode") {
+		if strings.HasPrefix(info.comm, "claude") || strings.HasPrefix(info.comm, "opencode") {
 			return true
 		}
-		p = ppid
+		p = info.ppid
 	}
 	return false
 }

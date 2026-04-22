@@ -5,7 +5,91 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestProjectDirNameMatchesClaudeNaming(t *testing.T) {
+	got := projectDirName("/Users/fengming.xie/Documents/project/phone_talk/")
+	want := "-Users-fengming-xie-Documents-project-phone-talk"
+	if got != want {
+		t.Fatalf("expected project dir %q, got %q", want, got)
+	}
+}
+
+func TestFindClaudeSessionInfoPrefersMostActiveOpenTask(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := []string{"sess-old", "sess-live"}
+	baseTime := time.Now()
+	var openDirs []*os.File
+	for i, sid := range sessions {
+		sessionFile := filepath.Join(projectDir, sid+".jsonl")
+		if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(sessionFile, baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		taskDir := filepath.Join(tasksDir, sid)
+		if err := os.MkdirAll(taskDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if sid == "sess-live" {
+			liveTask := filepath.Join(taskDir, "26.json")
+			if err := os.WriteFile(liveTask, []byte(`{"id":26}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(liveTask, baseTime.Add(10*time.Second), baseTime.Add(10*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		dirHandle, err := os.Open(taskDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		openDirs = append(openDirs, dirHandle)
+	}
+	defer func() {
+		for _, dirHandle := range openDirs {
+			dirHandle.Close()
+		}
+	}()
+
+	ownPID := os.Getpid()
+	if err := os.WriteFile(filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID)), []byte(`{"sessionId":"sess-old"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir)
+	if gotSessionID != "sess-live" {
+		t.Fatalf("expected session id sess-live, got %q", gotSessionID)
+	}
+	wantFile := filepath.Join(projectDir, "sess-live.jsonl")
+	if gotSessionFile != wantFile {
+		t.Fatalf("expected session file %q, got %q", wantFile, gotSessionFile)
+	}
+}
 
 func TestFilterParentAgentsKeepsOnlyParents(t *testing.T) {
 	input := []ProcessInfo{
@@ -43,30 +127,42 @@ func TestFinalizeProcessScanAddsLiveClaudeSessionInfo(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	if err := os.MkdirAll(filepath.Join(home, ".claude", "sessions"), 0o755); err != nil {
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	projectDir := filepath.Join(home, ".claude", "projects", "-repo")
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Use the test process's own PID so isClaudeProcess validation passes
-	// (test binary contains "claude" in the path when running in this repo)
-	ownPID := os.Getpid()
-	if err := os.WriteFile(filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", ownPID)), []byte(`{"sessionId":"sess-live"}`), 0o644); err != nil {
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	ownPID := os.Getpid()
 	sessionFile := filepath.Join(projectDir, "sess-live.jsonl")
 	if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	taskDir := filepath.Join(tasksDir, "sess-live")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirHandle, err := os.Open(taskDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dirHandle.Close()
 
 	got := finalizeProcessScan([]ProcessInfo{{
 		PID:      ownPID,
 		PPID:     1,
 		Provider: "claude",
-		WorkDir:  "/repo",
+		WorkDir:  workDir,
 	}})
 	if len(got) != 1 {
 		t.Fatalf("expected 1 process, got %d", len(got))

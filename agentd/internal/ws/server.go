@@ -41,6 +41,18 @@ func (c *client) writePing() error {
 	return c.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 }
 
+type providerDataCache struct {
+	mu            sync.Mutex
+	rows          []map[string]any
+	resp          RPCResponse
+	ok            bool
+	currentID     string
+	currentReason string
+	runtimeID     string
+	runtimeReason string
+	at            time.Time
+}
+
 // Server is the WebSocket HTTP handler.
 type Server struct {
 	manager *agent.Manager
@@ -48,13 +60,17 @@ type Server struct {
 
 	mu      sync.RWMutex
 	clients map[*websocket.Conn]*client
+
+	providerCache providerDataCache
+	providerDBMu  sync.Mutex
 }
 
 func New(mgr *agent.Manager, token string) *Server {
 	srv := &Server{
-		manager: mgr,
-		token:   token,
-		clients: make(map[*websocket.Conn]*client),
+		manager:       mgr,
+		token:         token,
+		clients:       make(map[*websocket.Conn]*client),
+		providerCache: providerDataCache{},
 	}
 	// Wire PTY output → broadcast to all WS clients
 	mgr.SetOnOutput(func(agentID string, data map[string]any) {

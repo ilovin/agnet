@@ -62,6 +62,29 @@ func TestUpdateResumeSessionID(t *testing.T) {
 	}
 }
 
+func TestClearConversationEvents(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if err := s.SaveConversationEvent("agent-1", 1, map[string]any{"role": "assistant", "text": "old"}); err != nil {
+		t.Fatalf("SaveConversationEvent failed: %v", err)
+	}
+	if err := s.ClearConversationEvents("agent-1"); err != nil {
+		t.Fatalf("ClearConversationEvents failed: %v", err)
+	}
+
+	events, err := s.ListConversationEventsLatest("agent-1", 10)
+	if err != nil {
+		t.Fatalf("ListConversationEventsLatest failed: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected 0 events after clear, got %d", len(events))
+	}
+}
+
 func TestDeleteAgent(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

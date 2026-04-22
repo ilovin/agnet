@@ -1,6 +1,7 @@
 package ws_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentd/internal/agent"
@@ -70,6 +73,15 @@ func writeCCSwitchFixture(t *testing.T, home string, providers []string, current
 	}
 
 	dbPath := filepath.Join(ccDir, "cc-switch.db")
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open cc-switch db: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
 	initSQL := `CREATE TABLE IF NOT EXISTS providers (
 		id TEXT NOT NULL,
 		app_type TEXT NOT NULL,
@@ -91,8 +103,8 @@ func writeCCSwitchFixture(t *testing.T, home string, providers []string, current
 		provider_type TEXT,
 		PRIMARY KEY (id, app_type)
 	)`
-	if out, err := exec.Command("sqlite3", dbPath, initSQL).CombinedOutput(); err != nil {
-		t.Fatalf("init cc-switch db: %v (%s)", err, out)
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("init cc-switch db: %v", err)
 	}
 
 	for i, id := range providers {
@@ -106,16 +118,11 @@ func writeCCSwitchFixture(t *testing.T, home string, providers []string, current
 		config := fmt.Sprintf(`{"env":{"ANTHROPIC_BASE_URL":"%s","ANTHROPIC_AUTH_TOKEN":"%s"},"model":"%s"}`,
 			baseURL, authToken, model,
 		)
-		insertSQL := fmt.Sprintf(
-			"INSERT INTO providers (id, app_type, name, settings_config, sort_index, is_current) VALUES ('%s', 'claude', '%s', '%s', %d, %d)",
-			id,
-			strings.ReplaceAll(id, "'", "''"),
-			strings.ReplaceAll(config, "'", "''"),
-			i,
-			isCurrent,
-		)
-		if out, err := exec.Command("sqlite3", dbPath, insertSQL).CombinedOutput(); err != nil {
-			t.Fatalf("insert provider %s: %v (%s)", id, err, out)
+		if _, err := db.Exec(
+			`INSERT INTO providers (id, app_type, name, settings_config, sort_index, is_current) VALUES (?, ?, ?, ?, ?, ?)`,
+			id, "claude", id, config, i, isCurrent,
+		); err != nil {
+			t.Fatalf("insert provider %s: %v", id, err)
 		}
 	}
 
@@ -240,6 +247,56 @@ func TestAgentList(t *testing.T) {
 		agents = []any{}
 	}
 	_ = agents
+}
+
+func TestAgentListKeepsDistinctPIDsForSharedSession(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{PID: 1001, Provider: "claude", WorkDir: t.TempDir(), SessionFile: sessionFile}); err != nil {
+		t.Fatalf("attach first agent: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{PID: 1002, Provider: "claude", WorkDir: t.TempDir(), SessionFile: sessionFile}); err != nil {
+		t.Fatalf("attach second agent: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.list", nil)
+	if resp["error"] != nil {
+		t.Fatalf("agent.list error: %v", resp["error"])
+	}
+	b, _ := json.Marshal(resp["result"])
+	var agents []map[string]any
+	if err := json.Unmarshal(b, &agents); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+	seen := map[int]bool{}
+	for _, ag := range agents {
+		pid, _ := ag["pid"].(float64)
+		seen[int(pid)] = true
+		if got := ag["sessionId"]; got != "attached" {
+			t.Fatalf("expected sessionId=attached, got %#v", got)
+		}
+	}
+	if !seen[1001] || !seen[1002] {
+		t.Fatalf("expected both pids to remain visible, got %#v", seen)
+	}
 }
 
 func TestAgentCreateAndList(t *testing.T) {
@@ -440,6 +497,12 @@ func TestAgentStatusChangedEventIncludesDerivedFields(t *testing.T) {
 	if got := params["status"]; got != "idle" {
 		t.Fatalf("expected status=idle, got %#v", got)
 	}
+	if got := params["sessionId"]; got != "sess-evt" {
+		t.Fatalf("expected sessionId=sess-evt, got %#v", got)
+	}
+	if got, ok := params["pid"].(float64); !ok || got != 0 {
+		t.Fatalf("expected pid=0 for inactive agent, got %#v", params["pid"])
+	}
 	if got := params["runtimeState"]; got != "exited" {
 		t.Fatalf("expected runtimeState=exited, got %#v", got)
 	}
@@ -457,6 +520,72 @@ func TestAgentStatusChangedEventIncludesDerivedFields(t *testing.T) {
 	}
 	if got := params["permissionMode"]; got != "bypassPermissions" {
 		t.Fatalf("expected permissionMode=bypassPermissions, got %#v", got)
+	}
+}
+
+func TestAgentStatusChangedEventUsesSharedProviderCacheForManagerCallbacks(t *testing.T) {
+	setupFakeClaude(t)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCCSwitchFixture(t, home, []string{"provider-a", "provider-b"}, "provider-a", "provider-a")
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	args := []string{"-p", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--include-partial-messages", "--verbose"}
+	agentID, err := mgr.Create("claude-agent", "claude", "claude", args, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	listResp := rpc(conn, "agent.list", nil)
+	if listResp["error"] != nil {
+		t.Fatalf("agent.list error: %v", listResp["error"])
+	}
+
+	settings := map[string]any{
+		"env": map[string]any{
+			"ANTHROPIC_BASE_URL":   "https://provider-b.example.com",
+			"ANTHROPIC_AUTH_TOKEN": "token-provider-b",
+		},
+		"model": "model-provider-b",
+	}
+	data, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), data, 0o644); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	if err := mgr.StartInPlaceWithMessage(agentID, "claude", "claude", args, nil, "hello"); err != nil {
+		t.Fatalf("start in place: %v", err)
+	}
+
+	event := readEvent(t, conn, "agent.status_changed")
+	params, ok := event["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected params map, got %T", event["params"])
+	}
+	if got := params["agentId"]; got != agentID {
+		t.Fatalf("expected agentId %s, got %#v", agentID, got)
+	}
+	if got := params["providerState"]; got != "synced" {
+		t.Fatalf("expected providerState=synced after cache refresh, got %#v", got)
+	}
+	if got := params["providerWriteMode"]; got != "writable" {
+		t.Fatalf("expected providerWriteMode=writable, got %#v", got)
 	}
 }
 
@@ -1014,12 +1143,22 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	if _, err := mgr.Attach(scanner.ProcessInfo{PID: os.Getpid(), Provider: "claude", WorkDir: t.TempDir(), SessionFile: managedSessionFile}); err != nil {
 		t.Fatalf("attach managed agent: %v", err)
 	}
+	sharedSessionFile := filepath.Join(t.TempDir(), "sess-shared.jsonl")
+	if err := os.WriteFile(sharedSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write shared session file: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{PID: 4001, Provider: "claude", WorkDir: repoDir, SessionFile: sharedSessionFile}); err != nil {
+		t.Fatalf("attach first shared-session agent: %v", err)
+	}
+	if _, err := mgr.Attach(scanner.ProcessInfo{PID: 4002, Provider: "claude", WorkDir: repoDir, SessionFile: sharedSessionFile}); err != nil {
+		t.Fatalf("attach second shared-session agent: %v", err)
+	}
 	teamChildPID := liveCmd.Process.Pid + 1
 	fallbackPID := liveCmd.Process.Pid + 2
 	mgr.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
 		return []scanner.ProcessInfo{
 			{PID: liveCmd.Process.Pid, Provider: "claude", WorkDir: repoDir, SessionID: "sess-live", SessionFile: filepath.Join(claudeProjectDir, "sess-live.jsonl")},
-			{PID: fallbackPID, Provider: "claude", WorkDir: fallbackRepoDir},
+			{PID: fallbackPID, Provider: "claude", WorkDir: fallbackRepoDir, SessionID: "sess-fallback", SessionFile: fallbackSessionFile},
 			{PID: teamChildPID, Provider: "claude", WorkDir: repoDir},
 		}, nil
 	})
@@ -1044,8 +1183,20 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected managed array, got %T", result["managed"])
 	}
-	if len(managed) == 0 {
-		t.Fatalf("expected at least 1 managed item")
+	if len(managed) < 3 {
+		t.Fatalf("expected at least 3 managed items, got %v", managed)
+	}
+	managedSharedPIDs := map[int]bool{}
+	for _, raw := range managed {
+		entry, _ := raw.(map[string]any)
+		if entry["provider"] == "claude" && entry["sessionId"] == "sess-shared" {
+			if pid, _ := entry["pid"].(float64); int(pid) > 0 {
+				managedSharedPIDs[int(pid)] = true
+			}
+		}
+	}
+	if !managedSharedPIDs[4001] || !managedSharedPIDs[4002] {
+		t.Fatalf("expected both shared-session PIDs in managed, got %v", managed)
 	}
 
 	attachable, ok := result["attachable"].([]any)

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"time"
 
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/config"
@@ -69,6 +71,29 @@ func runServer() {
 
 	// Start periodic scan goroutine to detect new processes
 	go mgr.PeriodicScanAndAttach()
+
+	// Periodic goroutine/thread diagnostics
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			n, _ := runtime.ThreadCreateProfile(nil)
+			g := runtime.NumGoroutine()
+			log.Printf("[Runtime] goroutines=%d threads_created=%d", g, n)
+			if g > 500 || n > 200 {
+				buf := make([]byte, 1<<20) // 1MB
+				sz := runtime.Stack(buf, true)
+				log.Printf("[Runtime] stack snapshot (goroutines=%d threads=%d):\n%s", g, n, string(buf[:min(sz, len(buf))]))
+			}
+		}
+	}()
+
+	http.HandleFunc("/debug/stacks", func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 2<<20) // 2MB
+		sz := runtime.Stack(buf, true)
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write(buf[:sz])
+	})
 
 	srv := ws.New(mgr, cfg.Token)
 

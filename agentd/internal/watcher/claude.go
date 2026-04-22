@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,6 +48,11 @@ type ClaudeWatcher struct {
 	stop     chan struct{}
 	once     sync.Once
 	offset   int64
+
+	mu             sync.Mutex
+	lastRefreshAt  time.Time // rate-limit refreshSessionFile (lsof is expensive)
+	lastSwitchAt   time.Time // cooldown after switchToFile to prevent oscillation
+	onSwitch       func(newPath string) // called when session file changes
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
@@ -61,6 +67,12 @@ func (w *ClaudeWatcher) SetWorkDir(dir string) {
 // SetPID sets the Claude process PID for session tracking.
 func (w *ClaudeWatcher) SetPID(pid int) {
 	w.pid = pid
+}
+
+// OnSessionSwitch registers a callback invoked when the watcher switches to a
+// different session file (e.g. after /clear).
+func (w *ClaudeWatcher) OnSessionSwitch(fn func(newPath string)) {
+	w.onSwitch = fn
 }
 
 func (w *ClaudeWatcher) Start() error {
@@ -79,35 +91,38 @@ func (w *ClaudeWatcher) Stop() {
 func (w *ClaudeWatcher) loop() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	refreshTicker := time.NewTicker(15 * time.Second)
-	defer refreshTicker.Stop()
 	for {
 		select {
 		case <-w.stop:
 			return
 		case <-ticker.C:
-			_ = w.poll()
-		case <-refreshTicker.C:
-			w.refreshSessionFile()
+			w.poll()
 		}
 	}
 }
 
-// refreshSessionFile keeps the watcher bound to the live session file.
-// It follows PID map transitions (e.g. after /clear creates a new session)
-// via ~/.claude/sessions/<pid>.json. When no PID map exists the watcher
-// stays on its current file to avoid hopping to unrelated sessions in the
-// same project directory (which causes cross-talk with multiple CLIs).
+// refreshSessionFile detects session switches (e.g. after /clear or resume)
+// and switches the watcher to the new file. Called from poll() when no new
+// events are read — which signals the process may have moved to a new session.
+// Rate-limited to at most once every 15 seconds because the lsof fallback on
+// macOS blocks an OS thread per call.
 func (w *ClaudeWatcher) refreshSessionFile() {
-	if mapped := w.pidMappedSessionFile(); mapped != "" {
-		if mapped != w.path {
-			w.switchToFile(mapped)
-		}
+	w.mu.Lock()
+	if time.Since(w.lastRefreshAt) < 15*time.Second {
+		w.mu.Unlock()
 		return
 	}
-	// No PID map: stay on current file. Switching by mtime is unsafe when
-	// multiple Claude instances share the same project directory because the
-	// most-recently-modified file may belong to a different CLI instance.
+	w.lastRefreshAt = time.Now()
+	w.mu.Unlock()
+
+	if w.pid > 0 {
+		if taskSession := w.findSessionFromTasks(); taskSession != "" {
+			if taskSession != w.path {
+				w.switchToFile(taskSession)
+			}
+			return
+		}
+	}
 }
 
 func (w *ClaudeWatcher) pidMappedSessionFile() string {
@@ -136,11 +151,135 @@ func (w *ClaudeWatcher) pidMappedSessionFile() string {
 	return candidate
 }
 
+// findSessionFromTasks finds the session whose task directory is open by this PID.
+// After /clear, Claude creates a new session and task directory but may not update
+// the PID mapping file. We detect the active session by checking which task dir
+// the PID has open via /proc (Linux) or native syscalls (macOS).
+func (w *ClaudeWatcher) findSessionFromTasks() string {
+	if w.pid <= 0 || w.workDir == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
+	sessionIDs := make(map[string]struct{})
+
+	// Linux: /proc/<pid>/fd contains symlinks to open files/dirs
+	procFdDir := fmt.Sprintf("/proc/%d/fd", w.pid)
+	if fdEntries, err := os.ReadDir(procFdDir); err == nil {
+		for _, fd := range fdEntries {
+			link, err := os.Readlink(filepath.Join(procFdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			if sessionID := taskSessionID(tasksDir, link); sessionID != "" {
+				sessionIDs[sessionID] = struct{}{}
+			}
+		}
+		return w.bestTaskSession(projectDir, tasksDir, sessionIDs)
+	}
+
+	// macOS: use lsof to find which task dirs the PID has open.
+	// This is the only exec.Command on the hot path — rate-limited to 15s
+	// by refreshSessionFile. On Linux the /proc path above handles it without exec.
+	cmd := exec.Command("lsof", "-p", strconv.Itoa(w.pid), "-Fn")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if len(line) < 2 || line[0] != 'n' {
+			continue
+		}
+		path := line[1:]
+		if sessionID := taskSessionID(tasksDir, path); sessionID != "" {
+			sessionIDs[sessionID] = struct{}{}
+		}
+	}
+	return w.bestTaskSession(projectDir, tasksDir, sessionIDs)
+}
+
+func taskSessionID(tasksDir, path string) string {
+	normalizedTasksDir := normalizeTaskPath(tasksDir)
+	normalizedPath := normalizeTaskPath(path)
+	if normalizedTasksDir == "" || normalizedPath == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(normalizedTasksDir, normalizedPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) == 0 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
+}
+
+func normalizeTaskPath(path string) string {
+	path = filepath.Clean(path)
+	if strings.HasPrefix(path, "/private/") {
+		return strings.TrimPrefix(path, "/private")
+	}
+	return path
+}
+
+func (w *ClaudeWatcher) bestTaskSession(projectDir, tasksDir string, sessionIDs map[string]struct{}) string {
+	var best string
+	var bestTaskTime time.Time
+	var bestSessionTime time.Time
+	for sessionID := range sessionIDs {
+		candidate := filepath.Join(projectDir, sessionID+".jsonl")
+		sessionInfo, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		taskTime := latestTaskActivity(filepath.Join(tasksDir, sessionID))
+		if best == "" || taskTime.After(bestTaskTime) || (taskTime.Equal(bestTaskTime) && sessionInfo.ModTime().After(bestSessionTime)) {
+			best = candidate
+			bestTaskTime = taskTime
+			bestSessionTime = sessionInfo.ModTime()
+		}
+	}
+	return best
+}
+
+func latestTaskActivity(taskDir string) time.Time {
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return time.Time{}
+	}
+	var latest time.Time
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
+}
+
 func (w *ClaudeWatcher) switchToFile(newPath string) {
+	w.mu.Lock()
+	if time.Since(w.lastSwitchAt) < 30*time.Second {
+		w.mu.Unlock()
+		return
+	}
+	w.lastSwitchAt = time.Now()
+	w.mu.Unlock()
 	oldPath := w.path
 	w.path = newPath
 	w.offset = 0
 	log.Printf("[Watcher] Switching session file: %s -> %s", oldPath, newPath)
+	if w.onSwitch != nil {
+		w.onSwitch(newPath)
+	}
 }
 
 func projectDirName(workDir string) string {
@@ -174,10 +313,12 @@ func (w *ClaudeWatcher) poll() error {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024) // 10MB max line size
+	var count int
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if ev, ok := parseLine(line); ok {
 			w.callback(ev)
+			count++
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -190,6 +331,12 @@ func (w *ClaudeWatcher) poll() error {
 		return err
 	}
 	w.offset = pos
+
+	// No new events — the process may have switched sessions (e.g. /clear, resume).
+	// Trigger immediate refresh instead of waiting for a timer.
+	if count == 0 {
+		w.refreshSessionFile()
+	}
 	return nil
 }
 

@@ -2,6 +2,7 @@ package ws
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -14,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/eventbuf"
@@ -24,17 +27,6 @@ type handler struct {
 	server *Server
 	conn   *websocket.Conn
 	self   *client
-	mu     sync.Mutex
-	providerRowsCache struct {
-		rows          []map[string]any
-		resp          RPCResponse
-		ok            bool
-		currentID     string
-		currentReason string
-		runtimeID     string
-		runtimeReason string
-		at            time.Time
-	}
 }
 
 type providerSnapshot struct {
@@ -154,6 +146,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		WorkDir                string `json:"workDir"`
 		ProjectName            string `json:"projectName,omitempty"`
 		Status                 string `json:"status"`
+		PID                    int    `json:"pid,omitempty"`
 		HasHistory             bool   `json:"hasHistory"`
 		AttachMode             string `json:"attachMode,omitempty"`
 		ReadOnly               bool   `json:"readOnly"`
@@ -170,7 +163,6 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		PermissionMode         string `json:"permissionMode,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
-	seenSession := make(map[string]struct{})
 	for _, ag := range agents {
 		lastSeq, _ := h.server.manager.LastPersistedSeq(ag.ID)
 		projectName := ""
@@ -178,14 +170,6 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
-		// Defensive deduplication: skip if same session already listed
-		if resumeID != "" {
-			key := strings.ToLower(ag.Provider + "|" + resumeID)
-			if _, ok := seenSession[key]; ok {
-				continue
-			}
-			seenSession[key] = struct{}{}
-		}
 		derived := h.server.manager.DeriveAgentState(ag.ID)
 		provider := h.deriveProviderSnapshot(ag)
 		result = append(result, agentInfo{
@@ -195,6 +179,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			WorkDir:                ag.WorkDir,
 			ProjectName:            projectName,
 			Status:                 string(ag.Status()),
+			PID:                    ag.PID,
 			HasHistory:             lastSeq > 0,
 			AttachMode:             ag.AttachMode(),
 			ReadOnly:               ag.AttachReadOnly(),
@@ -467,6 +452,7 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		WorkDir     string `json:"workDir"`
 		ProjectName string `json:"projectName,omitempty"`
 		Status      string `json:"status"`
+		PID         int    `json:"pid,omitempty"`
 		SessionID   string `json:"sessionId,omitempty"`
 	}
 	statusPriority := func(status string) int {
@@ -496,18 +482,23 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		candidate := managedAgent{
 			ID: ag.ID, Name: ag.Name, Provider: ag.Provider,
 			WorkDir: ag.WorkDir, ProjectName: projectName, Status: string(ag.Status()),
-			SessionID: resumeID,
+			PID: ag.PID, SessionID: resumeID,
 		}
 		// Skip crashed and stopped agents.
 		// Active processes show in "attachable"; resumable sessions in file lists.
 		if candidate.Status == "crashed" || candidate.Status == "stopped" {
 			continue
 		}
-		// Use sessionId as primary key if available, otherwise fall back to ID
-		// This ensures multiple sessions in the same directory are all shown
-		key := strings.ToLower(candidate.Provider + "|" + candidate.SessionID)
-		if candidate.SessionID == "" {
-			key = strings.ToLower(candidate.Provider + "|" + candidate.ID)
+		// Prefer PID for live managed agents so multiple processes sharing one
+		// session remain independently visible.
+		key := strings.ToLower(candidate.Provider + "|agent|" + candidate.ID)
+		switch {
+		case candidate.PID > 0:
+			key = strings.ToLower(fmt.Sprintf("%s|pid|%d", candidate.Provider, candidate.PID))
+		case candidate.SessionID != "":
+			key = strings.ToLower(candidate.Provider + "|session|" + candidate.SessionID)
+		default:
+			key = strings.ToLower(candidate.Provider + "|agent|" + candidate.ID)
 		}
 		existing, ok := managedByKey[key]
 		if !ok || statusPriority(candidate.Status) < statusPriority(existing.Status) {
@@ -1631,6 +1622,90 @@ func (h *handler) agentRemove(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
+func openCCSwitchDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	return db, nil
+}
+
+func ensureCCSwitchProvidersTable(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS providers (
+		id TEXT NOT NULL,
+		app_type TEXT NOT NULL,
+		name TEXT NOT NULL,
+		settings_config TEXT NOT NULL,
+		website_url TEXT,
+		category TEXT,
+		created_at INTEGER,
+		sort_index INTEGER,
+		notes TEXT,
+		icon TEXT,
+		icon_color TEXT,
+		meta TEXT NOT NULL DEFAULT '{}',
+		is_current BOOLEAN NOT NULL DEFAULT 0,
+		in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+		cost_multiplier TEXT NOT NULL DEFAULT '1.0',
+		limit_daily_usd TEXT,
+		limit_monthly_usd TEXT,
+		provider_type TEXT,
+		PRIMARY KEY (id, app_type)
+	)`)
+	return err
+}
+
+func (h *handler) loadProviderRows(dbPath string) ([]map[string]any, error) {
+	db, err := openCCSwitchDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT id, name, is_current, settings_config FROM providers WHERE app_type=? ORDER BY sort_index, name`, "claude")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	providers := make([]map[string]any, 0)
+	for rows.Next() {
+		var id string
+		var name string
+		var isCurrent any
+		var settingsConfig string
+		if err := rows.Scan(&id, &name, &isCurrent, &settingsConfig); err != nil {
+			return nil, err
+		}
+		providers = append(providers, map[string]any{
+			"id":              id,
+			"name":            name,
+			"is_current":      isCurrent,
+			"settings_config": settingsConfig,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return providers, nil
+}
+
+func (h *handler) invalidateProviderCache() {
+	h.server.providerCache.mu.Lock()
+	defer h.server.providerCache.mu.Unlock()
+	h.server.providerCache.rows = nil
+	h.server.providerCache.resp = RPCResponse{}
+	h.server.providerCache.ok = false
+	h.server.providerCache.currentID = ""
+	h.server.providerCache.currentReason = ""
+	h.server.providerCache.runtimeID = ""
+	h.server.providerCache.runtimeReason = ""
+	h.server.providerCache.at = time.Time{}
+}
+
 func findCCSwitchDB() string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{filepath.Join(home, ".cc-switch", "cc-switch.db")}
@@ -1738,7 +1813,20 @@ func runtimeProviderFromRows(rows []map[string]any) (string, string) {
 
 func currentProviderFromRows(rows []map[string]any) (string, string) {
 	for _, r := range rows {
-		if r["is_current"] == 1.0 || r["is_current"] == "1" || r["is_current"] == true {
+		isCurrent := false
+		switch v := r["is_current"].(type) {
+		case bool:
+			isCurrent = v
+		case int:
+			isCurrent = v != 0
+		case int64:
+			isCurrent = v != 0
+		case float64:
+			isCurrent = v != 0
+		case string:
+			isCurrent = v == "1" || strings.EqualFold(v, "true")
+		}
+		if isCurrent {
 			if id, ok := r["id"].(string); ok {
 				return id, "derived from cc-switch is_current"
 			}
@@ -1752,26 +1840,20 @@ func (h *handler) providerRows() ([]map[string]any, RPCResponse, bool) {
 	if dbPath == "" {
 		return nil, okResp(nil, map[string]any{"providers": []any{}, "current": ""}), false
 	}
-	cmd := exec.Command("sqlite3", "-json", dbPath,
-		"SELECT id, name, is_current, settings_config FROM providers WHERE app_type='claude' ORDER BY sort_index, name")
-	out, err := cmd.Output()
+	rows, err := h.loadProviderRows(dbPath)
 	if err != nil {
 		return nil, errResp(nil, -32000, "read cc-switch db: "+err.Error()), false
-	}
-	var rows []map[string]any
-	if err := json.Unmarshal(out, &rows); err != nil || rows == nil {
-		rows = []map[string]any{}
 	}
 	return rows, RPCResponse{}, true
 }
 
 func (h *handler) cachedProviderData() ([]map[string]any, RPCResponse, bool, string, string, string, string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if time.Since(h.providerRowsCache.at) < time.Second && !h.providerRowsCache.at.IsZero() {
-		return h.providerRowsCache.rows, h.providerRowsCache.resp, h.providerRowsCache.ok,
-			h.providerRowsCache.currentID, h.providerRowsCache.currentReason,
-			h.providerRowsCache.runtimeID, h.providerRowsCache.runtimeReason
+	h.server.providerCache.mu.Lock()
+	defer h.server.providerCache.mu.Unlock()
+	if time.Since(h.server.providerCache.at) < time.Second && !h.server.providerCache.at.IsZero() {
+		return h.server.providerCache.rows, h.server.providerCache.resp, h.server.providerCache.ok,
+			h.server.providerCache.currentID, h.server.providerCache.currentReason,
+			h.server.providerCache.runtimeID, h.server.providerCache.runtimeReason
 	}
 	rows, resp, ok := h.providerRows()
 	var currentID, currentReason, runtimeID, runtimeReason string
@@ -1779,14 +1861,14 @@ func (h *handler) cachedProviderData() ([]map[string]any, RPCResponse, bool, str
 		currentID, currentReason = currentProviderFromRows(rows)
 		runtimeID, runtimeReason = runtimeProviderFromRows(rows)
 	}
-	h.providerRowsCache.rows = rows
-	h.providerRowsCache.resp = resp
-	h.providerRowsCache.ok = ok
-	h.providerRowsCache.currentID = currentID
-	h.providerRowsCache.currentReason = currentReason
-	h.providerRowsCache.runtimeID = runtimeID
-	h.providerRowsCache.runtimeReason = runtimeReason
-	h.providerRowsCache.at = time.Now()
+	h.server.providerCache.rows = rows
+	h.server.providerCache.resp = resp
+	h.server.providerCache.ok = ok
+	h.server.providerCache.currentID = currentID
+	h.server.providerCache.currentReason = currentReason
+	h.server.providerCache.runtimeID = runtimeID
+	h.server.providerCache.runtimeReason = runtimeReason
+	h.server.providerCache.at = time.Now()
 	return rows, resp, ok, currentID, currentReason, runtimeID, runtimeReason
 }
 
@@ -1891,6 +1973,25 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 	params["sessionStateReason"] = derived.SessionStateReason
 	params["sessionControl"] = derived.SessionControl
 	if ag != nil {
+		projectName := ""
+		if ag.WorkDir != "" {
+			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
+		}
+		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		params["name"] = ag.Name
+		params["provider"] = ag.Provider
+		params["workDir"] = ag.WorkDir
+		params["projectName"] = projectName
+		params["pid"] = ag.PID
+		params["sessionId"] = resumeID
+		attachMode := ag.AttachMode()
+		if attachMode != "" {
+			params["attachMode"] = attachMode
+		}
+		params["readOnly"] = ag.AttachReadOnly()
+		if reason := ag.AttachReadOnlyReason(); reason != "" {
+			params["readOnlyReason"] = reason
+		}
 		params["permissionMode"] = currentPermissionMode(ag.Args)
 		provider := h.deriveProviderSnapshot(ag)
 		params["providerState"] = provider.ProviderState
@@ -1975,21 +2076,25 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 		return errResp(req.ID, -32000, "cc-switch not found"), nil
 	}
 
+	h.server.providerDBMu.Lock()
+	defer h.server.providerDBMu.Unlock()
+
 	// Get provider config from DB (also fetch name for display)
-	query := fmt.Sprintf("SELECT id, name, settings_config FROM providers WHERE id='%s' AND app_type='claude'", providerID)
-	cmd := exec.Command("sqlite3", "-json", dbPath, query)
-	out, err := cmd.Output()
+	db, err := openCCSwitchDB(dbPath)
 	if err != nil {
+		return errResp(req.ID, -32000, "open provider db: "+err.Error()), nil
+	}
+	defer db.Close()
+
+	var providerName string
+	var configJSON string
+	if err := db.QueryRow(`SELECT name, settings_config FROM providers WHERE id=? AND app_type=?`, providerID, "claude").Scan(&providerName, &configJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return errResp(req.ID, -32000, "provider not found: "+providerID), nil
+		}
 		return errResp(req.ID, -32000, "read provider: "+err.Error()), nil
 	}
 
-	var rows []map[string]any
-	if err := json.Unmarshal(out, &rows); err != nil || len(rows) == 0 {
-		return errResp(req.ID, -32000, "provider not found: "+providerID), nil
-	}
-
-	providerName, _ := rows[0]["name"].(string)
-	configJSON, _ := rows[0]["settings_config"].(string)
 	var providerConfig map[string]any
 	if err := json.Unmarshal([]byte(configJSON), &providerConfig); err != nil {
 		return errResp(req.ID, -32000, "parse provider config: "+err.Error()), nil
@@ -2042,11 +2147,10 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 	}
 
 	// Update is_current in DB
-	updateSQL := fmt.Sprintf(
-		"UPDATE providers SET is_current=0 WHERE app_type='claude'; UPDATE providers SET is_current=1 WHERE id='%s' AND app_type='claude'",
-		providerID,
-	)
-	_ = exec.Command("sqlite3", dbPath, updateSQL).Run()
+	if _, err := db.Exec(`UPDATE providers SET is_current=CASE WHEN id=? AND app_type=? THEN 1 ELSE 0 END WHERE app_type=?`, providerID, "claude", "claude"); err != nil {
+		return errResp(req.ID, -32000, "update provider selection: "+err.Error()), nil
+	}
+	h.invalidateProviderCache()
 
 	// Sync selected provider to cc-switch settings.json so the standalone CC Switch UI
 	// stays consistent with the in-app switch.
@@ -2180,6 +2284,9 @@ func (h *handler) providerAdd(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32602, "name is required")
 	}
 
+	h.server.providerDBMu.Lock()
+	defer h.server.providerDBMu.Unlock()
+
 	dbPath := findCCSwitchDB()
 	if dbPath == "" {
 		// Create cc-switch directory and DB if not exists
@@ -2187,29 +2294,15 @@ func (h *handler) providerAdd(req RPCRequest) RPCResponse {
 		ccDir := filepath.Join(home, ".cc-switch")
 		_ = os.MkdirAll(ccDir, 0755)
 		dbPath = filepath.Join(ccDir, "cc-switch.db")
-		// Initialize table
-		initSQL := `CREATE TABLE IF NOT EXISTS providers (
-			id TEXT NOT NULL,
-			app_type TEXT NOT NULL,
-			name TEXT NOT NULL,
-			settings_config TEXT NOT NULL,
-			website_url TEXT,
-			category TEXT,
-			created_at INTEGER,
-			sort_index INTEGER,
-			notes TEXT,
-			icon TEXT,
-			icon_color TEXT,
-			meta TEXT NOT NULL DEFAULT '{}',
-			is_current BOOLEAN NOT NULL DEFAULT 0,
-			in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
-			cost_multiplier TEXT NOT NULL DEFAULT '1.0',
-			limit_daily_usd TEXT,
-			limit_monthly_usd TEXT,
-			provider_type TEXT,
-			PRIMARY KEY (id, app_type)
-		)`
-		_ = exec.Command("sqlite3", dbPath, initSQL).Run()
+	}
+
+	db, err := openCCSwitchDB(dbPath)
+	if err != nil {
+		return errResp(req.ID, -32000, "open provider db: "+err.Error())
+	}
+	defer db.Close()
+	if err := ensureCCSwitchProvidersTable(db); err != nil {
+		return errResp(req.ID, -32000, "init provider db: "+err.Error())
 	}
 
 	// Generate UUID for new provider
@@ -2238,24 +2331,15 @@ func (h *handler) providerAdd(req RPCRequest) RPCResponse {
 	settingsJSON, _ := json.Marshal(settingsConfig)
 
 	now := time.Now().Unix()
-	// Use sqlite3 to insert
-	args := []string{dbPath,
-		fmt.Sprintf(".mode insert providers"),
-		fmt.Sprintf("SELECT '%s','claude','%s','%s','','',%d,0,'','','','{}',0,0,'1.0','',''", id, name, string(settingsJSON), now),
+	if _, err := db.Exec(
+		`INSERT INTO providers (
+			id, app_type, name, settings_config, created_at, sort_index, meta, is_current, in_failover_queue, cost_multiplier
+		) VALUES (?, ?, ?, ?, ?, ?, '{}', 0, 0, '1.0')`,
+		id, "claude", name, string(settingsJSON), now, 0,
+	); err != nil {
+		return errResp(req.ID, -32000, "insert provider: "+err.Error())
 	}
-	insertOut, insertErr := exec.Command("sqlite3", args...).CombinedOutput()
-	if insertErr != nil {
-		// Fallback: use raw SQL
-		escapedName := strings.ReplaceAll(name, "'", "''")
-		escapedConfig := strings.ReplaceAll(string(settingsJSON), "'", "''")
-		insertSQL := fmt.Sprintf(
-			"INSERT INTO providers (id, app_type, name, settings_config, created_at, sort_index, meta, is_current, in_failover_queue, cost_multiplier) VALUES ('%s', 'claude', '%s', '%s', %d, 0, '{}', 0, 0, '1.0')",
-			id, escapedName, escapedConfig, now,
-		)
-		if err := exec.Command("sqlite3", dbPath, insertSQL).Run(); err != nil {
-			return errResp(req.ID, -32000, "insert provider: "+err.Error()+"; "+string(insertOut))
-		}
-	}
+	h.invalidateProviderCache()
 
 	return okResp(req.ID, map[string]any{"ok": true, "id": id, "name": name})
 }

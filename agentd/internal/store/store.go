@@ -43,6 +43,9 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -134,6 +137,30 @@ func (s *Store) UpdateResumeSessionID(id, sessionID string) error {
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("agent %s not found", id)
+	}
+	return nil
+}
+
+func (s *Store) UpdateAgentPID(id string, pid int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result, err := s.db.Exec(`UPDATE agents SET pid=? WHERE id=?`, pid, id)
+	if err != nil {
+		return fmt.Errorf("update pid for agent %s: %w", id, err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("agent %s not found", id)
+	}
+	return nil
+}
+
+func (s *Store) ClearConversationEvents(agentID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM conversation_events WHERE agent_id=?`, agentID)
+	if err != nil {
+		return fmt.Errorf("clear conversation events for agent %s: %w", agentID, err)
 	}
 	return nil
 }

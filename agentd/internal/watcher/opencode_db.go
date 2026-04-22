@@ -21,7 +21,7 @@ type OpenCodeDBWatcher struct {
 	callback  func(ConversationEvent)
 	stop      chan struct{}
 	once      sync.Once
-	lastMsgID string // track last fully processed message ID
+	lastMsgID string  // track last fully processed message ID
 	db        *sql.DB // persistent connection
 	dbMu      sync.Mutex
 

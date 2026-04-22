@@ -44,7 +44,30 @@ func newUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// Manager creates, tracks, and controls Agent instances.
+func attachedDisplayName(pid int, sessionID, provider, workDir string) string {
+	projectName := strings.TrimRight(workDir, "/")
+	if projectName != "" {
+		projectName = filepath.Base(projectName)
+	}
+	if projectName != "" && pid > 0 {
+		return fmt.Sprintf("%s - %d", projectName, pid)
+	}
+	if projectName != "" {
+		return projectName
+	}
+	if pid > 0 {
+		return fmt.Sprintf("%d", pid)
+	}
+	if sessionID != "" {
+		return sessionID
+	}
+	return provider
+}
+
+func isAttachedAutoName(name string, pid int, sessionID, provider, workDir string) bool {
+	return name == attachedDisplayName(pid, sessionID, provider, workDir)
+}
+
 type Manager struct {
 	mu             sync.RWMutex
 	agents         map[string]*Agent
@@ -118,9 +141,9 @@ func (m *Manager) LoadFromStore() error {
 		loadedByPID[pidKey] = struct{}{}
 
 		if r.ResumeSessionID != "" {
-			sessionKey := r.Provider + "|" + r.ResumeSessionID
+			sessionKey := fmt.Sprintf("%s|%d|%s", r.Provider, r.PID, r.ResumeSessionID)
 			if _, ok := loadedBySession[sessionKey]; ok {
-				log.Printf("[LoadFromStore] Skipping duplicate agent %s (same session %s)", r.ID, r.ResumeSessionID)
+				log.Printf("[LoadFromStore] Skipping duplicate agent %s (same pid %d and session %s)", r.ID, r.PID, r.ResumeSessionID)
 				_ = m.store.DeleteAgent(r.ID)
 				continue
 			}
@@ -1419,7 +1442,7 @@ func (m *Manager) CreateWithWatcher(name, provider, cmd string, args []string, w
 	}
 
 	cb := m.makeWatcherCallback(id, ag)
-	w := m.newSessionWatcher(provider, sessionID, sessionFile, workDir, 0, cb)
+	w := m.newSessionWatcher(provider, sessionID, sessionFile, workDir, 0, cb, id)
 
 	if err := w.Start(); err != nil {
 		return id, fmt.Errorf("watcher start: %w", err)
@@ -1722,58 +1745,6 @@ func allClaudeHomeDirs() []string {
 	return dirs
 }
 
-// findSessionFileByWorkDir attempts to find a session file by work directory.
-// This is a fallback for older Claude processes that don't have PID files.
-// It searches all candidate home directories so agentd running as root can find
-// sessions belonging to non-root users.
-func (m *Manager) findSessionFileByWorkDir(workDir string) string {
-	// Convert workDir to project directory name format used by Claude
-	// Claude replaces '/', '.', and '_' with '-'
-	dirName := strings.ReplaceAll(workDir, "/", "-")
-	dirName = strings.ReplaceAll(dirName, ".", "-")
-	dirName = strings.ReplaceAll(dirName, "_", "-")
-
-	for _, home := range allClaudeHomeDirs() {
-		projectDir := filepath.Join(home, ".claude", "projects", dirName)
-		log.Printf("[findSessionFileByWorkDir] Looking in: %s", projectDir)
-
-		entries, err := os.ReadDir(projectDir)
-		if err != nil {
-			log.Printf("[findSessionFileByWorkDir] ReadDir error: %v", err)
-			continue
-		}
-
-		var latestFile string
-		var latestTime int64
-		count := 0
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".jsonl") {
-				count++
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				if info.ModTime().Unix() > latestTime {
-					latestTime = info.ModTime().Unix()
-					latestFile = filepath.Join(projectDir, entry.Name())
-				}
-			}
-		}
-		// Conservative rule: only use workDir fallback when there is exactly one
-		// candidate session file. Multiple jsonl files in the same project dir are
-		// ambiguous (could be old sessions or sub-agents) and must not be auto-bound.
-		if count == 1 && latestFile != "" {
-			log.Printf("[findSessionFileByWorkDir] Returning unique candidate: %s", latestFile)
-			return latestFile
-		}
-		if count > 1 {
-			log.Printf("[findSessionFileByWorkDir] Ambiguous project dir %s: %d jsonl files, refusing fallback", projectDir, count)
-		}
-	}
-	log.Printf("[findSessionFileByWorkDir] No unambiguous session file found for workDir=%s", workDir)
-	return ""
-}
-
 // ScanExisting discovers running Claude/OpenCode processes on the system.
 func (m *Manager) ScanExisting() ([]scanner.ProcessInfo, error) {
 	if m.scanExisting != nil {
@@ -1798,20 +1769,6 @@ type AttachCandidate struct {
 	Reason   string
 }
 
-func classifySessionFileID(sessionFile string) string {
-	if sessionFile == "" {
-		return ""
-	}
-	base := filepath.Base(sessionFile)
-	if strings.HasSuffix(base, ".jsonl") {
-		return strings.TrimSuffix(base, ".jsonl")
-	}
-	if strings.HasSuffix(base, ".json") {
-		return strings.TrimSuffix(base, ".json")
-	}
-	return ""
-}
-
 func (m *Manager) ClassifyAttachCandidate(info scanner.ProcessInfo) AttachCandidate {
 	if info.PID <= 0 {
 		return AttachCandidate{Process: info, Decision: AttachDecisionSkip, Reason: "missing pid"}
@@ -1821,13 +1778,6 @@ func (m *Manager) ClassifyAttachCandidate(info scanner.ProcessInfo) AttachCandid
 	}
 	if info.SessionID != "" {
 		return AttachCandidate{Process: info, Decision: AttachDecisionAuto, Reason: "stable session identity"}
-	}
-	if info.WorkDir != "" {
-		if sessionFile := m.findSessionFileByWorkDir(info.WorkDir); sessionFile != "" {
-			info.SessionFile = sessionFile
-			info.SessionID = classifySessionFileID(sessionFile)
-			return AttachCandidate{Process: info, Decision: AttachDecisionDisplay, Reason: "live claude without pid map; display only"}
-		}
 	}
 	return AttachCandidate{Process: info, Decision: AttachDecisionAmbiguous, Reason: "claude process has no stable session id"}
 }
@@ -1866,16 +1816,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	sessionFile := info.FindSessionFile()
 	log.Printf("[Attach] PID %d: FindSessionFile returned: %s", info.PID, sessionFile)
 	if sessionFile == "" {
-		// Fallback: try to find session file by workDir for older Claude processes
-		// that don't have PID files in ~/.claude/sessions/
-		log.Printf("[Attach] PID %d: Trying fallback, WorkDir=%s, Provider=%s", info.PID, info.WorkDir, info.Provider)
-		if info.WorkDir != "" && info.Provider == "claude" {
-			sessionFile = m.findSessionFileByWorkDir(info.WorkDir)
-			log.Printf("[Attach] PID %d: findSessionFileByWorkDir returned: %s", info.PID, sessionFile)
-		}
-		if sessionFile == "" {
-			return nil, fmt.Errorf("no session file found for process %d", info.PID)
-		}
+		return nil, fmt.Errorf("no stable session file found for process %d", info.PID)
 	}
 
 	// Extract session ID from filename
@@ -1894,18 +1835,40 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
 	}
 
-	// projectNameFromDir extracts the last path segment as a project name.
-	projectNameFromDir := func(dir string) string {
-		dir = strings.TrimRight(dir, "/")
-		if dir == "" {
-			return ""
+	rebindAttachedSession := func(ag *Agent, newSessionID string, newSessionFile string) {
+		if oldWatcher := ag.Watcher(); oldWatcher != nil {
+			oldWatcher.Stop()
+			ag.setWatcher(nil)
 		}
-		return filepath.Base(dir)
+		ag.EventBuf().Reset()
+		if err := m.store.ClearConversationEvents(ag.ID); err != nil {
+			log.Printf("[Attach] Warning: failed to clear persisted history for %s: %v", ag.ID, err)
+		}
+		currentName := ag.Name
+		currentPID := ag.PID
+		currentSessionID, _ := m.GetResumeSessionID(ag.ID)
+		if ag.PID != info.PID {
+			ag.PID = info.PID
+			if err := m.store.UpdateAgentPID(ag.ID, info.PID); err != nil {
+				log.Printf("[Attach] Warning: failed to update pid for %s: %v", ag.ID, err)
+			}
+		}
+		newAutoName := attachedDisplayName(info.PID, newSessionID, info.Provider, info.WorkDir)
+		if isAttachedAutoName(currentName, currentPID, currentSessionID, info.Provider, info.WorkDir) && currentName != newAutoName {
+			if err := m.Rename(ag.ID, newAutoName); err != nil {
+				log.Printf("[Attach] Warning: failed to rename %s: %v", ag.ID, err)
+			}
+		}
+		if newSessionID != "" {
+			if err := m.UpdateResumeSessionID(ag.ID, newSessionID); err != nil {
+				log.Printf("[Attach] Warning: failed to update session ID for %s: %v", ag.ID, err)
+			}
+		}
 	}
 
-	// Reuse existing managed attached agent only when it refers to the same
-	// live process or the same session. Reusing purely by friendly project name
-	// lets team-mode sub-agents hijack the parent session watcher.
+	// Reuse an existing attached agent only when it refers to the same
+	// live process. Different PIDs can legitimately share one session ID,
+	// so session identity alone must not collapse them.
 	m.mu.RLock()
 	for _, existing := range m.agents {
 		if existing.Provider != info.Provider {
@@ -1913,23 +1876,39 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 		existingResumeID, _ := m.GetResumeSessionID(existing.ID)
 		samePID := existing.PID > 0 && existing.PID == info.PID
-		sameSession := sessionID != "" && existingResumeID == sessionID
-		if !samePID && !sameSession {
+		if !samePID {
 			continue
 		}
 		m.mu.RUnlock()
 		// Refresh attach metadata in case tmux/TTY availability changed.
 		applyAttachMetadata(existing)
+		if samePID && sessionID != "" && existingResumeID != sessionID {
+			rebindAttachedSession(existing, sessionID, sessionFile)
+		} else {
+			currentName := existing.Name
+			currentPID := existing.PID
+			if existing.PID != info.PID {
+				existing.PID = info.PID
+				if err := m.store.UpdateAgentPID(existing.ID, info.PID); err != nil {
+					log.Printf("[ReAttach] Warning: failed to update pid for %s: %v", existing.ID, err)
+				}
+			}
+			autoName := attachedDisplayName(info.PID, sessionID, info.Provider, info.WorkDir)
+			if isAttachedAutoName(currentName, currentPID, existingResumeID, info.Provider, info.WorkDir) && currentName != autoName {
+				if err := m.Rename(existing.ID, autoName); err != nil {
+					log.Printf("[ReAttach] Warning: failed to rename %s: %v", existing.ID, err)
+				}
+			}
+		}
 		// Re-attach: restart watcher and update status
 		existing.setStatus(StatusIdle)
 		if existing.Watcher() != nil {
 			existing.Watcher().Stop()
 			existing.setWatcher(nil)
 		}
-		sessionFile := info.FindSessionFile()
 		if sessionFile != "" || info.Provider == "opencode" {
 			cb := m.makeWatcherCallback(existing.ID, existing)
-			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb)
+			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)
 			if err := w.Start(); err != nil {
 				log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
 			} else {
@@ -1943,21 +1922,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 
 	// Create a managed agent that watches the existing session
 	// WITHOUT killing or restarting the original process
-	projectName := projectNameFromDir(info.WorkDir)
-	var name string
-	if projectName != "" {
-		shortSession := sessionID
-		if len(shortSession) > 4 {
-			shortSession = shortSession[len(shortSession)-4:]
-		}
-		if shortSession != "" {
-			name = fmt.Sprintf("%s #%s (%s)", projectName, shortSession, info.Provider)
-		} else {
-			name = fmt.Sprintf("%s (%s)", projectName, info.Provider)
-		}
-	} else {
-		name = fmt.Sprintf("%s-attached-%d", info.Provider, info.PID)
-	}
+	name := attachedDisplayName(info.PID, sessionID, info.Provider, info.WorkDir)
 	id := newUUID()
 
 	// Create agent with existing session info
@@ -2001,7 +1966,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 
 	// Start the appropriate watcher
 	cb := m.makeWatcherCallback(id, ag)
-	w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb)
+	w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, id)
 
 	if err := w.Start(); err != nil {
 		log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
@@ -2104,13 +2069,57 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 // newSessionWatcher creates the appropriate watcher for the given provider.
 // For opencode it returns an OpenCodeDBWatcher that reads from the SQLite DB;
 // for claude (and others) it returns a ClaudeWatcher on the JSONL file.
-func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent)) watcher.SessionWatcher {
+func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent), agentID string) watcher.SessionWatcher {
 	if provider == "opencode" && sessionID != "" {
 		return watcher.NewOpenCodeDBWatcher(sessionID, cb)
 	}
 	w := watcher.NewClaudeWatcher(sessionFile, cb)
 	w.SetWorkDir(workDir)
 	w.SetPID(pid)
+	w.OnSessionSwitch(func(newPath string) {
+		newSessionID := strings.TrimSuffix(filepath.Base(newPath), ".jsonl")
+		ag := m.Get(agentID)
+		if ag == nil {
+			return
+		}
+		currentName := ag.Name
+		currentSessionID, _ := m.GetResumeSessionID(agentID)
+		newName := attachedDisplayName(pid, newSessionID, provider, workDir)
+		if isAttachedAutoName(currentName, pid, currentSessionID, provider, workDir) && currentName != newName {
+			if err := m.Rename(agentID, newName); err != nil {
+				log.Printf("[Watcher] Failed to rename agent %s on session switch: %v", agentID, err)
+			} else {
+				log.Printf("[Watcher] Renamed agent %s to %s after session switch", agentID, newName)
+			}
+		}
+		if newSessionID != "" {
+			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
+				log.Printf("[Watcher] Failed to update session ID for %s: %v", agentID, err)
+			}
+		}
+		derived := m.DeriveAgentState(agentID)
+		m.mu.RLock()
+		onSC := m.onStatusChange
+		m.mu.RUnlock()
+		if onSC != nil {
+			params := map[string]any{
+				"agentId":            agentID,
+				"status":             string(ag.Status()),
+				"runtimeState":       derived.RuntimeState,
+				"sessionState":       derived.SessionState,
+				"sessionStateReason": derived.SessionStateReason,
+				"sessionControl":     derived.SessionControl,
+			}
+			if ag.Name != "" {
+				params["name"] = ag.Name
+			}
+			onSC(agentID, map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "agent.status_changed",
+				"params":  params,
+			})
+		}
+	})
 	return w
 }
 
@@ -2219,29 +2228,10 @@ func (m *Manager) PeriodicScanAndAttach() {
 			existingPIDs[proc.PID] = true
 		}
 
-		// Collect session IDs already tracked by existing agents.
-		// Sub-agents (team mode children) share the same session file as their
-		// parent, so a session-ID overlap means the process is a child we should
-		// skip.
-		m.mu.RLock()
-		trackedSessionIDs := make(map[string]bool)
-		for _, ag := range m.agents {
-			rid, _ := m.GetResumeSessionID(ag.ID)
-			if rid != "" {
-				trackedSessionIDs[rid] = true
-			}
-		}
-		m.mu.RUnlock()
-
 		// Find new processes to attach to
 		for _, proc := range filteredProcesses {
 			candidate := m.ClassifyAttachCandidate(proc)
 			if candidate.Decision != AttachDecisionAuto {
-				continue
-			}
-
-			// Skip if this process's session is already tracked (sub-agent).
-			if proc.SessionID != "" && trackedSessionIDs[proc.SessionID] {
 				continue
 			}
 

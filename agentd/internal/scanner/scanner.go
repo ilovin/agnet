@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -213,17 +215,19 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 		return "", ""
 	}
 
-	// Try current user's home first
-	sessionID := readClaudeSessionID(home, pid)
-	if sessionID != "" {
-		// Verify PID is still a Claude process (prevent PID reuse attack)
-		if !isClaudeProcess(pid) {
-			return "", ""
-		}
-		return sessionID, findClaudeSessionFile(home, sessionID, workDir)
+	if !isClaudeProcess(pid) {
+		return "", ""
 	}
 
-	// When running as root, also scan /home/*/.claude/sessions/ for other users
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+
+	if sessionFile := findClaudeSessionFromTasks(pid, projectDir, tasksDir); sessionFile != "" {
+		sessionID := strings.TrimSuffix(filepath.Base(sessionFile), ".jsonl")
+		return sessionID, sessionFile
+	}
+
+	// When running as root, also scan /home/* for other users' Claude task dirs.
 	if _, err := os.Stat("/home"); err == nil {
 		entries, err := os.ReadDir("/home")
 		if err == nil {
@@ -232,19 +236,116 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 					continue
 				}
 				userHome := filepath.Join("/home", entry.Name())
-				sessionID = readClaudeSessionID(userHome, pid)
-				if sessionID != "" {
-					// Verify PID is still a Claude process (prevent PID reuse attack)
-					if !isClaudeProcess(pid) {
-						return "", ""
-					}
-					return sessionID, findClaudeSessionFile(userHome, sessionID, workDir)
+				projectDir = filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
+				tasksDir = filepath.Join(userHome, ".claude", "tasks")
+				if sessionFile := findClaudeSessionFromTasks(pid, projectDir, tasksDir); sessionFile != "" {
+					sessionID := strings.TrimSuffix(filepath.Base(sessionFile), ".jsonl")
+					return sessionID, sessionFile
 				}
 			}
 		}
 	}
 
 	return "", ""
+}
+
+func findClaudeSessionFromTasks(pid int, projectDir, tasksDir string) string {
+	if pid <= 0 || projectDir == "" || tasksDir == "" {
+		return ""
+	}
+	sessionIDs := make(map[string]struct{})
+
+	procFdDir := fmt.Sprintf("/proc/%d/fd", pid)
+	if fdEntries, err := os.ReadDir(procFdDir); err == nil {
+		for _, fd := range fdEntries {
+			link, err := os.Readlink(filepath.Join(procFdDir, fd.Name()))
+			if err != nil {
+				continue
+			}
+			if sessionID := claudeTaskSessionID(tasksDir, link); sessionID != "" {
+				sessionIDs[sessionID] = struct{}{}
+			}
+		}
+		return bestClaudeTaskSession(projectDir, tasksDir, sessionIDs)
+	}
+
+	cmd := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if len(line) < 2 || line[0] != 'n' {
+			continue
+		}
+		if sessionID := claudeTaskSessionID(tasksDir, line[1:]); sessionID != "" {
+			sessionIDs[sessionID] = struct{}{}
+		}
+	}
+	return bestClaudeTaskSession(projectDir, tasksDir, sessionIDs)
+}
+
+func claudeTaskSessionID(tasksDir, path string) string {
+	normalizedTasksDir := normalizeClaudeTaskPath(tasksDir)
+	normalizedPath := normalizeClaudeTaskPath(path)
+	if normalizedTasksDir == "" || normalizedPath == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(normalizedTasksDir, normalizedPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) == 0 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
+}
+
+func normalizeClaudeTaskPath(path string) string {
+	path = filepath.Clean(path)
+	if strings.HasPrefix(path, "/private/") {
+		return strings.TrimPrefix(path, "/private")
+	}
+	return path
+}
+
+func bestClaudeTaskSession(projectDir, tasksDir string, sessionIDs map[string]struct{}) string {
+	var best string
+	var bestTaskTime time.Time
+	var bestSessionTime time.Time
+	for sessionID := range sessionIDs {
+		candidate := filepath.Join(projectDir, sessionID+".jsonl")
+		sessionInfo, err := os.Stat(candidate)
+		if err != nil {
+			continue
+		}
+		taskTime := latestClaudeTaskActivity(filepath.Join(tasksDir, sessionID))
+		if best == "" || taskTime.After(bestTaskTime) || (taskTime.Equal(bestTaskTime) && sessionInfo.ModTime().After(bestSessionTime)) {
+			best = candidate
+			bestTaskTime = taskTime
+			bestSessionTime = sessionInfo.ModTime()
+		}
+	}
+	return best
+}
+
+func latestClaudeTaskActivity(taskDir string) time.Time {
+	entries, err := os.ReadDir(taskDir)
+	if err != nil {
+		return time.Time{}
+	}
+	var latest time.Time
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest
 }
 
 func readClaudeSessionID(home string, pid int) string {
@@ -501,9 +602,9 @@ func isOpenCodeProcess(pid int) bool {
 }
 
 func projectDirName(workDir string) string {
-	dirName := strings.ReplaceAll(workDir, "/", "-")
-	if dirName == "" {
-		return "-"
-	}
-	return dirName
+	// Must match Claude's project directory naming: replace / . _ with -
+	s := strings.ReplaceAll(strings.TrimRight(workDir, "/"), "/", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	return s
 }

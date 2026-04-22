@@ -82,6 +82,15 @@ func (eb *EventBuffer) InitSeq(lastSeq uint64) {
 	eb.seq = lastSeq
 }
 
+// Reset clears buffered events and resets the sequence counter.
+func (eb *EventBuffer) Reset() {
+	eb.mu.Lock()
+	defer eb.mu.Unlock()
+	eb.seq = 0
+	eb.head = 0
+	eb.count = 0
+}
+
 // UpdateOrAppend either updates an existing event with the given msgID (scanning
 // backwards from the most recent) or appends a new event. Returns the event's
 // sequence number and true if an existing event was updated.
