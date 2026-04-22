@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +18,7 @@ import '../providers/connection_provider.dart';
 import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
+import '../providers/color_mode_provider.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
 /// Handles complex sequences including claude-code specific output.
@@ -86,20 +88,14 @@ String stripAnsi(String s) {
   return buffer.toString();
 }
 
-/// Removes terminal drawing characters (box drawing, block elements, etc.)
-/// These are used by claude-code for UI elements but clutter the output.
+/// Removes terminal drawing characters that clutter the output.
+/// Keeps arrows (←→↑↓) and geometric shapes as they carry meaning.
 String stripTerminalDrawing(String s) {
   return s
       // Box drawing characters (│─┌┐└┘├┤┬┴┼ etc.)
       .replaceAll(RegExp(r'[\u2500-\u257F]'), '')
       // Block elements (▖▗▘▙▚▛▜▝▞▟█ etc.)
       .replaceAll(RegExp(r'[\u2580-\u259F]'), '')
-      // Geometric shapes (▴▵▶▷▸▹►▻▼▽▾▿ etc.)
-      .replaceAll(RegExp(r'[\u25A0-\u25FF]'), '')
-      // Arrows and special symbols
-      .replaceAll(RegExp(r'[\u2190-\u21FF]'), '')
-      // Dingbats and other symbols that clutter output
-      .replaceAll(RegExp(r'[\u2700-\u27BF]'), '')
       // Replace multiple spaces with single space
       .replaceAll(RegExp(r'  +'), ' ')
       // Clean up excessive newlines
@@ -836,7 +832,9 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
 /// Collapses consecutive assistant activity blocks into a single block.
 /// This ensures multiple adjacent activity_list messages are rendered in
 /// one foldable container, showing only the latest activity when collapsed.
-List<ChatMessage> collapseConsecutiveActivityBlocks(List<ChatMessage> messages) {
+List<ChatMessage> collapseConsecutiveActivityBlocks(
+  List<ChatMessage> messages,
+) {
   final result = <ChatMessage>[];
   for (final msg in messages) {
     if (msg.isActivityBlock &&
@@ -1032,6 +1030,42 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       // Reconnected — reload history silently
       if (state == WsConnectionState.connected && !_initialLoading) {
         _pollNewEvents();
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentDetailScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.nodeId == widget.nodeId && oldWidget.agentId == widget.agentId) {
+      return;
+    }
+    _rawEvents = [];
+    _lastSeq = 0;
+    _oldestSeq = 0;
+    _hasMoreHistory = true;
+    _initialLoading = true;
+    _lastError = null;
+    _pollingNewEvents = false;
+    _agentName = null;
+    final cachedEntry = _messageCache[_cacheKey];
+    if (cachedEntry != null && cachedEntry.events.isNotEmpty) {
+      final cachedEvents = List<Map<String, dynamic>>.from(cachedEntry.events);
+      _rawEvents = cachedEvents;
+      _lastSeq = latestConversationSeq(cachedEvents);
+      _oldestSeq = oldestConversationSeq(cachedEvents);
+      _hasMoreHistory = _oldestSeq > 1;
+      _initialLoading = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollToBottom(force: true, animate: false);
+        }
+      });
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _loadHistory();
+        _loadSkills();
       }
     });
   }
@@ -1468,9 +1502,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         String msg = '发送失败，请重试';
         if (e.toString().contains('timeout')) {
           msg = '发送超时，图片可能过大或网络较慢';
-        } else if (e.toString().contains('tmux-attached sessions do not support image')) {
+        } else if (e.toString().contains(
+          'tmux-attached sessions do not support image',
+        )) {
           msg = 'tmux 附加会话不支持图片附件，请新建普通 Claude 会话再试';
-        } else if (e.toString().contains('opencode sessions do not support image')) {
+        } else if (e.toString().contains(
+          'opencode sessions do not support image',
+        )) {
           msg = 'OpenCode 会话不支持图片附件';
         }
         setState(() {
@@ -1836,7 +1874,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           'name': newName,
         });
         setState(() => _agentName = newName);
-        ref.read(nodesProvider.notifier).renameAgent(widget.nodeId, widget.agentId, newName);
+        ref
+            .read(nodesProvider.notifier)
+            .renameAgent(widget.nodeId, widget.agentId, newName);
       } catch (e) {
         debugPrint('rename agent error: $e');
       }
@@ -1885,6 +1925,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 _statusLabel(agent.status),
                 style: TextStyle(
                   fontSize: 12,
+                  fontWeight: FontWeight.w600,
                   color: _statusColor(agent.status),
                 ),
               ),
@@ -2008,76 +2049,80 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           style: TextStyle(color: Colors.grey),
                         ),
                       )
-                    : NotificationListener<ScrollNotification>(
-                        onNotification: (notification) {
-                          if (notification is ScrollUpdateNotification &&
-                              notification.metrics.pixels <=
-                                  notification.metrics.minScrollExtent + 24) {
-                            _loadOlderHistory();
-                          }
-                          return false;
-                        },
-                        child: ListView.builder(
-                          controller: _scrollCtrl,
-                          padding: const EdgeInsets.all(12),
-                          itemCount:
-                              messages.length +
-                              (_loadingOlder ? 1 : 0) +
-                              (!_initialLoading && _isLoadingFreshData ? 1 : 0),
-                          itemBuilder: (_, i) {
-                            if (!_initialLoading &&
-                                _isLoadingFreshData &&
-                                i == 0) {
-                              return const Padding(
-                                padding: EdgeInsets.only(bottom: 8),
-                                child: Center(
-                                  child: Text(
-                                    '· · ·',
-                                    style: TextStyle(
-                                      color: Colors.grey,
-                                      fontSize: 14,
-                                      fontStyle: FontStyle.italic,
-                                    ),
-                                  ),
-                                ),
-                              );
+                    : SelectionArea(
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is ScrollUpdateNotification &&
+                                notification.metrics.pixels <=
+                                    notification.metrics.minScrollExtent + 24) {
+                              _loadOlderHistory();
                             }
-                            if (_loadingOlder &&
-                                i ==
-                                    (!_initialLoading && _isLoadingFreshData
-                                        ? 1
-                                        : 0)) {
-                              return const Padding(
-                                padding: EdgeInsets.only(bottom: 8),
-                                child: Center(
-                                  child: SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }
-                            final idx =
-                                i -
+                            return false;
+                          },
+                          child: ListView.builder(
+                            controller: _scrollCtrl,
+                            padding: const EdgeInsets.all(12),
+                            itemCount:
+                                messages.length +
+                                (_loadingOlder ? 1 : 0) +
                                 (!_initialLoading && _isLoadingFreshData
                                     ? 1
-                                    : 0) -
-                                (_loadingOlder ? 1 : 0);
-                            return _MessageBubble(
-                              message: messages[idx],
-                              isLastAssistant: idx == lastAssistantIndex,
-                              onResolvePermissionPrompt:
-                                  messages[idx].isPermissionPrompt
-                                  ? _resolvePermissionPrompt
-                                  : null,
-                              onToggleExpand: () {
-                                _lastUserTap = DateTime.now();
-                              },
-                            );
-                          },
+                                    : 0),
+                            itemBuilder: (_, i) {
+                              if (!_initialLoading &&
+                                  _isLoadingFreshData &&
+                                  i == 0) {
+                                return const Padding(
+                                  padding: EdgeInsets.only(bottom: 8),
+                                  child: Center(
+                                    child: Text(
+                                      '· · ·',
+                                      style: TextStyle(
+                                        color: Colors.grey,
+                                        fontSize: 14,
+                                        fontStyle: FontStyle.italic,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                              if (_loadingOlder &&
+                                  i ==
+                                      (!_initialLoading && _isLoadingFreshData
+                                          ? 1
+                                          : 0)) {
+                                return const Padding(
+                                  padding: EdgeInsets.only(bottom: 8),
+                                  child: Center(
+                                    child: SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }
+                              final idx =
+                                  i -
+                                  (!_initialLoading && _isLoadingFreshData
+                                      ? 1
+                                      : 0) -
+                                  (_loadingOlder ? 1 : 0);
+                              return _MessageBubble(
+                                message: messages[idx],
+                                isLastAssistant: idx == lastAssistantIndex,
+                                onResolvePermissionPrompt:
+                                    messages[idx].isPermissionPrompt
+                                    ? _resolvePermissionPrompt
+                                    : null,
+                                onToggleExpand: () {
+                                  _lastUserTap = DateTime.now();
+                                },
+                              );
+                            },
+                          ),
                         ),
                       ),
                 // Refresh button (above jump to bottom)
@@ -2136,22 +2181,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   Color _statusColor(AgentStatus s) => AgentStatusTheme.getColor(s);
 
-  String _statusLabel(AgentStatus s) {
-    switch (s) {
-      case AgentStatus.working:
-        return 'Working';
-      case AgentStatus.idle:
-        return 'Standby';
-      case AgentStatus.starting:
-        return 'Starting…';
-      case AgentStatus.stopped:
-        return 'Stopped';
-      case AgentStatus.crashed:
-        return 'Crashed';
-    }
-  }
+  String _statusLabel(AgentStatus s) => AgentStatusTheme.getLabel(s);
 }
-
 
 String effectiveModeForAgent(AgentModel agent, {String? pendingMode}) {
   if ((pendingMode ?? '').isNotEmpty) return pendingMode!;
@@ -2734,6 +2765,17 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
                 widget.onToggle?.call();
                 setState(() => _expanded = !_expanded);
               },
+              onLongPress: () {
+                if (widget.content.isEmpty) return;
+                Clipboard.setData(ClipboardData(text: widget.content));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('已复制'),
+                    duration: Duration(seconds: 1),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              },
               child: AnimatedSize(
                 duration: const Duration(milliseconds: 200),
                 curve: Curves.easeInOut,
@@ -2894,8 +2936,12 @@ class _ActivityCard extends StatelessWidget {
         border: Border(
           left: BorderSide(color: color.withValues(alpha: 0.7), width: 3),
           top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
-          right: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
-          bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+          right: BorderSide(
+            color: scheme.outlineVariant.withValues(alpha: 0.2),
+          ),
+          bottom: BorderSide(
+            color: scheme.outlineVariant.withValues(alpha: 0.2),
+          ),
         ),
       ),
       child: Column(
@@ -3030,11 +3076,7 @@ class _ActivityBlockState extends State<_ActivityBlock> {
           CircleAvatar(
             radius: 16,
             backgroundColor: accentColor.withValues(alpha: 0.15),
-            child: Icon(
-              Icons.build,
-              size: 18,
-              color: accentColor,
-            ),
+            child: Icon(Icons.build, size: 18, color: accentColor),
           ),
           const SizedBox(width: 8),
           Flexible(
@@ -3042,6 +3084,18 @@ class _ActivityBlockState extends State<_ActivityBlock> {
               onTap: () {
                 widget.onToggle?.call();
                 setState(() => _expanded = !_expanded);
+              },
+              onLongPress: () {
+                final text = widget.message.text;
+                if (text.isEmpty) return;
+                Clipboard.setData(ClipboardData(text: text));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('已复制'),
+                    duration: Duration(seconds: 1),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
               },
               child: AnimatedSize(
                 duration: const Duration(milliseconds: 200),
@@ -3055,10 +3109,19 @@ class _ActivityBlockState extends State<_ActivityBlock> {
                     color: scheme.surfaceContainerLow,
                     borderRadius: BorderRadius.circular(12),
                     border: Border(
-                      left: BorderSide(color: accentColor.withValues(alpha: 0.7), width: 3),
-                      top: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
-                      right: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
-                      bottom: BorderSide(color: scheme.outlineVariant.withValues(alpha: 0.2)),
+                      left: BorderSide(
+                        color: accentColor.withValues(alpha: 0.7),
+                        width: 3,
+                      ),
+                      top: BorderSide(
+                        color: scheme.outlineVariant.withValues(alpha: 0.2),
+                      ),
+                      right: BorderSide(
+                        color: scheme.outlineVariant.withValues(alpha: 0.2),
+                      ),
+                      bottom: BorderSide(
+                        color: scheme.outlineVariant.withValues(alpha: 0.2),
+                      ),
                     ),
                   ),
                   child: Column(
@@ -3069,7 +3132,11 @@ class _ActivityBlockState extends State<_ActivityBlock> {
                           AnimatedRotation(
                             turns: _expanded ? 0.25 : 0,
                             duration: const Duration(milliseconds: 200),
-                            child: Icon(Icons.chevron_right, size: 16, color: scheme.primary),
+                            child: Icon(
+                              Icons.chevron_right,
+                              size: 16,
+                              color: scheme.primary,
+                            ),
                           ),
                           const SizedBox(width: 6),
                           Expanded(
@@ -3078,7 +3145,9 @@ class _ActivityBlockState extends State<_ActivityBlock> {
                               style: TextStyle(
                                 fontSize: 12,
                                 color: scheme.onSurfaceVariant,
-                                fontWeight: _expanded ? FontWeight.w600 : FontWeight.normal,
+                                fontWeight: _expanded
+                                    ? FontWeight.w600
+                                    : FontWeight.normal,
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -3228,6 +3297,18 @@ class _MessageBubble extends StatelessWidget {
     this.onResolvePermissionPrompt,
     this.onToggleExpand,
   });
+
+  void _showCopyMenu(BuildContext context, String text) {
+    if (text.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已复制'),
+        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3383,82 +3464,87 @@ class _MessageBubble extends StatelessWidget {
             const SizedBox(width: 8),
           ],
           Flexible(
-            child: Container(
-              padding: EdgeInsets.symmetric(
-                horizontal: isRaw ? 10 : 14,
-                vertical: isRaw ? 6 : 10,
-              ),
-              decoration: BoxDecoration(
-                color: bgColor,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(12),
-                  topRight: const Radius.circular(12),
-                  bottomLeft: Radius.circular(isUser ? 12 : (isRaw ? 4 : 4)),
-                  bottomRight: Radius.circular(isUser ? (isRaw ? 4 : 4) : 12),
+            child: GestureDetector(
+              onLongPress: () => _showCopyMenu(context, message.text),
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: isRaw ? 10 : 14,
+                  vertical: isRaw ? 6 : 10,
                 ),
-                border: isRaw
-                    ? Border.all(
-                        color: const Color(0xFF23D18B).withValues(alpha: 0.2),
-                        width: 1,
-                      )
-                    : (isLastAssistant
-                          ? Border.all(
-                              color: scheme.primary.withValues(alpha: 0.5),
-                              width: 2,
-                            )
-                          : null),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (isRaw)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 2),
-                      child: Text(
-                        'Terminal',
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: const Color(0xFF23D18B).withValues(alpha: 0.7),
-                          fontStyle: FontStyle.italic,
+                decoration: BoxDecoration(
+                  color: bgColor,
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(12),
+                    topRight: const Radius.circular(12),
+                    bottomLeft: Radius.circular(isUser ? 12 : (isRaw ? 4 : 4)),
+                    bottomRight: Radius.circular(isUser ? (isRaw ? 4 : 4) : 12),
+                  ),
+                  border: isRaw
+                      ? Border.all(
+                          color: const Color(0xFF23D18B).withValues(alpha: 0.2),
+                          width: 1,
+                        )
+                      : (isLastAssistant
+                            ? Border.all(
+                                color: scheme.primary.withValues(alpha: 0.5),
+                                width: 2,
+                              )
+                            : null),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (isRaw)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: Text(
+                          'Terminal',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: const Color(
+                              0xFF23D18B,
+                            ).withValues(alpha: 0.7),
+                            fontStyle: FontStyle.italic,
+                          ),
                         ),
                       ),
-                    ),
-                  if (isUser && message.images.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: _UserImages(paths: message.images),
-                    )
-                  else if (isUser && message.imageCount > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.image,
-                            size: 16,
-                            color: textColor.withValues(alpha: 0.8),
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            message.imageCount == 1
-                                ? '图片附件'
-                                : '${message.imageCount} 张图片',
-                            style: TextStyle(
-                              fontSize: 12,
+                    if (isUser && message.images.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: _UserImages(paths: message.images),
+                      )
+                    else if (isUser && message.imageCount > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.image,
+                              size: 16,
                               color: textColor.withValues(alpha: 0.8),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 4),
+                            Text(
+                              message.imageCount == 1
+                                  ? '图片附件'
+                                  : '${message.imageCount} 张图片',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: textColor.withValues(alpha: 0.8),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
+                    _MarkdownContent(
+                      text: message.text,
+                      fontSize: isRaw ? 12 : 14,
+                      textColor: textColor,
+                      isRaw: isRaw,
                     ),
-                  _MarkdownContent(
-                    text: message.text,
-                    fontSize: isRaw ? 12 : 14,
-                    textColor: textColor,
-                    isRaw: isRaw,
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -3479,17 +3565,33 @@ class _MessageBubble extends StatelessWidget {
 class _ExpandableCodeBuilder extends MarkdownElementBuilder {
   final double fontSize;
   final bool isDark;
-  _ExpandableCodeBuilder({required this.fontSize, required this.isDark});
+  final bool isNaive;
+  _ExpandableCodeBuilder({
+    required this.fontSize,
+    required this.isDark,
+    this.isNaive = false,
+  });
 
   @override
-  Widget visitElementAfterWithContext(BuildContext context, md.Element element, _, __) {
+  Widget visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    _,
+    __,
+  ) {
     final code = element.textContent;
     final lines = '\n'.allMatches(code).length + 1;
     final collapsedLines = 8;
     if (lines <= collapsedLines) {
-      return _codeBlock(code, fontSize, isDark);
+      return _codeBlock(code, fontSize, isDark, isNaive: isNaive);
     }
-    return _ExpandableCodeBlock(code: code, fontSize: fontSize, isDark: isDark, collapsedLines: collapsedLines);
+    return _ExpandableCodeBlock(
+      code: code,
+      fontSize: fontSize,
+      isDark: isDark,
+      collapsedLines: collapsedLines,
+      isNaive: isNaive,
+    );
   }
 }
 
@@ -3498,7 +3600,14 @@ class _ExpandableCodeBlock extends StatefulWidget {
   final double fontSize;
   final bool isDark;
   final int collapsedLines;
-  const _ExpandableCodeBlock({required this.code, required this.fontSize, required this.isDark, required this.collapsedLines});
+  final bool isNaive;
+  const _ExpandableCodeBlock({
+    required this.code,
+    required this.fontSize,
+    required this.isDark,
+    required this.collapsedLines,
+    this.isNaive = false,
+  });
 
   @override
   State<_ExpandableCodeBlock> createState() => _ExpandableCodeBlockState();
@@ -3516,7 +3625,9 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
 
     return Container(
       decoration: BoxDecoration(
-        color: widget.isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
+        color: widget.isDark
+            ? const Color(0xFF282C34)
+            : const Color(0xFFF6F8FA),
         borderRadius: BorderRadius.circular(8),
       ),
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -3526,18 +3637,32 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
         children: [
           Padding(
             padding: const EdgeInsets.all(12),
-            child: SelectableText.rich(
-              TextSpan(
-                children: [
-                  highlightCode(collapsedCode, isDark: widget.isDark),
-                ],
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: widget.fontSize - 1,
-                  height: 1.4,
-                ),
-              ),
-            ),
+            child: widget.isNaive
+                ? Text(
+                    collapsedCode,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: widget.fontSize,
+                      height: 1.4,
+                      fontWeight: FontWeight.w500,
+                      color: widget.isDark
+                          ? Colors.grey.shade300
+                          : const Color(0xFF1F2328),
+                    ),
+                  )
+                : Text.rich(
+                    TextSpan(
+                      children: [
+                        highlightCode(collapsedCode, isDark: widget.isDark),
+                      ],
+                      style: TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: widget.fontSize,
+                        height: 1.4,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
           ),
           Material(
             color: Colors.transparent,
@@ -3559,7 +3684,10 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                     const SizedBox(width: 4),
                     Text(
                       _expanded ? '收起' : '展开全部',
-                      style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ),
@@ -3572,33 +3700,53 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
   }
 }
 
-Widget _codeBlock(String code, double fontSize, bool isDark) {
+Widget _codeBlock(
+  String code,
+  double fontSize,
+  bool isDark, {
+  bool isNaive = false,
+}) {
+  final codeColor = isDark ? Colors.grey.shade300 : const Color(0xFF1F2328);
+  final Widget textWidget;
+  if (isNaive) {
+    textWidget = Text(
+      code,
+      style: TextStyle(
+        fontFamily: 'monospace',
+        fontSize: fontSize,
+        height: 1.4,
+        fontWeight: FontWeight.w500,
+        color: codeColor,
+      ),
+    );
+  } else {
+    textWidget = Text.rich(
+      TextSpan(
+        children: [highlightCode(code, isDark: isDark)],
+        style: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: fontSize,
+          height: 1.4,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
   return Container(
     decoration: BoxDecoration(
-      color: isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
+      color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
       borderRadius: BorderRadius.circular(8),
     ),
     margin: const EdgeInsets.symmetric(vertical: 4),
     padding: const EdgeInsets.all(12),
-    child: SelectableText.rich(
-      TextSpan(
-        children: [
-          highlightCode(code, isDark: isDark),
-        ],
-        style: TextStyle(
-          fontFamily: 'monospace',
-          fontSize: fontSize - 1,
-          height: 1.4,
-        ),
-      ),
-    ),
+    child: textWidget,
   );
 }
 
 /// Markdown content widget that renders into a single SelectableText
 /// so that the entire response is selectable across paragraphs.
 /// Falls back to MarkdownBody only for complex content (code blocks, tables).
-class _MarkdownContent extends StatelessWidget {
+class _MarkdownContent extends ConsumerWidget {
   final String text;
   final double fontSize;
   final Color textColor;
@@ -3612,80 +3760,140 @@ class _MarkdownContent extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final isNaive = ref.watch(colorModeProvider) == ColorMode.naive;
 
     if (isRaw) {
-      return SelectableText.rich(
-        parseAnsiToSpan(
+      if (isNaive) {
+        return Text(
           text,
-          defaultColor: textColor,
-          fontSize: fontSize,
-        ),
+          style: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            height: 1.4,
+            fontWeight: FontWeight.w500,
+          ),
+        );
+      }
+      return Text.rich(
+        parseAnsiToSpan(text, defaultColor: textColor, fontSize: fontSize),
       );
     }
 
     // Use MarkdownBody for complex markdown (code blocks, tables, headings).
     // Simple text (most assistant responses) gets SelectableText for full selection.
-    final hasComplexMarkdown = text.contains('```') ||
+    final hasComplexMarkdown =
+        text.contains('```') ||
         text.contains(RegExp(r'^#{1,6}\s', multiLine: true)) ||
         text.contains(RegExp(r'^\|', multiLine: true));
 
     if (hasComplexMarkdown) {
       final isDark = Theme.of(context).brightness == Brightness.dark;
-      return SelectionArea(
-        child: MarkdownBody(
-          data: text,
-          selectable: true,
-          builders: {
-            'pre': _ExpandableCodeBuilder(fontSize: fontSize, isDark: isDark),
-          },
-          styleSheet: MarkdownStyleSheet(
-            p: TextStyle(fontSize: fontSize, color: textColor, height: 1.4),
-            h1: TextStyle(fontSize: fontSize + 8, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
-            h2: TextStyle(fontSize: fontSize + 6, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
-            h3: TextStyle(fontSize: fontSize + 4, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
-            h4: TextStyle(fontSize: fontSize + 2, fontWeight: FontWeight.bold, color: textColor, height: 1.4),
-            code: TextStyle(
-              fontSize: fontSize - 1,
-              color: isDark ? const Color(0xFF98C379) : const Color(0xFF50A14F),
-              backgroundColor: isDark ? const Color(0xFF282C34) : Colors.grey.shade200,
-            ),
-            codeblockDecoration: BoxDecoration(
-              color: isDark ? const Color(0xFF282C34) : Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            codeblockPadding: const EdgeInsets.all(12),
-            blockquote: TextStyle(fontSize: fontSize, color: textColor.withValues(alpha: 0.8), fontStyle: FontStyle.italic, height: 1.4),
-            blockquoteDecoration: BoxDecoration(
-              border: Border(left: BorderSide(color: scheme.primary.withValues(alpha: 0.5), width: 4)),
-            ),
-            blockquotePadding: const EdgeInsets.only(left: 12),
-            listBullet: TextStyle(fontSize: fontSize, color: textColor),
-            a: TextStyle(fontSize: fontSize, color: scheme.primary, decoration: TextDecoration.underline),
+      return MarkdownBody(
+        data: text,
+        builders: {
+          'pre': _ExpandableCodeBuilder(
+            fontSize: fontSize,
+            isDark: isDark,
+            isNaive: isNaive,
           ),
-          onTapLink: (text, href, title) async {
-            if (href == null) return;
-            final uri = Uri.tryParse(href);
-            if (uri != null) {
-              await launchUrl(uri, mode: LaunchMode.externalApplication);
-            }
-          },
+        },
+        styleSheet: MarkdownStyleSheet(
+          p: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            height: 1.4,
+            fontWeight: FontWeight.w500,
+          ),
+          h1: TextStyle(
+            fontSize: fontSize + 8,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+          ),
+          h2: TextStyle(
+            fontSize: fontSize + 6,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+          ),
+          h3: TextStyle(
+            fontSize: fontSize + 4,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+          ),
+          h4: TextStyle(
+            fontSize: fontSize + 2,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+          ),
+          code: TextStyle(
+            fontSize: fontSize,
+            fontWeight: FontWeight.w500,
+            color: isNaive
+                ? textColor
+                : (isDark ? const Color(0xFF98C379) : const Color(0xFF1A7F37)),
+            backgroundColor: null,
+          ),
+          codeblockDecoration: BoxDecoration(
+            color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          codeblockPadding: const EdgeInsets.all(12),
+          blockquote: TextStyle(
+            fontSize: fontSize,
+            color: textColor.withValues(alpha: 0.8),
+            fontStyle: FontStyle.italic,
+            height: 1.4,
+          ),
+          blockquoteDecoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: scheme.primary.withValues(alpha: 0.5),
+                width: 4,
+              ),
+            ),
+          ),
+          blockquotePadding: const EdgeInsets.only(left: 12),
+          listBullet: TextStyle(fontSize: fontSize, color: textColor),
+          a: TextStyle(
+            fontSize: fontSize,
+            color: scheme.primary,
+            decoration: TextDecoration.underline,
+          ),
         ),
+        onTapLink: (text, href, title) async {
+          if (href == null) return;
+          final uri = Uri.tryParse(href);
+          if (uri != null) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+          }
+        },
       );
     }
 
     // Simple text: render inline markdown (bold, italic, inline code) into TextSpans.
     final isDarkSimple = Theme.of(context).brightness == Brightness.dark;
-    return SelectableText.rich(
+    return Text.rich(
       _buildTextSpan(text, fontSize, textColor, scheme, isDarkSimple),
     );
   }
 
-  TextSpan _buildTextSpan(String data, double fontSize, Color color, ColorScheme scheme, bool isDark) {
+  TextSpan _buildTextSpan(
+    String data,
+    double fontSize,
+    Color color,
+    ColorScheme scheme,
+    bool isDark,
+  ) {
     final spans = <TextSpan>[];
     // Process inline markdown: **bold**, *italic*, `code`, [links](url)
-    final regex = RegExp(r'(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`([^`]+)`)|(\[(.+?)\]\((.+?)\))');
+    final regex = RegExp(
+      r'(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`([^`]+)`)|(\[(.+?)\]\((.+?)\))',
+    );
     var lastEnd = 0;
 
     for (final match in regex.allMatches(data)) {
@@ -3696,27 +3904,44 @@ class _MarkdownContent extends StatelessWidget {
 
       if (match[2] != null) {
         // **bold**
-        spans.add(TextSpan(text: match[2]!, style: TextStyle(fontWeight: FontWeight.bold)));
+        spans.add(
+          TextSpan(
+            text: match[2]!,
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+        );
       } else if (match[4] != null) {
         // *italic*
-        spans.add(TextSpan(text: match[4]!, style: TextStyle(fontStyle: FontStyle.italic)));
+        spans.add(
+          TextSpan(
+            text: match[4]!,
+            style: TextStyle(fontStyle: FontStyle.italic),
+          ),
+        );
       } else if (match[6] != null) {
         // `code`
-        spans.add(TextSpan(
-          text: match[6]!,
-          style: TextStyle(
-            fontFamily: 'monospace',
-            fontSize: fontSize - 1,
-            color: isDark ? const Color(0xFF98C379) : const Color(0xFF50A14F),
-            backgroundColor: isDark ? const Color(0xFF282C34) : Colors.grey.shade200,
+        spans.add(
+          TextSpan(
+            text: match[6]!,
+            style: TextStyle(
+              fontFamily: 'monospace',
+              fontSize: fontSize - 1,
+              color: isDark ? const Color(0xFF98C379) : const Color(0xFF0550AE),
+              backgroundColor: null,
+            ),
           ),
-        ));
+        );
       } else if (match[8] != null) {
         // [link](url)
-        spans.add(TextSpan(
-          text: match[8]!,
-          style: TextStyle(color: scheme.primary, decoration: TextDecoration.underline),
-        ));
+        spans.add(
+          TextSpan(
+            text: match[8]!,
+            style: TextStyle(
+              color: scheme.primary,
+              decoration: TextDecoration.underline,
+            ),
+          ),
+        );
       }
 
       lastEnd = match.end;
@@ -4255,9 +4480,9 @@ class _InputBarState extends State<_InputBar> {
     } catch (e, st) {
       debugPrint('pickImage error: $e\n$st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('选择图片失败: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('选择图片失败: $e')));
       }
     }
   }

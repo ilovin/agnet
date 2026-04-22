@@ -7,6 +7,7 @@ import 'screens/dashboard_screen.dart';
 import 'screens/agent_detail_screen.dart';
 import 'screens/settings_screen.dart';
 import 'providers/connection_provider.dart';
+import 'providers/theme_provider.dart';
 
 final _router = GoRouter(
   initialLocation: '/connections',
@@ -49,12 +50,17 @@ final _router = GoRouter(
   ],
 );
 
-class AgentApp extends StatelessWidget {
+class AgentApp extends ConsumerWidget {
   const AgentApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
+    final darkColorScheme = ColorScheme.fromSeed(
+      seedColor: Colors.indigo,
+      brightness: Brightness.dark,
+    );
+    final themeMode = themeModeFromSetting(ref.watch(themeModeProvider));
     return MaterialApp.router(
       title: 'Agent Manager',
       theme: ThemeData(
@@ -67,6 +73,17 @@ class AgentApp extends StatelessWidget {
           selectionHandleColor: colorScheme.primary,
         ),
       ),
+      darkTheme: ThemeData(
+        colorScheme: darkColorScheme,
+        useMaterial3: true,
+        fontFamily: 'Noto Sans SC',
+        textSelectionTheme: TextSelectionThemeData(
+          selectionColor: darkColorScheme.primary.withValues(alpha: 0.50),
+          cursorColor: darkColorScheme.primary,
+          selectionHandleColor: darkColorScheme.primary,
+        ),
+      ),
+      themeMode: themeMode,
       routerConfig: _router,
     );
   }

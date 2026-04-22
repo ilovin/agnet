@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:agentapp/models/agent_model.dart';
+import 'package:agentapp/models/message_model.dart';
 import 'package:agentapp/models/node_model.dart';
+import 'package:agentapp/providers/conversation_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
@@ -13,6 +15,7 @@ Future<void> pumpNodeCard(
   WidgetTester tester,
   NodeModel node, {
   List<Map<String, dynamic>> agents = const [],
+  bool showSessionPreview = false,
 }) async {
   final container = ProviderContainer();
   container.read(nodesProvider.notifier).loadNodes([
@@ -34,13 +37,29 @@ Future<void> pumpNodeCard(
   if (agents.isNotEmpty) {
     container.read(nodesProvider.notifier).loadAgents(node.id, agents);
   }
+  if (showSessionPreview) {
+    for (final agent in agents) {
+      final agentId = agent['id'] as String;
+      container.read(conversationProvider.notifier).loadHistory(node.id, agentId, [
+        {
+          'nodeId': node.id,
+          'agentId': agentId,
+          'role': 'assistant',
+          'text': '第一行\n第二行\n第三行',
+          'seq': 1,
+        },
+      ]);
+    }
+  }
   addTearDown(container.dispose);
 
   await tester.pumpWidget(
     UncontrolledProviderScope(
       container: container,
       child: MaterialApp(
-        home: Scaffold(body: NodeCard(node: node)),
+        home: Scaffold(
+          body: NodeCard(node: node, showSessionPreview: showSessionPreview),
+        ),
       ),
     ),
   );
@@ -228,6 +247,44 @@ void main() {
     expect(message.isThinking, isTrue);
   });
 
+  test('session preview uses refreshed messages instead of stale interrupt', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    final notifier = container.read(conversationProvider.notifier);
+    notifier.loadHistory('n1', 'a1', [
+      {
+        'nodeId': 'n1',
+        'agentId': 'a1',
+        'role': 'assistant',
+        'text': 'interrupt',
+        'seq': 2,
+      },
+    ]);
+    notifier.mergeHistory('n1', 'a1', [
+      {
+        'nodeId': 'n1',
+        'agentId': 'a1',
+        'role': 'assistant',
+        'text': '开始做界面',
+        'seq': 2,
+      },
+      {
+        'nodeId': 'n1',
+        'agentId': 'a1',
+        'role': 'assistant',
+        'text': '已更新最新信息',
+        'seq': 3,
+      },
+    ]);
+
+    final lines = sessionPreviewLinesFromMessages(
+      notifier.messagesFor('n1', 'a1'),
+    );
+
+    expect(lines, equals(['开始做界面', '已更新最新信息']));
+  });
+
   test('buildCollapsedPreview returns concise single-line preview', () {
     final preview = buildCollapsedPreview(
       'Line 1\nLine 2\nLine 3',
@@ -235,6 +292,41 @@ void main() {
     );
 
     expect(preview, 'Line 1 Line 2…');
+  });
+
+  test('sessionPreviewLinesFromMessages keeps the latest two non-empty lines', () {
+    final lines = sessionPreviewLinesFromMessages([
+      const MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.user,
+        text: '第一行\n第二行',
+        seq: 1,
+      ),
+      const MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.assistant,
+        text: '第三行',
+        seq: 2,
+      ),
+    ]);
+
+    expect(lines, equals(['第二行', '第三行']));
+  });
+
+  test('sessionPreviewLinesFromMessages truncates long lines', () {
+    final lines = sessionPreviewLinesFromMessages([
+      const MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.assistant,
+        text: '12345678901234567890',
+        seq: 1,
+      ),
+    ]);
+
+    expect(lines, equals(['12345678901234567890']));
   });
 
   test(
@@ -460,6 +552,43 @@ void main() {
     );
 
     expect(find.byType(AgentRow), findsNWidgets(2));
+  });
+
+  testWidgets('long press agent row shows actions without trailing menu button', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.connected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+      agents: [
+        {
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+    );
+
+    expect(find.byIcon(Icons.more_vert), findsNothing);
+
+    await tester.longPress(find.byType(AgentRow));
+    await tester.pumpAndSettle();
+
+    expect(find.text('重命名'), findsOneWidget);
   });
 
   test('btw assistant message is not skipped after text_delta stream', () {

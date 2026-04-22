@@ -27,6 +27,41 @@ void main() {
       expect(msgs[1].role, equals(MessageRole.assistant));
     });
 
+    test('mergeHistory refreshes duplicate seqs and appends newer messages', () {
+      notifier.loadHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': '继续', 'seq': 1},
+        {
+          'nodeId': 'n1',
+          'agentId': 'a1',
+          'role': 'assistant',
+          'text': 'interrupt',
+          'seq': 2,
+        },
+      ]);
+
+      notifier.mergeHistory('n1', 'a1', [
+        {
+          'nodeId': 'n1',
+          'agentId': 'a1',
+          'role': 'assistant',
+          'text': '开始做界面',
+          'seq': 2,
+        },
+        {
+          'nodeId': 'n1',
+          'agentId': 'a1',
+          'role': 'assistant',
+          'text': '最新进度',
+          'seq': 3,
+        },
+      ]);
+
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs.map((m) => m.seq).toList(), equals([1, 2, 3]));
+      expect(msgs[1].text, equals('开始做界面'));
+      expect(msgs[2].text, equals('最新进度'));
+    });
+
     test('handleEvent conversation.message appends new message', () {
       notifier.handleEvent(WsMessage(
         method: 'conversation.message',

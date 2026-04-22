@@ -121,6 +121,30 @@ void main() {
       expect(state.agentsFor('n1')[0].status, equals(AgentStatus.working));
     });
 
+    test('handleEvent agent.status_changed removes removed agent', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1',
+          'name': 'claude-1',
+          'status': 'idle',
+          'workDir': '/home',
+          'nodeId': 'n1',
+        },
+      ]);
+
+      notifier.handleEvent(
+        WsMessage(
+          method: 'agent.status_changed',
+          params: {'nodeId': 'n1', 'agentId': 'a1', 'status': 'removed'},
+        ),
+      );
+
+      expect(container.read(nodesProvider).agentsFor('n1'), isEmpty);
+    });
+
     test(
       'handleEvent agent.status_changed updates session and provider fields',
       () {
@@ -143,6 +167,9 @@ void main() {
               'nodeId': 'n1',
               'agentId': 'a1',
               'status': 'working',
+              'pid': 0,
+              'sessionId': '',
+              'projectName': '',
               'runtimeState': 'live',
               'sessionState': 'active',
               'sessionStateReason': 'agent is currently producing output',
@@ -157,6 +184,9 @@ void main() {
         );
         final agent = container.read(nodesProvider).agentsFor('n1')[0];
         expect(agent.status, equals(AgentStatus.working));
+        expect(agent.pid, equals(0));
+        expect(agent.sessionId, equals(''));
+        expect(agent.projectName, equals(''));
         expect(agent.runtimeState, equals('live'));
         expect(agent.sessionState, equals('active'));
         expect(

@@ -73,15 +73,35 @@ class NodesNotifier extends StateNotifier<NodeState> {
     if (nodeId.isEmpty || agentId == null || agentId.isEmpty) return;
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
-    // New agent discovered — trigger full refresh so it appears in the list
     if (idx == -1) {
       _refreshAgents(nodeId);
       return;
     }
-    final name = params['name'] as String?;
-    agentList[idx] = agentList[idx].copyWith(
-      status: _parseAgentStatus(params['status'] as String? ?? ''),
-      name: name,
+    final status = _parseAgentStatus(params['status'] as String? ?? '');
+    if ((params['status'] as String? ?? '') == 'removed') {
+      agentList.removeAt(idx);
+      final updated = Map<String, List<AgentModel>>.from(state.agents);
+      updated[nodeId] = agentList;
+      state = state.copyWith(agents: updated);
+      return;
+    }
+    final current = agentList[idx];
+    agentList[idx] = current.copyWith(
+      status: status,
+      name: (params['name'] as String?) ?? current.name,
+      workDir: (params['workDir'] as String?) ?? current.workDir,
+      pid: params.containsKey('pid')
+          ? ((params['pid'] as num?)?.toInt() ?? 0)
+          : current.pid,
+      sessionId: params.containsKey('sessionId')
+          ? ((params['sessionId'] as String?) ?? '')
+          : current.sessionId,
+      projectName: params.containsKey('projectName')
+          ? ((params['projectName'] as String?) ?? '')
+          : current.projectName,
+      isReadOnly: params['readOnly'] as bool?,
+      readOnlyReason: params['readOnlyReason'] as String?,
+      attachMode: params['attachMode'] as String?,
       runtimeState: params['runtimeState'] as String?,
       sessionState: params['sessionState'] as String?,
       sessionStateReason: params['sessionStateReason'] as String?,

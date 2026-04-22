@@ -5,11 +5,82 @@ import 'package:go_router/go_router.dart';
 
 import '../models/node_model.dart';
 import '../models/agent_model.dart';
+import '../models/message_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/health_provider.dart';
+import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
+import 'agent_detail_screen.dart' show
+    buildCollapsedPreview,
+    collapseConsecutiveActivityBlocks,
+    convertEventsToMessages,
+    normalizeHistoryEvent;
+
+String shortSessionId(String? value) {
+  final sessionId = value?.trim() ?? '';
+  if (sessionId.isEmpty) return '';
+  if (sessionId.length <= 8) return sessionId;
+  return sessionId.substring(0, 8);
+}
+
+String _dirname(String path) {
+  if (path.isEmpty) return '';
+  final sep = path.contains('/') ? '/' : '\\';
+  final parts = path.split(sep).where((p) => p.isNotEmpty).toList();
+  return parts.isNotEmpty ? parts.last : path;
+}
+
+List<String> buildSessionPreviewLines(
+  List<String> texts, {
+  int maxLines = 2,
+  int maxCharsPerLine = 80,
+}) {
+  final lines = <String>[];
+  for (final text in texts) {
+    final normalized = text.replaceAll('\r', '\n');
+    for (final line in normalized.split('\n')) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      lines.add(buildCollapsedPreview(trimmed, maxChars: maxCharsPerLine));
+    }
+  }
+  if (lines.length <= maxLines) return lines;
+  return lines.sublist(lines.length - maxLines);
+}
+
+List<String> sessionPreviewLinesFromMessages(
+  List<MessageModel> messages, {
+  int maxLines = 2,
+}) {
+  if (messages.isEmpty) return const [];
+  final recentTexts = messages
+      .where((m) => m.text.trim().isNotEmpty)
+      .map((m) => m.text)
+      .toList();
+  return buildSessionPreviewLines(recentTexts, maxLines: maxLines);
+}
+
+Color providerColor(String provider) {
+  switch (provider.toLowerCase()) {
+    case 'claude':
+      return const Color(0xFFF97316); // Claude orange
+    case 'opencode':
+      return const Color(0xFF3B82F6); // OpenCode blue
+    default:
+      return Colors.grey;
+  }
+}
+
+IconData providerIcon(String provider) {
+  switch (provider.toLowerCase()) {
+    case 'opencode':
+      return Icons.terminal;
+    default:
+      return Icons.smart_toy;
+  }
+}
 
 List<Map<String, String>> getDefaultModels(String provider) {
   final defaultModels = {
@@ -19,11 +90,20 @@ List<Map<String, String>> getDefaultModels(String provider) {
       {'id': 'claude-haiku-4-5-20251001', 'name': 'Haiku 4.5'},
     ],
     'claude-bedrock': [
-      {'id': 'anthropic.claude-3-5-sonnet-20241022-v2:0', 'name': 'Claude 3.5 Sonnet (Bedrock)'},
-      {'id': 'anthropic.claude-3-5-haiku-20241022-v1:0', 'name': 'Claude 3.5 Haiku (Bedrock)'},
+      {
+        'id': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+        'name': 'Claude 3.5 Sonnet (Bedrock)',
+      },
+      {
+        'id': 'anthropic.claude-3-5-haiku-20241022-v1:0',
+        'name': 'Claude 3.5 Haiku (Bedrock)',
+      },
     ],
     'claude-vertex': [
-      {'id': 'claude-3-5-sonnet@20241022', 'name': 'Claude 3.5 Sonnet (Vertex)'},
+      {
+        'id': 'claude-3-5-sonnet@20241022',
+        'name': 'Claude 3.5 Sonnet (Vertex)',
+      },
       {'id': 'claude-3-5-haiku@20241022', 'name': 'Claude 3.5 Haiku (Vertex)'},
     ],
   };
@@ -81,6 +161,19 @@ class SessionCandidate {
 }
 
 bool isLiveSessionCandidate(SessionCandidate s) => (s.pid ?? 0) > 0;
+
+String _sessionCandidateSortTitle(SessionCandidate s) {
+  if (s.projectName != null && s.projectName!.isNotEmpty) {
+    return '${s.projectName} (${s.provider})';
+  }
+  if (s.sessionId != null && s.sessionId!.isNotEmpty) {
+    return '${shortSessionId(s.sessionId)} (${s.provider})';
+  }
+  if (s.pid != null && s.pid! > 0) {
+    return '${s.provider} ${s.pid}';
+  }
+  return s.provider;
+}
 
 bool isWritableAttachSession(SessionCandidate s) {
   return isLiveSessionCandidate(s) && s.attachMode == 'tmux' && !s.isReadOnly;
@@ -150,7 +243,7 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
       attachMode: '',
       isReadOnly: false,
       readOnlyReason: '',
-      projectName: sessionId.length > 6 ? sessionId.substring(sessionId.length - 6) : sessionId,
+      projectName: shortSessionId(sessionId),
     );
   });
 
@@ -158,12 +251,66 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
 }
 
 String managedVisibilityKey(AgentModel agent) {
-  final provider = agent.provider.toLowerCase();
-  final sessionId = (agent.sessionId ?? '').trim().toLowerCase();
-  if (sessionId.isNotEmpty) {
-    return '$provider|session:$sessionId';
+  return sessionIdentityKey(
+    provider: agent.provider,
+    sessionId: agent.sessionId,
+    pid: agent.pid,
+    agentId: agent.id,
+  );
+}
+
+bool _preferManagedAgent(AgentModel candidate, AgentModel? existing) {
+  if (existing == null) return true;
+
+  int priority(AgentStatus status) {
+    switch (status) {
+      case AgentStatus.working:
+        return 0;
+      case AgentStatus.starting:
+        return 1;
+      case AgentStatus.idle:
+        return 2;
+      case AgentStatus.stopped:
+        return 3;
+      case AgentStatus.crashed:
+        return 4;
+    }
   }
-  return '$provider|agent:${agent.id.toLowerCase()}';
+
+  final candidatePriority = priority(candidate.status);
+  final existingPriority = priority(existing.status);
+  if (candidatePriority != existingPriority) {
+    return candidatePriority < existingPriority;
+  }
+
+  final candidatePid = candidate.pid ?? 0;
+  final existingPid = existing.pid ?? 0;
+  if (candidatePid != existingPid) {
+    return candidatePid > existingPid;
+  }
+
+  return false;
+}
+
+String sessionIdentityKey({
+  required String provider,
+  String? sessionId,
+  int? pid,
+  String? agentId,
+}) {
+  final lowerProvider = provider.trim().toLowerCase();
+  final normalizedSessionId = (sessionId ?? '').trim().toLowerCase();
+  if (normalizedSessionId.isNotEmpty) {
+    return '$lowerProvider|session:$normalizedSessionId';
+  }
+  if (pid != null && pid > 0) {
+    return '$lowerProvider|pid:$pid';
+  }
+  final normalizedAgentId = (agentId ?? '').trim().toLowerCase();
+  if (normalizedAgentId.isNotEmpty) {
+    return '$lowerProvider|agent:$normalizedAgentId';
+  }
+  return lowerProvider;
 }
 
 class OpencodeFileCandidate {
@@ -203,6 +350,60 @@ class DashboardScreen extends ConsumerStatefulWidget {
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Timer? _refreshTimer;
   bool _wsConnected = true;
+  bool _showSessionPreview = false;
+
+  Future<void> _prefetchVisibleAgentPreviews() async {
+    if (!_showSessionPreview) return;
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    final nodeState = ref.read(nodesProvider);
+    final futures = <Future<void>>[];
+    for (final node in nodeState.nodeList) {
+      for (final agent in nodeState.agentsFor(node.id)) {
+        futures.add(_loadAgentPreview(client, node.id, agent.id));
+      }
+    }
+    if (futures.isEmpty) return;
+    await Future.wait(futures);
+  }
+
+  Future<void> _loadAgentPreview(
+    WsClient client,
+    String nodeId,
+    String agentId,
+  ) async {
+    final notifier = ref.read(conversationProvider.notifier);
+    try {
+      final result = await client.call('conversation.history', {
+        'nodeId': nodeId,
+        'agentId': agentId,
+        'limit': 12,
+      }, timeout: const Duration(seconds: 3));
+      final raw = result is Map ? result : <String, dynamic>{};
+      final events = ((raw['events'] as List?) ?? const [])
+          .map((e) => normalizeHistoryEvent(e as Map))
+          .toList();
+      final messages = collapseConsecutiveActivityBlocks(
+        convertEventsToMessages(events),
+      )
+          .where((m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall)
+          .toList();
+      notifier.mergeHistory(
+        nodeId,
+        agentId,
+        messages.map((m) {
+          final role = m.role == 'user' ? 'user' : 'assistant';
+          return {
+            'nodeId': nodeId,
+            'agentId': agentId,
+            'role': role,
+            'text': m.text,
+            'seq': m.seq,
+          };
+        }).toList(),
+      );
+    } catch (_) {}
+  }
 
   @override
   void initState() {
@@ -219,6 +420,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       // Reconnect successful — refresh all data immediately
       if (state == WsConnectionState.connected) {
         _refreshAllNodes();
+        _prefetchVisibleAgentPreviews();
         // Re-subscribe to events on the new connection
         final client = ref.read(connectionProvider);
         if (client != null) {
@@ -269,6 +471,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         final nodeId = (n as Map<String, dynamic>)['id'] as String;
         await _refreshNodeAgents(nodeId);
       }
+      await _prefetchVisibleAgentPreviews();
     } catch (e) {
       debugPrint('Auto refresh error: $e');
     }
@@ -418,7 +621,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       // Add selected nodes
       if (added != null && added.isNotEmpty && context.mounted) {
         for (final id in added) {
-          final node = found.firstWhere((n) => n['id'] == id) as Map<String, dynamic>;
+          final node =
+              found.firstWhere((n) => n['id'] == id) as Map<String, dynamic>;
           try {
             await client.call('node.add', {
               'id': node['id'],
@@ -480,14 +684,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     try {
       await client.call('gateway.restart', {});
       if (!mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Gateway 正在重启…')),
-      );
+      messenger.showSnackBar(const SnackBar(content: Text('Gateway 正在重启…')));
     } catch (e) {
       if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('重启 Gateway 失败: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('重启 Gateway 失败: $e')));
     }
   }
 
@@ -598,15 +798,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           'remoteDir': dirCtrl.text.trim(),
         });
         if (!mounted) return;
-        messenger.showSnackBar(
-          const SnackBar(content: Text('部署已启动')),
-        );
+        messenger.showSnackBar(const SnackBar(content: Text('部署已启动')));
       }
     } catch (e) {
       if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('添加/部署失败: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('添加/部署失败: $e')));
     }
   }
 
@@ -653,6 +849,22 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             onPressed: _wsConnected ? () => _restartGateway(ref) : null,
           ),
           IconButton(
+            icon: Icon(
+              _showSessionPreview
+                  ? Icons.notes_outlined
+                  : Icons.notes,
+            ),
+            tooltip: _showSessionPreview ? '隐藏会话预览' : '显示会话预览',
+            onPressed: () {
+              setState(() {
+                _showSessionPreview = !_showSessionPreview;
+              });
+              if (_showSessionPreview) {
+                _prefetchVisibleAgentPreviews();
+              }
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
           ),
@@ -668,7 +880,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 : ListView.builder(
                     itemCount: nodes.length,
                     padding: const EdgeInsets.all(12),
-                    itemBuilder: (_, i) => NodeCard(node: nodes[i]),
+                    itemBuilder: (_, i) => NodeCard(
+                      node: nodes[i],
+                      showSessionPreview: _showSessionPreview,
+                    ),
                   ),
           ),
         ],
@@ -679,7 +894,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
 class NodeCard extends ConsumerStatefulWidget {
   final NodeModel node;
-  const NodeCard({super.key, required this.node});
+  final bool showSessionPreview;
+  const NodeCard({
+    super.key,
+    required this.node,
+    this.showSessionPreview = false,
+  });
 
   @override
   ConsumerState<NodeCard> createState() => _NodeCardState();
@@ -700,7 +920,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     }
   }
 
-
   String get _statusLabel {
     switch (widget.node.status) {
       case NodeStatus.connected:
@@ -719,7 +938,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
   @override
   Widget build(BuildContext context) {
     final agents = ref.watch(nodesProvider).agentsFor(widget.node.id);
-    final nodeDisplay = widget.node.isLocal ? widget.node.name : widget.node.name;
+    final nodeDisplay = widget.node.isLocal
+        ? widget.node.name
+        : widget.node.name;
     final isRemote = !widget.node.isLocal;
     final nodeReady = widget.node.status == NodeStatus.connected;
 
@@ -745,14 +966,14 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     // and should be managed through the session manager instead.
     final bySignature = <String, AgentModel>{};
     for (final a in agents) {
-      final isActive = a.status == AgentStatus.working ||
+      final isActive =
+          a.status == AgentStatus.working ||
           a.status == AgentStatus.starting ||
           a.status == AgentStatus.idle;
       if (!isActive) continue;
       final key = managedVisibilityKey(a);
       final existing = bySignature[key];
-      if (existing == null ||
-          statusPriority(a.status) < statusPriority(existing.status)) {
+      if (_preferManagedAgent(a, existing)) {
         bySignature[key] = a;
       }
     }
@@ -776,7 +997,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               nodeDisplay,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            subtitle: Text('${widget.node.location.displayLocation}  ·  $_statusLabel'),
+            subtitle: Text(
+              '${widget.node.location.displayLocation}  ·  $_statusLabel',
+            ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -791,7 +1014,11 @@ class _NodeCardState extends ConsumerState<NodeCard> {
           ),
           if (visibleAgents.isNotEmpty) const Divider(height: 1),
           ...visibleAgents.map(
-            (a) => AgentRow(agent: a, nodeId: widget.node.id),
+            (a) => AgentRow(
+              agent: a,
+              nodeId: widget.node.id,
+              showPreview: widget.showSessionPreview,
+            ),
           ),
           if (visibleAgents.isEmpty)
             const Padding(
@@ -859,38 +1086,32 @@ class _NodeCardState extends ConsumerState<NodeCard> {
   }
 
   Future<void> _connectNode(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
     try {
       await client.call('node.connect', {'nodeId': widget.node.id});
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('正在连接 ${widget.node.name}…')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('正在连接 ${widget.node.name}…')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('连接节点失败: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('连接节点失败: $e')));
     }
   }
 
   Future<void> _restartNode(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
     try {
       await client.call('node.restart', {'nodeId': widget.node.id});
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('正在重启 ${widget.node.name}…')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('正在重启 ${widget.node.name}…')));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('重启节点失败: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('重启节点失败: $e')));
     }
   }
 
@@ -934,9 +1155,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       );
     } catch (e) {
       if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(content: Text('部署失败: $e')),
-      );
+      messenger.showSnackBar(SnackBar(content: Text('部署失败: $e')));
     }
   }
 
@@ -1004,7 +1223,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       final client = ref.read(connectionProvider);
       if (client == null) return;
       try {
-        final result = await client.call('system.info', {'nodeId': widget.node.id});
+        final result = await client.call('system.info', {
+          'nodeId': widget.node.id,
+        });
         if (result is Map<String, dynamic>) {
           final homeDir = result['homeDir'] as String?;
           if (homeDir != null && homeDir.isNotEmpty) {
@@ -1072,7 +1293,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                     controller: modelCtrl,
                     decoration: InputDecoration(
                       labelText: 'Model (可选)',
-                      hintText: defaultModels.first['name'] ?? defaultModels.first['id'] ?? '',
+                      hintText:
+                          defaultModels.first['name'] ??
+                          defaultModels.first['id'] ??
+                          '',
                     ),
                   ),
                 ],
@@ -1149,69 +1373,56 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         // - Always show working/starting/idle agents
         // - For stopped agents: only show if hasHistory AND has sessionId (resumable)
         // - crashed agents are hidden entirely
-        final hasResumeCapability = a.sessionId != null && a.sessionId!.isNotEmpty;
-        final isActive = a.status == AgentStatus.working ||
+        final hasResumeCapability =
+            a.sessionId != null && a.sessionId!.isNotEmpty;
+        final isActive =
+            a.status == AgentStatus.working ||
             a.status == AgentStatus.starting ||
             a.status == AgentStatus.idle;
-        final isResumableStopped = a.status == AgentStatus.stopped &&
-            a.hasHistory && hasResumeCapability;
+        final isResumableStopped =
+            a.status == AgentStatus.stopped &&
+            a.hasHistory &&
+            hasResumeCapability;
         if (!isActive && !isResumableStopped) {
           continue;
         }
         final key = managedVisibilityKey(a);
         final existing = byName[key];
-        if (existing == null ||
-            managedPriority(a) < managedPriority(existing)) {
+        if (_preferManagedAgent(a, existing)) {
           byName[key] = a;
         }
       }
       final list = byName.values.toList();
       list.sort((a, b) {
+        final at = managedAgentSortTitle(a);
+        final bt = managedAgentSortTitle(b);
+        final byTitle = at.compareTo(bt);
+        if (byTitle != 0) return byTitle;
         final pa = managedPriority(a);
         final pb = managedPriority(b);
         if (pa != pb) return pa.compareTo(pb);
-        final an = a.name.toLowerCase();
-        final bn = b.name.toLowerCase();
-        return an.compareTo(bn);
+        final as = (a.sessionId ?? '').toLowerCase();
+        final bs = (b.sessionId ?? '').toLowerCase();
+        return as.compareTo(bs);
       });
       return list;
     }
 
     String sigFromManaged(AgentModel a) {
-      final lower = a.provider.toLowerCase();
-
-      // Priority 1: sessionId (most reliable for matching)
-      if (a.sessionId != null && a.sessionId!.isNotEmpty) {
-        return '$lower|${a.sessionId!.toLowerCase()}';
-      }
-
-      // Priority 2: PID from attached agent name
-      final nameLower = a.name.toLowerCase();
-      final attachedPrefix = '$lower-attached-';
-      if (nameLower.startsWith(attachedPrefix)) {
-        final pid = nameLower.substring(attachedPrefix.length);
-        if (pid.isNotEmpty) {
-          return '$lower|pid:$pid';
-        }
-      }
-
-      // Priority 3: sessionId in name (for opencode)
-      if (lower == 'opencode' && nameLower.contains('ses_')) {
-        return '$lower|$nameLower';
-      }
-
-      return '$lower|${a.id.toLowerCase()}';
+      return sessionIdentityKey(
+        provider: a.provider,
+        sessionId: a.sessionId,
+        pid: a.pid,
+        agentId: a.id,
+      );
     }
 
     String sigFromCandidate(SessionCandidate s) {
-      final lower = s.provider.toLowerCase();
-      if (s.sessionId != null && s.sessionId!.isNotEmpty) {
-        return '$lower|${s.sessionId!.toLowerCase()}';
-      }
-      if (s.pid != null && s.pid! > 0) {
-        return '$lower|pid:${s.pid}';
-      }
-      return '$lower|${s.workDir.toLowerCase()}';
+      return sessionIdentityKey(
+        provider: s.provider,
+        sessionId: s.sessionId,
+        pid: s.pid,
+      );
     }
 
     // Check if a session candidate matches a managed agent
@@ -1229,7 +1440,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         case AgentStatus.starting:
           return 'Starting';
         case AgentStatus.idle:
-          return 'Standby';
+          return AgentStatusTheme.getLabel(status);
         case AgentStatus.stopped:
           return 'Stopped';
         case AgentStatus.crashed:
@@ -1241,18 +1452,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       return (s.pid != null && s.pid! > 0) ? '附加' : '恢复';
     }
 
-    String sessionStateBadge(SessionCandidate s) {
-      if (s.pid == null || s.pid! <= 0) return 'RESUME';
-      if (s.isReadOnly) return 'READ ONLY';
-      if (s.attachMode == 'tmux') return 'WRITABLE';
-      return 'ATTACH';
-    }
-
-    Color sessionStateColor(SessionCandidate s) {
-      if (s.pid == null || s.pid! <= 0) return Colors.blueGrey;
-      if (s.isReadOnly) return Colors.orange;
-      if (s.attachMode == 'tmux') return Colors.blue;
-      return Colors.green;
+    String sessionStateText(SessionCandidate s) {
+      if (s.pid == null || s.pid! <= 0) return '可恢复';
+      if (s.attachMode == 'tmux') return '可交互';
+      return '可附加';
     }
 
     String sessionConfirmTitle(SessionCandidate s) {
@@ -1311,12 +1514,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
           .where((s) => !managedContains(s, managed))
           .toList();
       list.sort((a, b) {
-        final pa = sessionCandidateSortPriority(a);
-        final pb = sessionCandidateSortPriority(b);
-        if (pa != pb) return pa.compareTo(pb);
-        final ap = a.pid ?? 0;
-        final bp = b.pid ?? 0;
-        if (ap != bp) return bp.compareTo(ap);
+        final at = _sessionCandidateSortTitle(a).toLowerCase();
+        final bt = _sessionCandidateSortTitle(b).toLowerCase();
+        final byTitle = at.compareTo(bt);
+        if (byTitle != 0) return byTitle;
         final as = (a.sessionId ?? '').toLowerCase();
         final bs = (b.sessionId ?? '').toLowerCase();
         return as.compareTo(bs);
@@ -1394,9 +1595,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               refreshAgents: false,
             );
             if (err != null && ctx.mounted) {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                SnackBar(content: Text('自动附加失败：$err')),
-              );
+              ScaffoldMessenger.of(
+                ctx,
+              ).showSnackBar(SnackBar(content: Text('自动附加失败：$err')));
             }
 
             final refreshResult = await client.call('session.catalog', {
@@ -1483,46 +1684,26 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                             ),
                             const SizedBox(height: 8),
                             ...managedAgents.map((a) {
-                              final running =
-                                  a.status == AgentStatus.working ||
-                                  a.status == AgentStatus.starting;
                               return ListTile(
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
-                                leading: const Icon(Icons.smart_toy, size: 18),
-                                title: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        a.name.isEmpty ? a.id : a.name,
-                                      ),
-                                    ),
-                                    if (running)
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 6,
-                                          vertical: 2,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.blue.withValues(
-                                            alpha: 0.12,
-                                          ),
-                                          borderRadius: BorderRadius.circular(
-                                            10,
-                                          ),
-                                        ),
-                                        child: const Text(
-                                          'RUNNING',
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            color: Colors.blue,
-                                          ),
-                                        ),
-                                      ),
-                                  ],
+                                leading: Icon(
+                                  providerIcon(a.provider),
+                                  size: 18,
+                                  color: providerColor(a.provider),
+                                ),
+                                title: Text(
+                                  _agentDisplayTitle(a),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                                 subtitle: Text(
-                                  '${a.provider} · ${a.workDir} · ${statusText(a.status)}',
+                                  _agentSubtitleText(a),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: AgentStatusTheme.getColor(a.status),
+                                  ),
                                 ),
                                 trailing: const Text('进入'),
                                 onTap: () {
@@ -1549,60 +1730,26 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                               final secondaryParts = [
                                 if (s.sessionId != null &&
                                     s.sessionId!.isNotEmpty)
-                                  s.sessionId!,
-                                if (s.pid != null && s.pid! > 0)
-                                  'PID ${s.pid}',
+                                  shortSessionId(s.sessionId),
+                                if (s.pid != null && s.pid! > 0) '${s.pid}',
                                 if (s.terminal != null &&
                                     s.terminal!.isNotEmpty)
                                   s.terminal!,
-                                if (s.pid != null && s.pid! > 0)
-                                  (s.attachMode == 'tmux'
-                                      ? '可交互'
-                                      : (s.isReadOnly ? '只读' : '可附加')),
-                                if (s.readOnlyReason.trim().isNotEmpty)
-                                  s.readOnlyReason.trim(),
+                                sessionStateText(s),
                               ];
                               final secondary = secondaryParts.join(' · ');
-                              final badgeColor = sessionStateColor(s);
                               final actionLabel = sessionActionLabel(s);
-                              // 优先使用 projectName，fallback 到 provider + PID/sessionId
-                              final titleText = s.projectName != null && s.projectName!.isNotEmpty
-                                  ? '${s.projectName} (${s.provider})'
-                                  : (s.pid != null && s.pid! > 0)
-                                      ? '${s.provider}  PID ${s.pid ?? 0}'
-                                      : '${s.provider}  ${s.sessionId ?? '历史会话'}';
+                              final titleText = _sessionCandidateSortTitle(s);
 
                               return ListTile(
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
                                 leading: Icon(
-                                  s.provider == 'opencode'
-                                      ? Icons.terminal
-                                      : Icons.smart_toy,
+                                  providerIcon(s.provider),
                                   size: 18,
+                                  color: providerColor(s.provider),
                                 ),
-                                title: Row(
-                                  children: [
-                                    Expanded(child: Text(titleText)),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 6,
-                                        vertical: 2,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: badgeColor.withValues(alpha: 0.12),
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Text(
-                                        sessionStateBadge(s),
-                                        style: TextStyle(
-                                          fontSize: 10,
-                                          color: badgeColor,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                                title: Text(titleText),
                                 subtitle: secondary.isEmpty
                                     ? null
                                     : Text(secondary),
@@ -1761,28 +1908,132 @@ class _NodeCardState extends ConsumerState<NodeCard> {
 class AgentRow extends ConsumerStatefulWidget {
   final AgentModel agent;
   final String nodeId;
-  const AgentRow({super.key, required this.agent, required this.nodeId});
+  final bool showPreview;
+  const AgentRow({
+    super.key,
+    required this.agent,
+    required this.nodeId,
+    this.showPreview = false,
+  });
 
   @override
   ConsumerState<AgentRow> createState() => _AgentRowState();
 }
 
 class _AgentRowState extends ConsumerState<AgentRow> {
+  final GlobalKey _tileKey = GlobalKey();
+
+  String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
-  String get _statusLabel {
-    switch (widget.agent.status) {
-      case AgentStatus.working:
-        return 'Working';
-      case AgentStatus.idle:
-        return 'Standby';
-      case AgentStatus.starting:
-        return 'Starting…';
-      case AgentStatus.stopped:
-        return 'Stopped';
-      case AgentStatus.crashed:
-        return 'Crashed';
+  String get _subtitleLabel => _agentSubtitleText(widget.agent);
+
+  Future<void> _showAgentActions() async {
+    final tileContext = _tileKey.currentContext;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final tileBox = tileContext?.findRenderObject() as RenderBox?;
+    if (tileBox == null) return;
+    final tileRect = Rect.fromPoints(
+      tileBox.localToGlobal(Offset.zero, ancestor: overlay),
+      tileBox.localToGlobal(tileBox.size.bottomRight(Offset.zero), ancestor: overlay),
+    );
+    final agent = widget.agent;
+    final items = <PopupMenuEntry<String>>[
+      const PopupMenuItem<String>(
+        value: 'rename',
+        child: Row(
+          children: [
+            Icon(Icons.edit, size: 18),
+            SizedBox(width: 8),
+            Text('重命名'),
+          ],
+        ),
+      ),
+    ];
+
+    final details = <PopupMenuEntry<String>>[];
+    if ((agent.runtimeState ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.memory,
+          'Runtime: ${_runtimeStateLabel(agent.runtimeState)}',
+        ),
+      );
     }
+    if ((agent.sessionState ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.chat_bubble_outline,
+          'Session: ${_sessionStateLabel(agent.sessionState)}',
+        ),
+      );
+    }
+    if ((agent.sessionControl ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.gamepad_outlined,
+          'Control: ${_sessionControlLabel(agent.sessionControl)}',
+        ),
+      );
+    }
+    if ((agent.providerState ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.settings,
+          'Provider: ${_providerStateLabel(agent.providerState)}',
+        ),
+      );
+    }
+    if ((agent.providerScope ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.account_tree,
+          'Scope: ${agent.providerScope == 'inherited' ? '继承 Root' : agent.providerScope!}',
+        ),
+      );
+    }
+    if ((agent.providerWriteMode ?? '').isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          agent.providerWriteMode == 'read_only'
+              ? Icons.lock_outline
+              : Icons.edit_note,
+          'Mode: ${agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换'}',
+        ),
+      );
+    }
+    if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.info_outline,
+          agent.sessionStateReason!.trim(),
+        ),
+      );
+    }
+    if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
+      details.add(
+        _detailMenuItem(
+          Icons.info_outline,
+          agent.providerReadOnlyReason!.trim(),
+        ),
+      );
+    }
+
+    if (details.isNotEmpty) {
+      items.add(const PopupMenuDivider());
+      items.addAll(details);
+    }
+
+    final value = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(tileRect.left, tileRect.center.dy, tileRect.width, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: items,
+    );
+    if (!mounted || value == null) return;
+    if (value == 'rename') _renameAgent();
   }
 
   Future<void> _renameAgent() async {
@@ -1817,17 +2068,19 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         'agentId': widget.agent.id,
         'name': newName,
       });
-      ref.read(nodesProvider.notifier).renameAgent(widget.nodeId, widget.agent.id, newName);
+      ref
+          .read(nodesProvider.notifier)
+          .renameAgent(widget.nodeId, widget.agent.id, newName);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已重命名为 $newName')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('已重命名为 $newName')));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('重命名失败: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('重命名失败: $e')));
       }
     }
   }
@@ -1837,7 +2090,11 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       enabled: false,
       child: Row(
         children: [
-          Icon(icon, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          Icon(
+            icon,
+            size: 16,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -1856,153 +2113,106 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   @override
   Widget build(BuildContext context) {
     final agent = widget.agent;
-    final displayTitle = agent.name.isNotEmpty ? agent.name : (agent.projectName ?? '');
-
-    final subtitleText = '${agent.provider} · ${_statusLabel}';
-
-    final attentionChips = <Widget>[];
-    if ((agent.providerWriteMode ?? '') == 'read_only') {
-      attentionChips.add(_InfoChip(label: '只读', color: Colors.orange));
-    }
-    if (agent.status == AgentStatus.crashed) {
-      attentionChips.add(_InfoChip(label: '异常', color: Colors.red));
-    }
+    final displayTitle = _agentDisplayTitle(agent);
+    final previewLines = widget.showPreview
+        ? sessionPreviewLinesFromMessages(
+            ref.watch(conversationProvider)[(widget.nodeId, agent.id)] ??
+                const [],
+          )
+        : const <String>[];
 
     return ListTile(
+      key: _tileKey,
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
-      leading: Icon(Icons.smart_toy, color: _statusColor, size: 20),
-      title: Text(displayTitle),
-      subtitle: Row(
-        children: [
-          Expanded(
-            child: Text(
-              subtitleText,
-              style: TextStyle(color: _statusColor, fontSize: 12),
-            ),
-          ),
-          if (attentionChips.isNotEmpty)
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: attentionChips,
-            ),
-        ],
+      leading: Icon(
+        providerIcon(agent.provider),
+        color: providerColor(agent.provider),
+        size: 20,
       ),
-      trailing: Row(
+      title: Text(displayTitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (agent.status == AgentStatus.working)
-            const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
+          Text(
+            _subtitleLabel,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: _statusColor,
             ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, size: 18),
-            onSelected: (value) {
-              if (value == 'rename') _renameAgent();
-            },
-            itemBuilder: (_) {
-              final items = <PopupMenuEntry<String>>[
-                const PopupMenuItem(
-                  value: 'rename',
-                  child: Row(
-                    children: [
-                      Icon(Icons.edit, size: 18),
-                      SizedBox(width: 8),
-                      Text('重命名'),
-                    ],
-                  ),
-                ),
-              ];
-
-              final details = <PopupMenuEntry<String>>[];
-              if ((agent.runtimeState ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.memory,
-                  'Runtime: ${_runtimeStateLabel(agent.runtimeState)}',
-                ));
-              }
-              if ((agent.sessionState ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.chat_bubble_outline,
-                  'Session: ${_sessionStateLabel(agent.sessionState)}',
-                ));
-              }
-              if ((agent.sessionControl ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.gamepad_outlined,
-                  'Control: ${_sessionControlLabel(agent.sessionControl)}',
-                ));
-              }
-              if ((agent.providerState ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.settings,
-                  'Provider: ${_providerStateLabel(agent.providerState)}',
-                ));
-              }
-              if ((agent.providerScope ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.account_tree,
-                  'Scope: ${agent.providerScope == 'inherited' ? '继承 Root' : agent.providerScope!}',
-                ));
-              }
-              if ((agent.providerWriteMode ?? '').isNotEmpty) {
-                details.add(_detailMenuItem(
-                  agent.providerWriteMode == 'read_only'
-                      ? Icons.lock_outline
-                      : Icons.edit_note,
-                  'Mode: ${agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换'}',
-                ));
-              }
-              if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.info_outline,
-                  agent.sessionStateReason!.trim(),
-                ));
-              }
-              if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
-                details.add(_detailMenuItem(
-                  Icons.info_outline,
-                  agent.providerReadOnlyReason!.trim(),
-                ));
-              }
-
-              if (details.isNotEmpty) {
-                items.add(const PopupMenuDivider());
-                items.addAll(details);
-              }
-
-              return items;
-            },
           ),
+          if (previewLines.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            ...previewLines.map(
+              (line) => Text(
+                line,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
         ],
       ),
       onTap: () => context.push('/agent/${widget.nodeId}/${agent.id}'),
+      onLongPress: _showAgentActions,
     );
   }
 }
 
-class _InfoChip extends StatelessWidget {
-  final String label;
-  final Color color;
-
-  const _InfoChip({required this.label, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w600),
-      ),
-    );
+String _agentSubtitleText(AgentModel agent) {
+  final parts = <String>[
+    if ((agent.pid ?? 0) > 0) '${agent.pid}',
+    if ((agent.sessionId ?? '').trim().isNotEmpty) shortSessionId(agent.sessionId),
+    AgentStatusTheme.getLabel(agent.status),
+  ];
+  if (agent.status == AgentStatus.crashed) {
+    parts.add('异常');
   }
+  return parts.join('.');
+}
+
+String _agentDisplayTitle(AgentModel agent) {
+  return managedAgentTitle(agent);
+}
+
+String managedAgentTitle(AgentModel agent) {
+  final name = agent.name.trim();
+  final sessionReason = agent.sessionStateReason?.trim() ?? '';
+  if (name.isNotEmpty) {
+    if (sessionReason.isNotEmpty && name == sessionReason) {
+      return _agentFallbackTitle(agent);
+    }
+    return name;
+  }
+  return _agentFallbackTitle(agent);
+}
+
+String managedAgentSortTitle(AgentModel agent) {
+  return managedAgentTitle(agent).trim().toLowerCase();
+}
+
+String _agentFallbackTitle(AgentModel agent) {
+  final name = agent.name.trim();
+  if (name.isNotEmpty) {
+    return name;
+  }
+  final sessionId = agent.sessionId?.trim() ?? '';
+  if (sessionId.isNotEmpty) {
+    return shortSessionId(sessionId);
+  }
+  if (agent.projectName?.isNotEmpty == true) {
+    return agent.projectName!;
+  }
+  if (agent.workDir.isNotEmpty) {
+    return _dirname(agent.workDir);
+  }
+  return agent.provider;
 }
 
 String _runtimeStateLabel(String? value) {

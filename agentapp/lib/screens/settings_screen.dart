@@ -10,6 +10,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../providers/connection_provider.dart';
+import '../providers/theme_provider.dart';
+import '../providers/color_mode_provider.dart';
 import '../models/connection_config.dart';
 import '../services/apk_downloader.dart';
 
@@ -173,6 +175,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     ),
                   ),
                 ),
+          const Divider(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text('外观', style: TextStyle(color: Colors.grey, fontSize: 13)),
+          ),
+          Consumer(builder: (context, ref, _) {
+            final mode = ref.watch(themeModeProvider);
+            return Column(
+              children: [
+                RadioListTile<ThemeModeSetting>(
+                  title: const Text('跟随系统'),
+                  secondary: const Icon(Icons.brightness_auto),
+                  value: ThemeModeSetting.system,
+                  groupValue: mode,
+                  onChanged: (v) => ref.read(themeModeProvider.notifier).set(v!),
+                ),
+                RadioListTile<ThemeModeSetting>(
+                  title: const Text('浅色模式'),
+                  secondary: const Icon(Icons.light_mode),
+                  value: ThemeModeSetting.light,
+                  groupValue: mode,
+                  onChanged: (v) => ref.read(themeModeProvider.notifier).set(v!),
+                ),
+                RadioListTile<ThemeModeSetting>(
+                  title: const Text('深色模式'),
+                  secondary: const Icon(Icons.dark_mode),
+                  value: ThemeModeSetting.dark,
+                  groupValue: mode,
+                  onChanged: (v) => ref.read(themeModeProvider.notifier).set(v!),
+                ),
+              ],
+            );
+          }),
+          Consumer(builder: (context, ref, _) {
+            final cmode = ref.watch(colorModeProvider);
+            return Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.palette),
+                  title: const Text('配色模式'),
+                  subtitle: Text(cmode == ColorMode.rich ? 'Rich — 彩色语法高亮' : 'Naive — 简洁默认配色'),
+                ),
+                RadioListTile<ColorMode>(
+                  title: const Text('Rich（彩色高亮）'),
+                  subtitle: const Text('ANSI 彩色、代码语法高亮、工具颜色标记'),
+                  value: ColorMode.rich,
+                  groupValue: cmode,
+                  onChanged: (v) => ref.read(colorModeProvider.notifier).set(v!),
+                ),
+                RadioListTile<ColorMode>(
+                  title: const Text('Naive（简洁）'),
+                  subtitle: const Text('默认 Markdown 渲染，无额外颜色'),
+                  value: ColorMode.naive,
+                  groupValue: cmode,
+                  onChanged: (v) => ref.read(colorModeProvider.notifier).set(v!),
+                ),
+              ],
+            );
+          }),
           const Divider(),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),

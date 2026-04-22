@@ -197,21 +197,84 @@ void main() {
     });
   });
 
-  group('parseSessionCandidates', () {
-    test('parses both list and wrapped map response', () {
-      final fromList = parseSessionCandidates([
-        {'pid': 1, 'provider': 'claude', 'workDir': '/a'},
-      ]);
-      final fromMap = parseSessionCandidates({
-        'processes': [
-          {'pid': 2, 'provider': 'opencode', 'workDir': '/b'},
-        ],
+  group('session identity', () {
+    test('uses pid instead of workDir fallback for live claude sessions', () {
+      final keyA = sessionIdentityKey(
+        provider: 'claude',
+        pid: 6864,
+      );
+      final keyB = sessionIdentityKey(
+        provider: 'claude',
+        pid: 6865,
+      );
+
+      expect(keyA, equals('claude|pid:6864'));
+      expect(keyB, equals('claude|pid:6865'));
+      expect(keyA, isNot(equals(keyB)));
+    });
+
+    test('does not fall back to workDir when pid and sessionId are missing', () {
+      final key = sessionIdentityKey(
+        provider: 'claude',
+        agentId: 'agent-1',
+      );
+
+      expect(key, equals('claude|agent:agent-1'));
+    });
+  });
+
+  group('session id display', () {
+    test('uses the first 8 characters for short session labels', () {
+      expect(shortSessionId('758f2876-f103-4432-a693-4098cd0ac73c'), equals('758f2876'));
+      expect(shortSessionId('cea53ceb-eb6f-42a6-b061-6ba00d33c7cc'), equals('cea53ceb'));
+      expect(shortSessionId('short'), equals('short'));
+    });
+  });
+
+  test('parses OpenCode file sessions with first-8 project label', () {
+    final sessions = parseSessionCandidates({
+      'opencodeFiles': [
+        {'id': 'cea53ceb-eb6f-42a6-b061-6ba00d33c7cc'},
+      ],
+    });
+
+    expect(sessions.length, equals(1));
+    expect(sessions.first.provider, equals('opencode'));
+    expect(sessions.first.sessionId, equals('cea53ceb-eb6f-42a6-b061-6ba00d33c7cc'));
+    expect(sessions.first.projectName, equals('cea53ceb'));
+  });
+
+  group('managed agent titles', () {
+    test('keeps attached auto-name title instead of session id', () {
+      final agent = AgentModel.fromJson({
+        'id': 'a4',
+        'name': 'phone-talk - 6864',
+        'status': 'idle',
+        'provider': 'claude',
+        'workDir': '/tmp/phone-talk',
+        'nodeId': 'n1',
+        'pid': 6864,
+        'sessionId': 'cea53ceb-eb6f-42a6-b061-6ba00d33c7cc',
       });
 
-      expect(fromList.length, equals(1));
-      expect(fromList.first.pid, equals(1));
-      expect(fromMap.length, equals(1));
-      expect(fromMap.first.pid, equals(2));
+      expect(managedAgentTitle(agent), equals('phone-talk - 6864'));
+      expect(managedAgentSortTitle(agent), equals('phone-talk - 6864'));
     });
+  });
+
+  test('parses both list and wrapped map response', () {
+    final fromList = parseSessionCandidates([
+      {'pid': 1, 'provider': 'claude', 'workDir': '/a'},
+    ]);
+    final fromMap = parseSessionCandidates({
+      'processes': [
+        {'pid': 2, 'provider': 'opencode', 'workDir': '/b'},
+      ],
+    });
+
+    expect(fromList.length, equals(1));
+    expect(fromList.first.pid, equals(1));
+    expect(fromMap.length, equals(1));
+    expect(fromMap.first.pid, equals(2));
   });
 }

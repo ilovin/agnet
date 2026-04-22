@@ -19,6 +19,20 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: messages};
   }
 
+  void mergeHistory(String nodeId, String agentId, List<dynamic> rawMessages) {
+    final key = (nodeId, agentId);
+    final merged = <int, MessageModel>{
+      for (final message in state[key] ?? const <MessageModel>[]) message.seq: message,
+    };
+    for (final raw in rawMessages) {
+      final message = MessageModel.fromJson(raw as Map<String, dynamic>);
+      merged[message.seq] = message;
+    }
+    final messages = merged.values.toList()
+      ..sort((a, b) => a.seq.compareTo(b.seq));
+    state = {...state, key: messages};
+  }
+
   /// Handle push events: [conversation.message] and [conversation.message_update].
   void handleEvent(WsMessage event) {
     if (event.method == 'conversation.message_update') {

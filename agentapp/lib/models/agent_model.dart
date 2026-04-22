@@ -22,6 +22,7 @@ class AgentModel {
   final String nodeId;
   final String provider;
   final AgentStatus status;
+  final int? pid;
   final bool hasHistory;
   final bool isReadOnly;
   final String readOnlyReason;
@@ -45,6 +46,7 @@ class AgentModel {
     required this.nodeId,
     required this.provider,
     required this.status,
+    this.pid,
     this.hasHistory = false,
     this.isReadOnly = false,
     this.readOnlyReason = '',
@@ -69,6 +71,7 @@ class AgentModel {
     nodeId: json['nodeId'] as String? ?? '',
     provider: json['provider'] as String? ?? 'custom',
     status: _parseAgentStatus(json['status'] as String? ?? ''),
+    pid: (json['pid'] as num?)?.toInt(),
     hasHistory: json['hasHistory'] as bool? ?? false,
     isReadOnly: json['readOnly'] as bool? ?? false,
     readOnlyReason: json['readOnlyReason'] as String? ?? '',
@@ -93,6 +96,7 @@ class AgentModel {
     String? nodeId,
     String? provider,
     AgentStatus? status,
+    int? pid,
     bool? hasHistory,
     bool? isReadOnly,
     String? readOnlyReason,
@@ -115,6 +119,7 @@ class AgentModel {
     nodeId: nodeId ?? this.nodeId,
     provider: provider ?? this.provider,
     status: status ?? this.status,
+    pid: pid ?? this.pid,
     hasHistory: hasHistory ?? this.hasHistory,
     isReadOnly: isReadOnly ?? this.isReadOnly,
     readOnlyReason: readOnlyReason ?? this.readOnlyReason,
