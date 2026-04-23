@@ -29,7 +29,6 @@ while [[ "$_dir" != "/" && "$_dir" != "." ]]; do
   fi
   _dir="$_parent"
 done
-unset _dir _parent
 BIN_DIR="$PACKAGE_ROOT/bin"
 OUT_DIR="${REPO_ROOT:+$REPO_ROOT/out}"
 INSTALL_DIR="$HOME/.agentgw"
@@ -238,6 +237,28 @@ sync_web_static() {
   cp -R "$static_src/." "$INSTALL_DIR/static/"
 }
 
+# Sync agentgw token into local agentd config so they stay consistent.
+sync_local_agentd_token() {
+  local token
+  token="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('token',''))" "$INSTALL_DIR/config.json" 2>/dev/null || true)"
+  if [[ -z "$token" ]]; then
+    return
+  fi
+  mkdir -p ~/.agentd
+  python3 -c "
+import json, os
+path = os.path.expanduser('~/.agentd/config.json')
+cfg = {'port': 7373, 'data_dir': os.path.expanduser('~/.agentd/data')}
+if os.path.exists(path):
+    with open(path) as f:
+        cfg = json.load(f)
+cfg['token'] = '$token'
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+"
+}
+
 # Detect local agentd binary (in agentd/ dir, sibling of scripts/)
 detect_local_agentd() {
   local bin=""
@@ -290,6 +311,7 @@ restart_services() {
     warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
     warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux|-linux-amd64]"
   else
+    sync_local_agentd_token
     step "启动本地 agentd (${local_bin##*/})..."
     nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
     sleep 2
@@ -933,6 +955,7 @@ if [[ -z "$local_bin" || ! -f "$local_bin" ]]; then
   warn "未找到本地 agentd 二进制文件，跳过本地 agentd 启动"
   warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux]"
 else
+  sync_local_agentd_token
   step "启动本地 agentd (${local_bin##*/})..."
   nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
   sleep 2

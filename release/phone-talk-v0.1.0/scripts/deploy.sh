@@ -279,6 +279,26 @@ deploy_local() {
 
 deploy_remote() {
     echo "[deploy] Deploying to $REMOTE_HOST (as user, NOT sudo)..."
+
+    # Sync token from agentgw config to remote agentd so auth stays consistent
+    local token
+    token="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('token',''))" ~/.agentgw/config.json 2>/dev/null || true)"
+    if [[ -n "$token" ]]; then
+        echo "[deploy] Syncing token to remote agentd config..."
+        ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/.agentd && python3 -c \"
+import json, os
+path = os.path.expanduser('~/.agentd/config.json')
+cfg = {'port': 7373, 'data_dir': os.path.expanduser('~/.agentd/data')}
+if os.path.exists(path):
+    with open(path) as f:
+        cfg = json.load(f)
+cfg['token'] = '$token'
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+\"" || true
+    fi
+
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/bin" || return 1
     scp -o ConnectTimeout=5 "$LINUX_BIN" "$REMOTE_HOST:~/bin/agentd-new" || return 1
 
@@ -329,6 +349,7 @@ Go binaries are rebuilt only when the source-content hash changes.
 TARGETS:
   all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
   build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
+  server           Build all Go binaries, deploy local + remote, restart agentgw (no mobile)
   local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
   ws               Build Linux agentd, deploy to remote \$REMOTE_HOST, restart agentgw
   apk              Build APK only and auto-install to connected Android devices
@@ -418,6 +439,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         devices)
             detect_devices
             ;;
+        server|bin)
+            build_go_all
+            deploy_all
+            restart_agentgw
+            ;;
         local)
             build_agentd_mac
             build_agentgw_mac
@@ -434,10 +460,44 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             restart_agentgw
             ;;
         all)
-            build_all
-            deploy_all
+            # Start all builds in parallel. Go binaries + web static are needed
+            # for deployment; mobile builds (APK/IPA) can finish in background.
+            build_agentd_mac & mac_pid=$!
+            build_agentd_linux & linux_pid=$!
+            build_agentgw_mac & gw_mac_pid=$!
+            build_agentgw_linux & gw_linux_pid=$!
+            build_web & web_pid=$!
+            build_apk & apk_pid=$!
+            build_ipa & ipa_pid=$!
+
+            local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 web_ok=0
+            wait "$mac_pid" && mac_ok=1 || true
+            wait "$linux_pid" && linux_ok=1 || true
+            wait "$gw_mac_pid" && gw_mac_ok=1 || true
+            wait "$gw_linux_pid" && gw_linux_ok=1 || true
+            wait "$web_pid" && web_ok=1 || true
+
+            if [[ $mac_ok -eq 0 || $linux_ok -eq 0 || $gw_mac_ok -eq 0 || $gw_linux_ok -eq 0 ]]; then
+                echo "[deploy] ERROR: Go binary build failed"
+                wait "$apk_pid" "$ipa_pid" 2>/dev/null || true
+                exit 1
+            fi
+
+            # Start deployment immediately — mobile app builds continue in background
+            deploy_all & deploy_pid=$!
+
+            local apk_ok=0 ipa_ok=0
+            wait "$apk_pid" && apk_ok=1 || true
+            wait "$ipa_pid" && ipa_ok=1 || true
+            echo "[deploy] Mobile build results: apk=$apk_ok ipa=$ipa_ok"
+
+            wait "$deploy_pid" || { echo "[deploy] ERROR: deployment failed"; exit 1; }
+
             restart_agentgw
-            deploy_mobile
+
+            if [[ $apk_ok -eq 1 || $ipa_ok -eq 1 ]]; then
+                deploy_mobile
+            fi
             ;;
         *)
             echo "Unknown target: $TARGET"
