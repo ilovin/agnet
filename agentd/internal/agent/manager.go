@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -186,7 +187,16 @@ func isProcessRunning(pid int, provider string) bool {
 	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
 	data, err := os.ReadFile(cmdlinePath)
 	if err != nil {
-		// Process doesn't exist or we can't read it
+		if os.IsNotExist(err) {
+			// On non-Linux (e.g., macOS), /proc doesn't exist. Fall back to ps.
+			cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+			output, err := cmd.Output()
+			if err != nil {
+				return false
+			}
+			comm := strings.TrimSpace(string(output))
+			return strings.Contains(strings.ToLower(comm), strings.ToLower(provider))
+		}
 		return false
 	}
 	cmdline := strings.ToLower(string(data))

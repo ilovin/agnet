@@ -179,8 +179,18 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		return
 	}
 
+	// Helper: check if current binding is still among candidates.
+	currentBound := func() bool {
+		for _, c := range candidates {
+			if c.jsonlPath == w.path {
+				return true
+			}
+		}
+		return false
+	}
+
 	if len(candidates) == 1 {
-		if candidates[0].jsonlPath != w.path {
+		if candidates[0].jsonlPath != w.path && !currentBound() {
 			w.switchToFile(candidates[0].jsonlPath)
 		}
 		return
@@ -191,7 +201,7 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	candidates = filterCandidatesByPaneActivity(candidates, paneActivity, 5*time.Minute)
 
 	if len(candidates) == 1 {
-		if candidates[0].jsonlPath != w.path {
+		if candidates[0].jsonlPath != w.path && !currentBound() {
 			w.switchToFile(candidates[0].jsonlPath)
 		}
 		return
@@ -200,11 +210,18 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	// Step 4: Content matching
 	if w.tmuxTarget != "" {
 		if matched := contentMatchFromCandidates(w.tmuxTarget, candidates, 5); matched != "" {
-			if matched != w.path {
+			if matched != w.path && !currentBound() {
 				w.switchToFile(matched)
 			}
 			return
 		}
+	}
+
+	// If current binding is still a valid candidate, don't switch on ambiguous match.
+	// This prevents empty sessions (e.g. after /clear) from being re-bound to the
+	// wrong session when fingerprints can't differentiate them.
+	if currentBound() {
+		return
 	}
 
 	// Fallback: most active candidate
