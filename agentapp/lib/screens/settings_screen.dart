@@ -12,6 +12,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../providers/connection_provider.dart';
 import '../providers/theme_provider.dart';
 import '../providers/color_mode_provider.dart';
+import '../providers/unread_provider.dart';
 import '../models/connection_config.dart';
 import '../services/apk_downloader.dart';
 
@@ -34,6 +35,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _load() async {
     final store = ref.read(connectionStoreProvider);
     final configs = await store.load();
+    configs.sort((a, b) => a.url.toLowerCase().compareTo(b.url.toLowerCase()));
     if (mounted) setState(() => _saved = configs);
   }
 
@@ -232,6 +234,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   onChanged: (v) => ref.read(colorModeProvider.notifier).set(v!),
                 ),
               ],
+            );
+          }),
+          const Divider(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Text('通知', style: TextStyle(color: Colors.grey, fontSize: 13)),
+          ),
+          Consumer(builder: (context, ref, _) {
+            final enabled = ref.watch(unreadSettingProvider);
+            return SwitchListTile(
+              secondary: const Icon(Icons.notifications),
+              title: const Text('未读消息小红点'),
+              subtitle: const Text('Agent 输出新消息时显示提醒'),
+              value: enabled,
+              onChanged: (v) => ref.read(unreadSettingProvider.notifier).set(v),
             );
           }),
           const Divider(),

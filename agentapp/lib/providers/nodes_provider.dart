@@ -15,7 +15,11 @@ class NodeState {
     Map<String, List<AgentModel>>? agents,
   }) => NodeState(nodes: nodes ?? this.nodes, agents: agents ?? this.agents);
 
-  List<NodeModel> get nodeList => nodes.values.toList();
+  List<NodeModel> get nodeList {
+    final list = nodes.values.toList();
+    list.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return list;
+  }
   List<AgentModel> agentsFor(String nodeId) => agents[nodeId] ?? [];
 }
 

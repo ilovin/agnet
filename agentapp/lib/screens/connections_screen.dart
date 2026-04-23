@@ -11,6 +11,7 @@ import '../models/connection_config.dart';
 import '../providers/connection_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
+import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
 
 class ConnectionProbeResult {
@@ -184,6 +185,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
   Future<void> _loadSaved() async {
     final store = ref.read(connectionStoreProvider);
     final configs = await store.load();
+    configs.sort((a, b) => a.url.toLowerCase().compareTo(b.url.toLowerCase()));
     if (mounted) setState(() => _saved = configs);
     if (configs.isNotEmpty) {
       _tryAutoReconnect();
@@ -357,6 +359,9 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
       client.onEvent((event) {
         ref.read(nodesProvider.notifier).handleEvent(event);
         ref.read(conversationProvider.notifier).handleEvent(event);
+        if (ref.read(unreadSettingProvider)) {
+          ref.read(unreadProvider.notifier).handleEvent(event);
+        }
       });
 
       // Register auto-refresh callback for newly discovered agents

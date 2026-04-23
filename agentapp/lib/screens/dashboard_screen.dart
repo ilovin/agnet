@@ -9,6 +9,7 @@ import '../models/message_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/conversation_provider.dart';
+import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
@@ -947,21 +948,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     // Choose icon based on local/remote status
     final nodeIcon = widget.node.isLocal ? Icons.computer : Icons.cloud;
 
-    int statusPriority(AgentStatus s) {
-      switch (s) {
-        case AgentStatus.working:
-          return 0;
-        case AgentStatus.starting:
-          return 1;
-        case AgentStatus.idle:
-          return 2;
-        case AgentStatus.stopped:
-          return 3;
-        case AgentStatus.crashed:
-          return 4;
-      }
-    }
-
     // Only show active agents. Stopped/crashed agents are hidden from the main list
     // and should be managed through the session manager instead.
     final bySignature = <String, AgentModel>{};
@@ -980,9 +966,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
 
     final visibleAgents = bySignature.values.toList()
       ..sort((a, b) {
-        final pa = statusPriority(a.status);
-        final pb = statusPriority(b.status);
-        if (pa != pb) return pa.compareTo(pb);
         return a.name.toLowerCase().compareTo(b.name.toLowerCase());
       });
 
@@ -1351,21 +1334,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     List<OpencodeFileCandidate> opencodeFiles = [];
     bool autoAttachDone = false;
 
-    int managedPriority(AgentModel a) {
-      switch (a.status) {
-        case AgentStatus.working:
-          return 0;
-        case AgentStatus.starting:
-          return 1;
-        case AgentStatus.idle:
-          return 2;
-        case AgentStatus.stopped:
-          return 3;
-        case AgentStatus.crashed:
-          return 4;
-      }
-    }
-
     List<AgentModel> normalizeManaged(List<AgentModel> input) {
       final byName = <String, AgentModel>{};
       for (final a in input) {
@@ -1396,14 +1364,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       list.sort((a, b) {
         final at = managedAgentSortTitle(a);
         final bt = managedAgentSortTitle(b);
-        final byTitle = at.compareTo(bt);
-        if (byTitle != 0) return byTitle;
-        final pa = managedPriority(a);
-        final pb = managedPriority(b);
-        if (pa != pb) return pa.compareTo(pb);
-        final as = (a.sessionId ?? '').toLowerCase();
-        final bs = (b.sessionId ?? '').toLowerCase();
-        return as.compareTo(bs);
+        return at.compareTo(bt);
       });
       return list;
     }
@@ -1431,21 +1392,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       final candidateSig = sigFromCandidate(s);
       final sigs = managed.map(sigFromManaged).toSet();
       return sigs.contains(candidateSig);
-    }
-
-    String statusText(AgentStatus status) {
-      switch (status) {
-        case AgentStatus.working:
-          return 'Running';
-        case AgentStatus.starting:
-          return 'Starting';
-        case AgentStatus.idle:
-          return AgentStatusTheme.getLabel(status);
-        case AgentStatus.stopped:
-          return 'Stopped';
-        case AgentStatus.crashed:
-          return 'Crashed';
-      }
     }
 
     String sessionActionLabel(SessionCandidate s) {
@@ -1516,11 +1462,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       list.sort((a, b) {
         final at = _sessionCandidateSortTitle(a).toLowerCase();
         final bt = _sessionCandidateSortTitle(b).toLowerCase();
-        final byTitle = at.compareTo(bt);
-        if (byTitle != 0) return byTitle;
-        final as = (a.sessionId ?? '').toLowerCase();
-        final bs = (b.sessionId ?? '').toLowerCase();
-        return as.compareTo(bs);
+        return at.compareTo(bt);
       });
       return list;
     }
@@ -2149,6 +2091,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 const [],
           )
         : const <String>[];
+    final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, agent.id)] ?? 0;
 
     return ListTile(
       key: _tileKey,
@@ -2160,6 +2103,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         size: 20,
       ),
       title: Text(displayTitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+      trailing: unreadCount > 0
+          ? Container(
+              width: 10,
+              height: 10,
+              decoration: const BoxDecoration(
+                color: Colors.red,
+                shape: BoxShape.circle,
+              ),
+            )
+          : null,
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,

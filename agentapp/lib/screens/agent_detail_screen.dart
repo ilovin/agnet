@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
+import '../providers/unread_provider.dart';
 import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
@@ -990,6 +991,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   void initState() {
     super.initState();
     _scrollCtrl.addListener(_handleScroll);
+
+    ref.read(unreadProvider.notifier).markAsRead(widget.nodeId, widget.agentId);
 
     _pruneMessageCache();
 
