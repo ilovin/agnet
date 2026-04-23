@@ -3,19 +3,18 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-
-	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Port    int    `yaml:"port"`
-	Token   string `yaml:"token"`
-	DataDir string `yaml:"data_dir"`
+	Port    int    `json:"port"`
+	Token   string `json:"token"`
+	DataDir string `json:"data_dir"`
 }
 
 // Load reads config from path. If the file doesn't exist, returns defaults and
@@ -35,7 +34,7 @@ func Load(path string) (*Config, error) {
 		if err2 := os.MkdirAll(filepath.Dir(path), 0700); err2 != nil {
 			return nil, fmt.Errorf("mkdir config dir: %w", err2)
 		}
-		out, err2 := yaml.Marshal(cfg)
+		out, err2 := json.MarshalIndent(cfg, "", "  ")
 		if err2 != nil {
 			return nil, fmt.Errorf("marshal default config: %w", err2)
 		}
@@ -55,7 +54,7 @@ func Load(path string) (*Config, error) {
 		Port:    7373,
 		DataDir: filepath.Join(home, ".agentd", "data"),
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if cfg.Token == "" {

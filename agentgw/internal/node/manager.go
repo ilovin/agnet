@@ -18,6 +18,25 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
+// resolveSSHKeyPath returns the first existing SSH private key from common locations.
+func resolveSSHKeyPath(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	home, _ := os.UserHomeDir()
+	candidates := []string{
+		filepath.Join(home, ".ssh", "id_ed25519"),
+		filepath.Join(home, ".ssh", "id_rsa"),
+		filepath.Join(home, ".ssh", "id_ecdsa"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return candidates[0] // fallback, will fail later with a clear error
+}
+
 // EventCallback is called when a node's agentd pushes an event.
 type EventCallback func(nodeID string, event map[string]any)
 
@@ -138,8 +157,8 @@ func (m *Manager) Connect(id string) error {
 		}
 
 		// If SSHAlias is set, use it; otherwise use key-based auth
-		if tunCfg.SSHAlias == "" && tunCfg.SSHKeyPath == "" {
-			tunCfg.SSHKeyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
+		if tunCfg.SSHAlias == "" {
+			tunCfg.SSHKeyPath = resolveSSHKeyPath(tunCfg.SSHKeyPath)
 		}
 
 		tun, err := tunnel.New(tunCfg)
@@ -220,6 +239,28 @@ func (m *Manager) ConnectAll() {
 	}
 }
 
+// StartHealthCheck launches a background loop that retries connection to
+// error/disconnected nodes every 30 seconds.
+func (m *Manager) StartHealthCheck() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			for _, n := range m.List() {
+				st := n.GetStatus()
+				if st == StatusError || st == StatusDisconnected {
+					go func(id, name string) {
+						log.Printf("[health] retrying node %q (%s)", name, id[:8])
+						if err := m.Connect(id); err != nil {
+							log.Printf("[health] node %q still unreachable: %v", name, err)
+						}
+					}(n.ID, n.Name)
+				}
+			}
+		}
+	}()
+}
+
 // Deploy uploads the agentd binary to the remote node and starts it.
 // It requires the node to have SSH credentials configured.
 func (m *Manager) Deploy(id string, remoteDir string) error {
@@ -245,10 +286,7 @@ func (m *Manager) Deploy(id string, remoteDir string) error {
 	if sshUser == "" {
 		sshUser = "root"
 	}
-	keyPath := n.SSHKeyPath
-	if keyPath == "" {
-		keyPath = os.ExpandEnv("$HOME/.ssh/id_rsa")
-	}
+	keyPath := resolveSSHKeyPath(n.SSHKeyPath)
 
 	// Read SSH private key
 	key, err := os.ReadFile(keyPath)

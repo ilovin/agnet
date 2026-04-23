@@ -23,16 +23,19 @@ AGENTD_DIR="./agentd"
 AGENTGW_DIR="./agentgw"
 AGENTAPP_DIR="./agentapp"
 OUT_DIR="./out"
-LOCAL_BIN="$OUT_DIR/agentd"
-LINUX_BIN="$OUT_DIR/agentd-linux"
-GW_BIN="$OUT_DIR/agentgw"
-GW_LINUX_BIN="$OUT_DIR/agentgw-linux"
-GW_MACOS_BIN="$OUT_DIR/agentgw-macos-arm64"
-APK_OUTPUT="$OUT_DIR/agentapp.apk"
-IPA_OUTPUT="$OUT_DIR/agentapp.ipa"
+OUT_DIR_DARWIN="$OUT_DIR/darwin-arm64"
+OUT_DIR_LINUX="$OUT_DIR/linux-amd64"
+OUT_DIR_ANDROID="$OUT_DIR/android"
+OUT_DIR_IOS="$OUT_DIR/ios"
+LOCAL_BIN="$OUT_DIR_DARWIN/agentd"
+LINUX_BIN="$OUT_DIR_LINUX/agentd"
+GW_BIN="$OUT_DIR_DARWIN/agentgw"
+GW_LINUX_BIN="$OUT_DIR_LINUX/agentgw"
+APK_OUTPUT="$OUT_DIR_ANDROID/agentapp.apk"
+IPA_OUTPUT="$OUT_DIR_IOS/agentapp.ipa"
 WEB_STATIC_DIR="$OUT_DIR/static"
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
 
 # Symlink legacy paths to out/ for backward compatibility
 link_legacy() {
@@ -313,13 +316,13 @@ INCREMENTAL BUILDS:
   Builds are skipped when sources haven't changed.
 
 OUTPUT LOCATIONS:
-  agentd/agentd              — macOS daemon
-  agentd/agentd-linux        — Linux daemon (amd64)
-  agentgw/agentgw            — macOS gateway
-  agentgw/agentgw-linux      — Linux gateway (amd64)
-  agentgw/agentapp.apk       — Android APK
-  agentgw/agentapp.ipa       — iOS IPA
-  agentgw/static/            — Web static assets
+  out/darwin-arm64/agentd  — macOS daemon
+  out/darwin-arm64/agentgw — macOS gateway
+  out/linux-amd64/agentd   — Linux daemon (amd64)
+  out/linux-amd64/agentgw  — Linux gateway (amd64)
+  out/android/agentapp.apk — Android APK
+  out/ios/agentapp.ipa     — iOS IPA
+  out/static/              — Web static assets
 EOF
 }
 

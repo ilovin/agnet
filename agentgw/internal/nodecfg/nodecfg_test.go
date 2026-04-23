@@ -8,7 +8,7 @@ import (
 )
 
 func TestSaveAndLoad(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nodes.yaml")
+	path := filepath.Join(t.TempDir(), "nodes.json")
 	store := nodecfg.New(path)
 
 	entries := []nodecfg.NodeEntry{
@@ -36,7 +36,7 @@ func TestSaveAndLoad(t *testing.T) {
 }
 
 func TestLoadEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nodes.yaml")
+	path := filepath.Join(t.TempDir(), "nodes.json")
 	store := nodecfg.New(path)
 
 	entries, err := store.Load()

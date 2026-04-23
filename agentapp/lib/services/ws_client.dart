@@ -206,16 +206,20 @@ class WsClient {
     if (_disposed || _manualDisconnect) return;
     if (_reconnecting) return; // single-flight guard
     _reconnecting = true;
-    dev.log('[WsClient] scheduling reconnect in ${_backoff.next().inSeconds}s');
+    final delay = _backoff.next();
+    dev.log('[WsClient] scheduling reconnect in ${delay.inSeconds}s');
 
     _teardownTransport();
     _reconnectingCtrl.add(true);
 
-    final delay = _backoff.next();
     _reconnectTimer?.cancel();
     _reconnectTimer = _reconnectTimerFactory(delay, () {
       if (!_disposed && !_manualDisconnect) {
-        connect();
+        Future<void>(() async {
+          try {
+            await connect();
+          } catch (_) {}
+        });
       }
     });
   }

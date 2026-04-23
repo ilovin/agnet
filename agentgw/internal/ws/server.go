@@ -131,3 +131,15 @@ func (s *Server) Broadcast(ev RPCEvent) {
 		_ = c.writeJSON(ev)
 	}
 }
+
+// ClientCount returns the number of currently connected WebSocket clients.
+func (s *Server) ClientCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.clients)
+}
+
+// Uptime returns how long the server has been running.
+func (s *Server) Uptime() time.Duration {
+	return time.Since(s.startTime)
+}

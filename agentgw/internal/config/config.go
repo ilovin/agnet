@@ -3,31 +3,34 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v3"
+	"github.com/phone-talk/agentgw/internal/nodecfg"
 )
 
+type TunnelConfig struct {
+	HubURL     string `json:"hub_url"`
+	AppURL     string `json:"app_url"`
+	RealitySNI string `json:"reality_sni"`
+}
+
 type Config struct {
-	Port      int    `yaml:"port"`
-	Token     string `yaml:"token"` // local agentgw /ws auth token
-	NodesFile string `yaml:"nodes_file"`
-	SSHKey    string `yaml:"ssh_key"` // path to default SSH private key
+	Port      int                 `json:"port"`
+	Token     string              `json:"token"` // local agentgw /ws auth token
+	NodesFile string              `json:"nodes_file"`
+	SSHKey    string              `json:"ssh_key"` // path to default SSH private key
+	Tunnel    TunnelConfig        `json:"tunnel"`
+	Nodes     []nodecfg.NodeEntry `json:"nodes"`
 }
 
 func Load(path string) (*Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("get home dir: %w", err)
-	}
 	cfg := &Config{
-		Port:      7374,
-		NodesFile: filepath.Join(home, ".agentgw", "nodes.yaml"),
-		SSHKey:    filepath.Join(home, ".ssh", "id_rsa"),
+		Port: 7374,
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -35,7 +38,7 @@ func Load(path string) (*Config, error) {
 		if err2 := os.MkdirAll(filepath.Dir(path), 0700); err2 != nil {
 			return nil, fmt.Errorf("mkdir config dir: %w", err2)
 		}
-		out, err2 := yaml.Marshal(cfg)
+		out, err2 := json.MarshalIndent(cfg, "", "  ")
 		if err2 != nil {
 			return nil, fmt.Errorf("marshal default config: %w", err2)
 		}
@@ -47,7 +50,7 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	if cfg.Token == "" {

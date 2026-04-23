@@ -7,18 +7,31 @@ import 'package:web_socket_channel/io.dart';
 
 import 'native_ws_channel.dart';
 
-Future<WebSocketChannel> platformConnect(Uri uri, {Map<String, dynamic>? headers}) async {
-  // On Android, use native OkHttp WebSocket to bypass carrier TLS fingerprint blocking.
-  // OkHttp uses BoringSSL (same fingerprint as Chrome), while Dart's TLS gets reset by DPI.
+Future<WebSocketChannel> platformConnect(
+  Uri uri, {
+  Map<String, dynamic>? headers,
+}) async {
   if (defaultTargetPlatform == TargetPlatform.android && uri.scheme == 'wss') {
     dev.log('[ws_connector] using native OkHttp WebSocket for $uri');
+    Object? nativeError;
     try {
       return await NativeWebSocketChannel.connect(uri.toString());
     } catch (e) {
+      nativeError = e;
       dev.log('[ws_connector] native ws failed, falling back to dart: $e');
+    }
+
+    try {
+      return await _connectWithDart(uri, headers: headers);
+    } catch (e) {
+      throw Exception('native ws failed: $nativeError; dart ws failed: $e');
     }
   }
 
+  return _connectWithDart(uri, headers: headers);
+}
+
+Future<WebSocketChannel> _connectWithDart(Uri uri, {Map<String, dynamic>? headers}) async {
   dev.log('[ws_connector] connecting to $uri');
 
   final client = HttpClient();

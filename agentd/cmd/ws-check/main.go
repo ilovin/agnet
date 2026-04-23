@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -13,13 +14,13 @@ import (
 func main() {
 	// agentd token
 	agentdToken := "test-token"
-	if data, err := os.ReadFile(os.Getenv("HOME") + "/.agentd/config.yaml"); err == nil {
+	if data, err := os.ReadFile(os.Getenv("HOME") + "/.agentd/config.json"); err == nil {
 		agentdToken = extractToken(string(data))
 	}
 
 	// agentgw token
 	agentgwToken := "test-token"
-	if data, err := os.ReadFile(os.Getenv("HOME") + "/.agentgw/config.yaml"); err == nil {
+	if data, err := os.ReadFile(os.Getenv("HOME") + "/.agentgw/config.json"); err == nil {
 		agentgwToken = extractToken(string(data))
 	}
 
@@ -35,10 +36,11 @@ func main() {
 }
 
 func extractToken(data string) string {
-	for _, line := range strings.Split(data, "\n") {
-		if strings.HasPrefix(line, "token:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "token:"))
-		}
+	var cfg struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(data), &cfg); err == nil && cfg.Token != "" {
+		return cfg.Token
 	}
 	return "test-token"
 }

@@ -10,7 +10,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	tmp := t.TempDir()
-	cfg, err := config.Load(filepath.Join(tmp, "config.yaml"))
+	cfg, err := config.Load(filepath.Join(tmp, "config.json"))
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
@@ -27,11 +27,8 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadFromFile(t *testing.T) {
 	tmp := t.TempDir()
-	cfgPath := filepath.Join(tmp, "config.yaml")
-	content := `port: 9999
-token: "mytoken"
-data_dir: "/tmp/agentd-data"
-`
+	cfgPath := filepath.Join(tmp, "config.json")
+	content := `{"port": 9999, "token": "mytoken", "data_dir": "/tmp/agentd-data"}`
 	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -49,8 +46,8 @@ data_dir: "/tmp/agentd-data"
 
 func TestLoadEmptyTokenGeneratesToken(t *testing.T) {
 	tmp := t.TempDir()
-	cfgPath := filepath.Join(tmp, "config.yaml")
-	content := "port: 8080\n" // no token field
+	cfgPath := filepath.Join(tmp, "config.json")
+	content := `{"port": 8080}` // no token field
 	if err := os.WriteFile(cfgPath, []byte(content), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +62,7 @@ func TestLoadEmptyTokenGeneratesToken(t *testing.T) {
 
 func TestLoadDefaultsWritesFile(t *testing.T) {
 	tmp := t.TempDir()
-	cfgPath := filepath.Join(tmp, "config.yaml")
+	cfgPath := filepath.Join(tmp, "config.json")
 	_, err := config.Load(cfgPath)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)

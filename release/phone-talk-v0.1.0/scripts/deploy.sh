@@ -12,8 +12,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+REPO_ROOT="$(pwd)"
+INSTALL_SCRIPT="$REPO_ROOT/scripts/install.sh"
+
 # Source build functions (incremental caching, parallel builds)
 source scripts/build.sh
+
+# After sourcing build.sh, these variables point to out/ directory:
+# LOCAL_BIN, LINUX_BIN, GW_BIN, APK_OUTPUT, etc.
 
 REMOTE_HOST="${REMOTE_HOST:-ws}"
 REMOTE_LOG="/tmp/agentd.log"
@@ -257,36 +263,18 @@ deploy_mobile() {
 
 # ── Server deploy functions ───────────────────────────────────────────
 
+deploy_local_runtime() {
+    echo "[deploy] Refreshing local runtime via install.sh restart..."
+    bash "$INSTALL_SCRIPT" restart
+}
+
 deploy_local() {
-    echo "[deploy] Restarting local agentd..."
-    pkill -f "./agentd start" 2>/dev/null || true
-    pkill -f "$AGENTD_DIR/agentd start" 2>/dev/null || true
-
-    # Safety net: if a stale listener still holds 7373, kill it directly.
-    local port_pids=""
-    port_pids="$(lsof -nP -tiTCP:7373 -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' | xargs 2>/dev/null || true)"
-    if [[ -n "$port_pids" ]]; then
-        echo "[deploy] Killing stale 7373 listener(s): $port_pids"
-        kill $port_pids 2>/dev/null || true
-        sleep 1
-        port_pids="$(lsof -nP -tiTCP:7373 -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' | xargs 2>/dev/null || true)"
-        if [[ -n "$port_pids" ]]; then
-            echo "[deploy] Force killing stubborn 7373 listener(s): $port_pids"
-            kill -9 $port_pids 2>/dev/null || true
-        fi
-    fi
-
-    sleep 1
-    nohup "$LOCAL_BIN" start > /tmp/agentd-local.log 2>&1 &
-    sleep 2
-    if lsof -nP -iTCP:7373 -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "[deploy] Local agentd started (PID $(lsof -nP -tiTCP:7373 -sTCP:LISTEN | head -1))"
-    else
-        echo "[deploy] ERROR: local agentd failed to start"
-        tail -5 /tmp/agentd-local.log
+    echo "[deploy] Verifying local agentd build output..."
+    if [[ ! -f "$LOCAL_BIN" ]]; then
+        echo "[deploy] ERROR: local agentd binary not found at $LOCAL_BIN"
         return 1
     fi
-    tail -3 /tmp/agentd-local.log
+    echo "[deploy] Local runtime artifacts ready"
 }
 
 deploy_remote() {
@@ -308,40 +296,23 @@ deploy_remote() {
 }
 
 deploy_all() {
-    local local_pid remote_pid local_ok=0 remote_ok=0
+    local local_pid remote_pid runtime_pid local_ok=0 remote_ok=0 runtime_ok=0
     deploy_local & local_pid=$!
     deploy_remote & remote_pid=$!
     wait "$local_pid" && local_ok=1 || true
     wait "$remote_pid" && remote_ok=1 || true
-    [[ $local_ok -eq 1 && $remote_ok -eq 1 ]]
+    if [[ $local_ok -eq 1 ]]; then
+        deploy_local_runtime & runtime_pid=$!
+        wait "$runtime_pid" && runtime_ok=1 || true
+    fi
+    [[ $local_ok -eq 1 && $remote_ok -eq 1 && $runtime_ok -eq 1 ]]
 }
 
 # ── Gateway management ────────────────────────────────────────────────
 
 restart_agentgw() {
-    build_agentgw_mac
-    build_web
-    echo "[deploy] Restarting agentgw (to reconnect tunnels to agentd)..."
-    pkill -f "agentgw start" 2>/dev/null || true
-    sleep 1
-    local -a env_args=()
-    local runtime_env="$HOME/.agentgw/runtime.env"
-    if [[ -f "$runtime_env" ]]; then
-        env_args+=(env)
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            env_args+=("$line")
-        done < "$runtime_env"
-    fi
-    nohup "${env_args[@]}" "$AGENTGW_DIR/agentgw" start --qr > /tmp/agentgw.log 2>&1 &
-    sleep 2
-    if pgrep -f "agentgw start" > /dev/null; then
-        echo "[deploy] agentgw started (PID $(pgrep -f "agentgw start"))"
-    else
-        echo "[deploy] ERROR: agentgw failed to start"
-        tail -5 /tmp/agentgw.log
-        return 1
-    fi
+    echo "[deploy] Refreshing local gateway runtime via install.sh restart..."
+    bash "$INSTALL_SCRIPT" restart
 }
 
 # ── Help ──────────────────────────────────────────────────────────────

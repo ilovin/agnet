@@ -1,8 +1,13 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'package:agentapp/models/agent_model.dart';
+import 'package:agentapp/models/connection_config.dart';
 import 'package:agentapp/models/message_model.dart';
 import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/providers/conversation_provider.dart';
@@ -10,6 +15,7 @@ import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
+import 'package:agentapp/services/native_ws_channel.dart';
 
 Future<void> pumpNodeCard(
   WidgetTester tester,
@@ -67,6 +73,85 @@ Future<void> pumpNodeCard(
 }
 
 void main() {
+  test('connectionProbeUri keeps path and swaps scheme', () {
+    expect(
+      connectionProbeUri('wss://ilovin.xyz/ws/fengming.xie?token=abc').toString(),
+      equals('https://ilovin.xyz/ws/fengming.xie?token=abc'),
+    );
+    expect(
+      connectionProbeUri('ws://127.0.0.1:8383/ws').toString(),
+      equals('http://127.0.0.1:8383/ws'),
+    );
+  });
+
+  test('friendlyConnectError reports agentgw offline from probe', () {
+    const cfg = ConnectionConfig(url: 'wss://ilovin.xyz/ws/fengming.xie', token: 't');
+    final message = friendlyConnectError(
+      const NativeWebSocketException('ws error', closeCode: 1006),
+      cfg,
+      probeResult: const ConnectionProbeResult.response(502, 'agentgw offline'),
+    );
+
+    expect(message, equals('连接失败：服务器可达，但 agentgw offline。请检查网关进程或隧道是否已连接。'));
+  });
+
+  test('friendlyConnectError reports server unreachable when probe fails', () {
+    const cfg = ConnectionConfig(url: 'wss://ilovin.xyz/ws/fengming.xie', token: 't');
+    final message = friendlyConnectError(
+      const NativeWebSocketException('ws error', closeCode: 1006),
+      cfg,
+      probeResult: ConnectionProbeResult.failure(const SocketException('offline')),
+    );
+
+    expect(message, equals('连接失败：无法连接到服务器。请检查网络、域名/IP、Tailscale 或代理是否在线。'));
+  });
+
+  test('friendlyConnectError reports reachable server with websocket failure', () {
+    const cfg = ConnectionConfig(url: 'wss://ilovin.xyz/ws/fengming.xie', token: 't');
+    final message = friendlyConnectError(
+      const NativeWebSocketException('ws error', closeCode: 1006),
+      cfg,
+      probeResult: const ConnectionProbeResult.response(404, 'not found'),
+    );
+
+    expect(
+      message,
+      equals('连接失败：服务器可达，但 WebSocket 握手失败（HTTP 404）。请检查 URL 路径、代理升级配置或 token。'),
+    );
+  });
+
+  test('friendlyConnectError keeps auth failures ahead of probe result', () {
+    const cfg = ConnectionConfig(url: 'wss://ilovin.xyz/ws/fengming.xie', token: 'bad');
+    final message = friendlyConnectError(
+      Exception('401 unauthorized'),
+      cfg,
+      probeResult: const ConnectionProbeResult.response(502, 'agentgw offline'),
+    );
+
+    expect(message, equals('连接失败：Token 验证不通过（401/403）。请检查 token 是否正确。'));
+  });
+
+  test('shouldProbeConnectionError only probes ambiguous websocket failures', () {
+    expect(shouldProbeConnectionError(const NativeWebSocketException('ws error', closeCode: 1006)), isTrue);
+    expect(shouldProbeConnectionError(Exception('401 unauthorized')), isFalse);
+    expect(shouldProbeConnectionError(Exception('404 not found')), isFalse);
+  });
+
+  testWidgets('ConnectionsScreen accepts injected probe client', (
+    WidgetTester tester,
+  ) async {
+    final probeClient = MockClient((request) async => http.Response('agentgw offline', 502));
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(home: ConnectionsScreen(probeClient: probeClient)),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Agent Manager'), findsOneWidget);
+  });
+
   test('currentOpencodeModelLabel shows active model name', () {
     final data = {
       '_opencodeCurrent': 'tb-api/claude-sonnet-4-6',

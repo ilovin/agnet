@@ -153,6 +153,12 @@ func (a *Agent) AttachMode() string {
 	return a.attachMode
 }
 
+func (a *Agent) TmuxTarget() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.tmuxTarget
+}
+
 func (a *Agent) AttachReadOnly() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

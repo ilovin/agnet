@@ -118,7 +118,7 @@ func newFakeAgentd(t *testing.T, result map[string]any) *httptest.Server {
 
 func newTestServer(t *testing.T) (*httptest.Server, *node.Manager) {
 	t.Helper()
-	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.yaml"))
+	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.json"))
 	mgr := node.NewManager(store, nil)
 	srv := ws.New(mgr, "testtoken")
 	ts := httptest.NewServer(srv)
@@ -483,7 +483,7 @@ func TestNodeRestartReconnectsNode(t *testing.T) {
 
 func TestGatewayRestartCallsRestartFunc(t *testing.T) {
 	called := make(chan bool, 1)
-	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.yaml"))
+	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.json"))
 	mgr := node.NewManager(store, nil)
 	srv := ws.New(mgr, "testtoken")
 	srv.SetGatewayRestartFunc(func() error {

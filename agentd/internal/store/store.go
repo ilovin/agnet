@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -351,4 +352,25 @@ func (s *Store) LastConversationSeq(agentID string) (uint64, error) {
 		return 0, nil
 	}
 	return uint64(last.Int64), nil
+}
+
+// LastConversationEventTime returns the created_at timestamp of the most recent
+// conversation event for the given agent, or zero time if none exist.
+func (s *Store) LastConversationEventTime(agentID string) (time.Time, error) {
+	var createdAt string
+	err := s.db.QueryRow(
+		`SELECT created_at FROM conversation_events WHERE agent_id=? ORDER BY seq DESC LIMIT 1`,
+		agentID,
+	).Scan(&createdAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf("last conversation event time: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse created_at: %w", err)
+	}
+	return t, nil
 }

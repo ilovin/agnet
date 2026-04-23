@@ -1,10 +1,28 @@
 import 'dart:async';
-import 'dart:developer' as dev;
 
 import 'package:async/async.dart';
 import 'package:flutter/services.dart';
 import 'package:stream_channel/stream_channel.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+
+class NativeWebSocketException implements Exception {
+  final String message;
+  final int? closeCode;
+  final String? closeReason;
+
+  const NativeWebSocketException(this.message, {this.closeCode, this.closeReason});
+
+  @override
+  String toString() {
+    var text = message;
+    if (closeCode != null) text += ' (close code $closeCode';
+    if (closeReason != null && closeReason!.isNotEmpty) {
+      text += closeCode == null ? ' (reason $closeReason' : ', reason $closeReason';
+    }
+    if (text != message) text += ')';
+    return text;
+  }
+}
 
 class NativeWebSocketChannel extends StreamChannelMixin
     implements WebSocketChannel {
@@ -53,13 +71,11 @@ class NativeWebSocketChannel extends StreamChannelMixin
   }
 
   void _onEvent(dynamic event) {
-    print('[NativeWSChannel] _onEvent: $event (myId=$_id)');
     if (event is! Map) return;
     final connId = event['id'];
     if (connId != _id) return;
 
     final type = event['type'] as String?;
-    print('[NativeWSChannel] matched id=$connId type=$type');
     switch (type) {
       case 'open':
         if (!_readyCompleter.isCompleted) _readyCompleter.complete();
@@ -67,14 +83,36 @@ class NativeWebSocketChannel extends StreamChannelMixin
         if (!_readyCompleter.isCompleted) _readyCompleter.complete();
         _controller.local.sink.add(event['data']);
       case 'error':
-        final err = Exception(event['error'] ?? 'unknown error');
+        final err = NativeWebSocketException(
+          event['error']?.toString() ?? 'native websocket error',
+          closeCode: _parseCloseCode(event['code']),
+          closeReason: event['reason']?.toString(),
+        );
         if (!_readyCompleter.isCompleted) _readyCompleter.completeError(err);
         _controller.local.sink.addError(err);
         _controller.local.sink.close();
       case 'closed':
-        _closeCode ??= 1000;
+        _closeCode = _parseCloseCode(event['code']) ??
+            _parseCloseCode(event['data']) ??
+            _closeCode;
+        _closeReason = event['reason']?.toString();
+        if (!_readyCompleter.isCompleted) {
+          _readyCompleter.completeError(
+            NativeWebSocketException(
+              'native websocket closed before open',
+              closeCode: _closeCode,
+              closeReason: _closeReason,
+            ),
+          );
+        }
         _controller.local.sink.close();
     }
+  }
+
+  int? _parseCloseCode(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '');
   }
 
   void _onError(dynamic error) {

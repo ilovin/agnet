@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,18 +43,19 @@ type SessionWatcher interface {
 // ClaudeWatcher tails a Claude Code JSONL session file and emits ConversationEvents.
 // It also auto-detects when a newer session file appears (e.g. after /clear) and switches to it.
 type ClaudeWatcher struct {
-	path     string // current JSONL file path
-	workDir  string // project working directory (for finding newer sessions)
-	pid      int    // Claude process PID (for session lookup)
-	callback func(ConversationEvent)
-	stop     chan struct{}
-	once     sync.Once
-	offset   int64
+	path       string // current JSONL file path
+	workDir    string // project working directory (for finding newer sessions)
+	pid        int    // Claude process PID (for session lookup)
+	tmuxTarget string // tmux pane target (for content matching)
+	callback   func(ConversationEvent)
+	stop       chan struct{}
+	once       sync.Once
+	offset     int64
 
-	mu             sync.Mutex
-	lastRefreshAt  time.Time // rate-limit refreshSessionFile (lsof is expensive)
-	lastSwitchAt   time.Time // cooldown after switchToFile to prevent oscillation
-	onSwitch       func(newPath string) // called when session file changes
+	mu            sync.Mutex
+	lastRefreshAt time.Time              // rate-limit refreshSessionFile (lsof is expensive)
+	lastSwitchAt  time.Time              // cooldown after switchToFile to prevent oscillation
+	onSwitch      func(newPath string)   // called when session file changes
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
@@ -67,6 +70,11 @@ func (w *ClaudeWatcher) SetWorkDir(dir string) {
 // SetPID sets the Claude process PID for session tracking.
 func (w *ClaudeWatcher) SetPID(pid int) {
 	w.pid = pid
+}
+
+// SetTmuxTarget sets the tmux pane target for content-based session matching.
+func (w *ClaudeWatcher) SetTmuxTarget(target string) {
+	w.tmuxTarget = target
 }
 
 // OnSessionSwitch registers a callback invoked when the watcher switches to a
@@ -104,8 +112,10 @@ func (w *ClaudeWatcher) loop() {
 // refreshSessionFile detects session switches (e.g. after /clear or resume)
 // and switches the watcher to the new file. Called from poll() when no new
 // events are read — which signals the process may have moved to a new session.
-// Rate-limited to at most once every 15 seconds because the lsof fallback on
-// macOS blocks an OS thread per call.
+// Rate-limited to at most once every 15 seconds.
+//
+// Uses the same discovery pipeline as scanner.findClaudeSessionInfo:
+// task fd → time filter → content match → fallback to most active.
 func (w *ClaudeWatcher) refreshSessionFile() {
 	w.mu.Lock()
 	if time.Since(w.lastRefreshAt) < 15*time.Second {
@@ -115,59 +125,98 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	w.lastRefreshAt = time.Now()
 	w.mu.Unlock()
 
-	if w.pid > 0 {
-		if taskSession := w.findSessionFromTasks(); taskSession != "" {
-			if taskSession != w.path {
-				w.switchToFile(taskSession)
+	if w.pid <= 0 || w.workDir == "" {
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
+
+	// Step 1: Task fd discovery
+	taskSessions := w.findSessionIDsFromTasks(tasksDir)
+
+	if len(taskSessions) == 1 {
+		candidate := filepath.Join(projectDir, taskSessions[0]+".jsonl")
+		if candidate != w.path {
+			if _, err := os.Stat(candidate); err == nil {
+				w.switchToFile(candidate)
+			}
+		}
+		return
+	}
+
+	// Step 2: Build candidate list.
+	// Always include all .jsonl files from the project dir — the current session
+	// may not have a task dir yet (no tasks spawned), so task fd alone can miss it.
+	candidates := listSessionCandidatesInDir(projectDir)
+	if len(taskSessions) > 0 {
+		taskSet := make(map[string]bool, len(taskSessions))
+		for _, sid := range taskSessions {
+			taskSet[sid] = true
+		}
+		for i := range candidates {
+			if taskSet[candidates[i].sessionID] {
+				delete(taskSet, candidates[i].sessionID)
+			}
+		}
+		for sid := range taskSet {
+			jsonlPath := filepath.Join(projectDir, sid+".jsonl")
+			if _, err := os.Stat(jsonlPath); err == nil {
+				candidates = append(candidates, sessionCandidate{
+					sessionID:    sid,
+					jsonlPath:    jsonlPath,
+					lastActivity: getLastActivityTimeFromJSONL(jsonlPath),
+				})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	if len(candidates) == 1 {
+		if candidates[0].jsonlPath != w.path {
+			w.switchToFile(candidates[0].jsonlPath)
+		}
+		return
+	}
+
+	// Step 3: Time-based filtering (optional)
+	paneActivity := getPaneActivity(w.tmuxTarget)
+	candidates = filterCandidatesByPaneActivity(candidates, paneActivity, 5*time.Minute)
+
+	if len(candidates) == 1 {
+		if candidates[0].jsonlPath != w.path {
+			w.switchToFile(candidates[0].jsonlPath)
+		}
+		return
+	}
+
+	// Step 4: Content matching
+	if w.tmuxTarget != "" {
+		if matched := contentMatchFromCandidates(w.tmuxTarget, candidates, 5); matched != "" {
+			if matched != w.path {
+				w.switchToFile(matched)
 			}
 			return
 		}
 	}
+
+	// Fallback: most active candidate
+	if len(candidates) > 0 && candidates[0].jsonlPath != w.path {
+		w.switchToFile(candidates[0].jsonlPath)
+	}
 }
 
-func (w *ClaudeWatcher) pidMappedSessionFile() string {
-	if w.pid <= 0 || w.workDir == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	pidFile := filepath.Join(home, ".claude", "sessions", strconv.Itoa(w.pid)+".json")
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return ""
-	}
-	var pidInfo struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(data, &pidInfo); err != nil || pidInfo.SessionID == "" {
-		return ""
-	}
-	candidate := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir), pidInfo.SessionID+".jsonl")
-	if _, err := os.Stat(candidate); err != nil {
-		return ""
-	}
-	return candidate
-}
-
-// findSessionFromTasks finds the session whose task directory is open by this PID.
-// After /clear, Claude creates a new session and task directory but may not update
-// the PID mapping file. We detect the active session by checking which task dir
-// the PID has open via /proc (Linux) or native syscalls (macOS).
-func (w *ClaudeWatcher) findSessionFromTasks() string {
-	if w.pid <= 0 || w.workDir == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	tasksDir := filepath.Join(home, ".claude", "tasks")
-	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
+// findSessionIDsFromTasks returns session IDs found via task fd discovery for this watcher's PID.
+func (w *ClaudeWatcher) findSessionIDsFromTasks(tasksDir string) []string {
 	sessionIDs := make(map[string]struct{})
 
-	// Linux: /proc/<pid>/fd contains symlinks to open files/dirs
 	procFdDir := fmt.Sprintf("/proc/%d/fd", w.pid)
 	if fdEntries, err := os.ReadDir(procFdDir); err == nil {
 		for _, fd := range fdEntries {
@@ -179,27 +228,339 @@ func (w *ClaudeWatcher) findSessionFromTasks() string {
 				sessionIDs[sessionID] = struct{}{}
 			}
 		}
-		return w.bestTaskSession(projectDir, tasksDir, sessionIDs)
+	} else {
+		cmd := exec.Command("lsof", "-p", strconv.Itoa(w.pid), "-Fn")
+		output, err := cmd.Output()
+		if err == nil {
+			for _, line := range strings.Split(string(output), "\n") {
+				if len(line) < 2 || line[0] != 'n' {
+					continue
+				}
+				if sessionID := taskSessionID(tasksDir, line[1:]); sessionID != "" {
+					sessionIDs[sessionID] = struct{}{}
+				}
+			}
+		}
 	}
 
-	// macOS: use lsof to find which task dirs the PID has open.
-	// This is the only exec.Command on the hot path — rate-limited to 15s
-	// by refreshSessionFile. On Linux the /proc path above handles it without exec.
-	cmd := exec.Command("lsof", "-p", strconv.Itoa(w.pid), "-Fn")
-	output, err := cmd.Output()
+	var result []string
+	for sid := range sessionIDs {
+		result = append(result, sid)
+	}
+	return result
+}
+
+// sessionCandidate is a local type for watcher-internal session matching.
+type sessionCandidate struct {
+	sessionID    string
+	jsonlPath    string
+	lastActivity time.Time
+}
+
+// getLastActivityTimeFromJSONL reads the last few lines of a JSONL file to extract
+// the most recent timestamp. Falls back to file mtime.
+func getLastActivityTimeFromJSONL(jsonlPath string) time.Time {
+	f, err := os.Open(jsonlPath)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return time.Time{}
+	}
+	tailSize := int64(8192)
+	if info.Size() < tailSize {
+		tailSize = info.Size()
+	}
+	buf := make([]byte, tailSize)
+	if _, err := f.ReadAt(buf, info.Size()-tailSize); err != nil {
+		return info.ModTime()
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var obj struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			continue
+		}
+		if obj.Timestamp == "" {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, obj.Timestamp); err == nil {
+			return t
+		}
+		if t, err := time.Parse(time.RFC3339, obj.Timestamp); err == nil {
+			return t
+		}
+	}
+	return info.ModTime()
+}
+
+// getPaneActivity returns the last activity time of a tmux pane, or nil if unavailable.
+func getPaneActivity(tmuxTarget string) *time.Time {
+	if tmuxTarget == "" {
+		return nil
+	}
+	cmd := exec.Command("tmux", "display", "-t", tmuxTarget, "-p", "#{pane_activity}")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	s := strings.TrimSpace(string(out))
+	if s == "" || s == "0" {
+		return nil
+	}
+	epoch, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || epoch <= 0 {
+		return nil
+	}
+	t := time.Unix(epoch, 0)
+	return &t
+}
+
+// listSessionCandidatesInDir lists all .jsonl files in a directory with their activity times.
+func listSessionCandidatesInDir(projectDir string) []sessionCandidate {
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return nil
+	}
+	var candidates []sessionCandidate
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		jsonlPath := filepath.Join(projectDir, entry.Name())
+		candidates = append(candidates, sessionCandidate{
+			sessionID:    strings.TrimSuffix(entry.Name(), ".jsonl"),
+			jsonlPath:    jsonlPath,
+			lastActivity: getLastActivityTimeFromJSONL(jsonlPath),
+		})
+	}
+	return candidates
+}
+
+// filterCandidatesByPaneActivity filters and sorts candidates by proximity to pane activity time.
+// If paneActivity is nil, sorts by lastActivity descending.
+func filterCandidatesByPaneActivity(candidates []sessionCandidate, paneActivity *time.Time, tolerance time.Duration) []sessionCandidate {
+	if paneActivity == nil {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].lastActivity.After(candidates[j].lastActivity)
+		})
+		return candidates
+	}
+
+	pa := *paneActivity
+	var filtered []sessionCandidate
+	for _, c := range candidates {
+		diff := c.lastActivity.Sub(pa)
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= tolerance {
+			filtered = append(filtered, c)
+		}
+	}
+
+	if len(filtered) == 0 {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].lastActivity.After(candidates[j].lastActivity)
+		})
+		return candidates
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		di := filtered[i].lastActivity.Sub(pa)
+		if di < 0 {
+			di = -di
+		}
+		dj := filtered[j].lastActivity.Sub(pa)
+		if dj < 0 {
+			dj = -dj
+		}
+		return di < dj
+	})
+	return filtered
+}
+
+// contentMatchFromCandidates captures tmux pane content and matches against candidates.
+// Returns the jsonlPath of the best match, or "" if no match.
+func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate, maxCandidates int) string {
+	paneRaw, err := capturePaneContent(tmuxTarget)
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if len(line) < 2 || line[0] != 'n' {
-			continue
+	paneText := cleanPaneText(paneRaw)
+	if len(paneText) < 20 {
+		return ""
+	}
+
+	top := candidates
+	if len(top) > maxCandidates {
+		top = top[:maxCandidates]
+	}
+
+	bestScore := 0
+	bestPath := ""
+	for _, c := range top {
+		fps := extractFingerprintsFromJSONL(c.jsonlPath, 20)
+		score := 0
+		for _, fp := range fps {
+			if strings.Contains(paneText, fp) {
+				score++
+			}
 		}
-		path := line[1:]
-		if sessionID := taskSessionID(tasksDir, path); sessionID != "" {
-			sessionIDs[sessionID] = struct{}{}
+		if score > bestScore {
+			bestScore = score
+			bestPath = c.jsonlPath
 		}
 	}
-	return w.bestTaskSession(projectDir, tasksDir, sessionIDs)
+
+	if bestScore > 0 {
+		log.Printf("[ContentMatch] pane %s matched %s (score %d)", tmuxTarget, filepath.Base(bestPath), bestScore)
+		return bestPath
+	}
+	return ""
+}
+
+// capturePaneContent captures the visible content of a tmux pane.
+func capturePaneContent(target string) (string, error) {
+	cmd := exec.Command("tmux", "capture-pane", "-t", target, "-p", "-S", "-200")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+// cleanPaneText removes TUI decorations and normalizes whitespace.
+func cleanPaneText(raw string) string {
+	clean := tuiDecoRe.ReplaceAllString(raw, " ")
+	clean = wsRe.ReplaceAllString(clean, " ")
+	return strings.TrimSpace(clean)
+}
+
+var tuiDecoRe = regexp.MustCompile(`[─━│┃┌┐└┘├┤┬┴┼╔╗╚╝║═⏺⏵✻※❯⎿]`)
+var wsRe = regexp.MustCompile(`\s+`)
+var mdRe = regexp.MustCompile("[*`#\\[\\]]")
+
+// extractFingerprintsFromJSONL extracts text snippets from a JSONL file for matching.
+// Skips pure tool_use messages. Stops when maxFPs fingerprints are collected.
+func extractFingerprintsFromJSONL(jsonlPath string, maxFPs int) []string {
+	f, err := os.Open(jsonlPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil
+	}
+	tailSize := int64(65536)
+	if info.Size() < tailSize {
+		tailSize = info.Size()
+	}
+	buf := make([]byte, tailSize)
+	if _, err := f.ReadAt(buf, info.Size()-tailSize); err != nil {
+		return nil
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	var fps []string
+
+	for i := len(lines) - 1; i >= 0 && len(fps) < maxFPs; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &obj); err != nil {
+			continue
+		}
+
+		msgType, _ := obj["type"].(string)
+		if msgType != "assistant" && msgType != "user" {
+			continue
+		}
+
+		message, ok := obj["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		content := message["content"]
+
+		if str, ok := content.(string); ok {
+			t := strings.TrimSpace(str)
+			if len(t) >= 3 && len(t) <= 80 {
+				fps = append(fps, t)
+			}
+			continue
+		}
+
+		contentArr, ok := content.([]interface{})
+		if !ok {
+			continue
+		}
+
+		hasText := false
+		for _, item := range contentArr {
+			block, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if block["type"] != "text" {
+				continue
+			}
+			hasText = true
+			text, _ := block["text"].(string)
+			text = strings.TrimSpace(text)
+			text = mdRe.ReplaceAllString(text, "")
+			for _, l := range strings.Split(text, "\n") {
+				l = strings.TrimSpace(l)
+				if len(l) > 15 && len(l) < 80 {
+					fps = append(fps, l)
+					if len(fps) >= maxFPs {
+						break
+					}
+				}
+			}
+			if len(fps) >= maxFPs {
+				break
+			}
+		}
+		if !hasText {
+			continue
+		}
+	}
+
+	return fps
+}
+
+func (w *ClaudeWatcher) switchToFile(newPath string) {
+	w.mu.Lock()
+	if time.Since(w.lastSwitchAt) < 30*time.Second {
+		w.mu.Unlock()
+		return
+	}
+	w.lastSwitchAt = time.Now()
+	w.mu.Unlock()
+	oldPath := w.path
+	w.path = newPath
+	w.offset = 0
+	log.Printf("[Watcher] Switching session file: %s -> %s", oldPath, newPath)
+	if w.onSwitch != nil {
+		w.onSwitch(newPath)
+	}
 }
 
 func taskSessionID(tasksDir, path string) string {
@@ -225,61 +586,6 @@ func normalizeTaskPath(path string) string {
 		return strings.TrimPrefix(path, "/private")
 	}
 	return path
-}
-
-func (w *ClaudeWatcher) bestTaskSession(projectDir, tasksDir string, sessionIDs map[string]struct{}) string {
-	var best string
-	var bestTaskTime time.Time
-	var bestSessionTime time.Time
-	for sessionID := range sessionIDs {
-		candidate := filepath.Join(projectDir, sessionID+".jsonl")
-		sessionInfo, err := os.Stat(candidate)
-		if err != nil {
-			continue
-		}
-		taskTime := latestTaskActivity(filepath.Join(tasksDir, sessionID))
-		if best == "" || taskTime.After(bestTaskTime) || (taskTime.Equal(bestTaskTime) && sessionInfo.ModTime().After(bestSessionTime)) {
-			best = candidate
-			bestTaskTime = taskTime
-			bestSessionTime = sessionInfo.ModTime()
-		}
-	}
-	return best
-}
-
-func latestTaskActivity(taskDir string) time.Time {
-	entries, err := os.ReadDir(taskDir)
-	if err != nil {
-		return time.Time{}
-	}
-	var latest time.Time
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(latest) {
-			latest = info.ModTime()
-		}
-	}
-	return latest
-}
-
-func (w *ClaudeWatcher) switchToFile(newPath string) {
-	w.mu.Lock()
-	if time.Since(w.lastSwitchAt) < 30*time.Second {
-		w.mu.Unlock()
-		return
-	}
-	w.lastSwitchAt = time.Now()
-	w.mu.Unlock()
-	oldPath := w.path
-	w.path = newPath
-	w.offset = 0
-	log.Printf("[Watcher] Switching session file: %s -> %s", oldPath, newPath)
-	if w.onSwitch != nil {
-		w.onSwitch(newPath)
-	}
 }
 
 func projectDirName(workDir string) string {

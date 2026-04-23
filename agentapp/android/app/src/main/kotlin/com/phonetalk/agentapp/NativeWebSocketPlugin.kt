@@ -113,10 +113,21 @@ class NativeWebSocketPlugin private constructor(
         }
     }
 
-    private fun sendEvent(connId: Long, type: String, data: String? = null, error: String? = null) {
+    private fun sendEvent(
+        connId: Long,
+        type: String,
+        data: String? = null,
+        error: String? = null,
+        code: Int? = null,
+        reason: String? = null,
+        wasClean: Boolean? = null,
+    ) {
         val event = mutableMapOf<String, Any?>("id" to connId, "type" to type)
         if (data != null) event["data"] = data
         if (error != null) event["error"] = error
+        if (code != null) event["code"] = code
+        if (reason != null) event["reason"] = reason
+        if (wasClean != null) event["wasClean"] = wasClean
         sendEvent(event)
     }
 
@@ -129,7 +140,7 @@ function wsConnect(url){
   try{var b=btoa(unescape(encodeURIComponent(e.data)));NativeBridge.onMessage(b)}
   catch(ex){NativeBridge.onError('encode:'+ex.message)}
  };
- ws.onclose=function(e){NativeBridge.onClose(e.code+'')};
+ ws.onclose=function(e){NativeBridge.onClose(e.code, e.reason || '', e.wasClean)};
  ws.onerror=function(){NativeBridge.onError('ws error')}
 }
 function wsSend(b64){if(ws){ws.send(decodeURIComponent(escape(atob(b64))))}}
@@ -201,9 +212,9 @@ function wsClose(){if(ws)ws.close()}
         }
 
         @JavascriptInterface
-        fun onClose(code: String) {
-            Log.d(TAG, "[$connId] WebSocket closed: $code")
-            sendEvent(connId, "closed", data = code)
+        fun onClose(code: Int, reason: String?, wasClean: Boolean) {
+            Log.d(TAG, "[$connId] WebSocket closed: code=$code reason=$reason wasClean=$wasClean")
+            sendEvent(connId, "closed", code = code, reason = reason, wasClean = wasClean)
             connections.remove(connId)
         }
 

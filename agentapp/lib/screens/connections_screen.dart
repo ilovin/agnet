@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'dashboard_screen.dart';
 import '../models/connection_config.dart';
@@ -11,6 +12,119 @@ import '../providers/connection_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/health_provider.dart';
+
+class ConnectionProbeResult {
+  final int? statusCode;
+  final String? body;
+  final Object? error;
+
+  const ConnectionProbeResult.response(this.statusCode, this.body) : error = null;
+  const ConnectionProbeResult.failure(this.error)
+      : statusCode = null,
+        body = null;
+
+  bool get isReachable => statusCode != null;
+}
+
+Uri connectionProbeUri(String wsUrl) {
+  final uri = Uri.parse(wsUrl);
+  final scheme = switch (uri.scheme) {
+    'ws' => 'http',
+    'wss' => 'https',
+    _ => uri.scheme,
+  };
+  return uri.replace(scheme: scheme);
+}
+
+bool shouldProbeConnectionError(Object error) {
+  final lower = error.toString().toLowerCase();
+  if (isDefinitiveConnectionError(error)) return false;
+  return lower.contains('ws error') ||
+      lower.contains('websocket error') ||
+      lower.contains('closed: 1006') ||
+      lower.contains('close code 1006') ||
+      lower.contains('native ws') ||
+      lower.contains('handshake timeout') ||
+      lower.contains('timed out') ||
+      error is TimeoutException;
+}
+
+bool isDefinitiveConnectionError(Object error) {
+  final lower = error.toString().toLowerCase();
+  return lower.contains('401') ||
+      lower.contains('unauthorized') ||
+      lower.contains('forbidden') ||
+      lower.contains('403') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('nodename nor servname provided') ||
+      lower.contains('no route to host') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('connection refused') ||
+      lower.contains('actively refused') ||
+      lower.contains('connection reset') ||
+      lower.contains('404 not found') ||
+      lower.contains('not upgraded to websocket');
+}
+
+String friendlyConnectError(
+  Object error,
+  ConnectionConfig cfg, {
+  ConnectionProbeResult? probeResult,
+}) {
+  final raw = error.toString();
+  final lower = raw.toLowerCase();
+
+  if (lower.contains('401') ||
+      lower.contains('unauthorized') ||
+      lower.contains('forbidden') ||
+      lower.contains('403')) {
+    return '连接失败：Token 验证不通过（401/403）。请检查 token 是否正确。';
+  }
+
+  if (lower.contains('failed host lookup') ||
+      lower.contains('nodename nor servname provided') ||
+      lower.contains('no route to host') ||
+      lower.contains('network is unreachable')) {
+    return '连接失败：无法连接到服务器。请检查网络、域名/IP、Tailscale 或代理是否在线。';
+  }
+
+  if (lower.contains('connection refused') ||
+      lower.contains('actively refused') ||
+      lower.contains('connection reset')) {
+    return '连接失败：服务器端口未开放或服务未启动。请检查 agentgw/agentd 进程和端口监听。';
+  }
+
+  if ((lower.contains('websocket') && lower.contains('404')) ||
+      lower.contains('404 not found') ||
+      lower.contains('not upgraded to websocket')) {
+    return '连接失败：WebSocket 路径错误。请确认 URL 使用 /ws 或远端代理的 /ws/<userId>。';
+  }
+
+  final probedMessage = friendlyConnectProbeMessage(probeResult);
+  if (probedMessage != null) return probedMessage;
+
+  if (error is TimeoutException ||
+      lower.contains('handshake timeout') ||
+      lower.contains('timed out')) {
+    return '连接失败：连接超时。通常是网络不通或端口无响应，请先检查连通性和端口。';
+  }
+
+  return '连接失败：$raw';
+}
+
+String? friendlyConnectProbeMessage(ConnectionProbeResult? result) {
+  if (result == null) return null;
+  if (!result.isReachable) {
+    return '连接失败：无法连接到服务器。请检查网络、域名/IP、Tailscale 或代理是否在线。';
+  }
+
+  final body = result.body?.toLowerCase() ?? '';
+  if (result.statusCode == 502 && body.contains('agentgw offline')) {
+    return '连接失败：服务器可达，但 agentgw offline。请检查网关进程或隧道是否已连接。';
+  }
+
+  return '连接失败：服务器可达，但 WebSocket 握手失败（HTTP ${result.statusCode}）。请检查 URL 路径、代理升级配置或 token。';
+}
 
 /// Pick the best saved config to auto-reconnect.
 /// Prefers [lastUrl] if present, otherwise the first saved config.
@@ -28,7 +142,9 @@ ConnectionConfig? pickAutoReconnectConfig(
 }
 
 class ConnectionsScreen extends ConsumerStatefulWidget {
-  const ConnectionsScreen({super.key});
+  const ConnectionsScreen({super.key, this.probeClient});
+
+  final http.Client? probeClient;
 
   @override
   ConsumerState<ConnectionsScreen> createState() => _ConnectionsScreenState();
@@ -280,10 +396,12 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
       return true;
     } catch (e) {
       if (!mounted) return false;
+      final message = await _friendlyConnectError(e, cfg);
+      if (!mounted) return false;
       setState(() {
         _connecting = false;
         _connectingUrl = null;
-        _connectStatus = _friendlyConnectError(e, cfg);
+        _connectStatus = message;
         _connectStatusIsError = true;
         _lastFailedConfig = cfg;
       });
@@ -291,43 +409,34 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
     }
   }
 
-  String _friendlyConnectError(Object error, ConnectionConfig cfg) {
-    final raw = error.toString();
-    final lower = raw.toLowerCase();
-
-    if (lower.contains('401') ||
-        lower.contains('unauthorized') ||
-        lower.contains('forbidden') ||
-        lower.contains('403')) {
-      return '连接失败：Token 验证不通过（401/403）。请检查 token 是否正确。';
+  Future<ConnectionProbeResult?> _probeConnection(ConnectionConfig cfg) async {
+    final client = widget.probeClient ?? http.Client();
+    final ownsClient = widget.probeClient == null;
+    try {
+      final uri = connectionProbeUri(cfg.url);
+      final response = await client.get(
+        uri,
+        headers: {'Authorization': 'Bearer ${cfg.token}'},
+      ).timeout(const Duration(seconds: 3));
+      return ConnectionProbeResult.response(response.statusCode, response.body);
+    } catch (error) {
+      return ConnectionProbeResult.failure(error);
+    } finally {
+      if (ownsClient) {
+        client.close();
+      }
     }
+  }
 
-    if (lower.contains('failed host lookup') ||
-        lower.contains('nodename nor servname provided') ||
-        lower.contains('no route to host') ||
-        lower.contains('network is unreachable')) {
-      return '连接失败：主机不可达（类似 ping 不通）。请检查 Tailscale 是否在线、IP 是否正确。';
+  Future<String> _friendlyConnectError(
+    Object error,
+    ConnectionConfig cfg,
+  ) async {
+    ConnectionProbeResult? probeResult;
+    if (shouldProbeConnectionError(error)) {
+      probeResult = await _probeConnection(cfg);
     }
-
-    if (lower.contains('connection refused') ||
-        lower.contains('actively refused') ||
-        lower.contains('connection reset')) {
-      return '连接失败：端口未开放或服务未启动。请检查 8080 端口监听和 agentgw/agentd 进程。';
-    }
-
-    if ((lower.contains('websocket') && lower.contains('404')) ||
-        lower.contains('404 not found') ||
-        lower.contains('not upgraded to websocket')) {
-      return '连接失败：WebSocket 路径错误。请确认 URL 以 /api/v1/ws 结尾。';
-    }
-
-    if (error is TimeoutException ||
-        lower.contains('handshake timeout') ||
-        lower.contains('timed out')) {
-      return '连接失败：连接超时。通常是网络不通或端口无响应，请先检查连通性和端口。';
-    }
-
-    return '连接失败：$raw';
+    return friendlyConnectError(error, cfg, probeResult: probeResult);
   }
 
   Future<void> _autoAttachLatestSessions(String nodeId) async {

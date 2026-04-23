@@ -1255,6 +1255,7 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 	w := watcher.NewClaudeWatcher(sessionFile, cb)
 	w.SetWorkDir(workDir)
 	w.SetPID(pid)
+	w.SetTmuxTarget(ag.TmuxTarget())
 	if err := w.Start(); err != nil {
 		log.Printf("[Watcher] Watcher start failed for agent %s: %v", agentID, err)
 		return
@@ -2076,6 +2077,9 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 	w := watcher.NewClaudeWatcher(sessionFile, cb)
 	w.SetWorkDir(workDir)
 	w.SetPID(pid)
+	if ag := m.Get(agentID); ag != nil {
+		w.SetTmuxTarget(ag.TmuxTarget())
+	}
 	w.OnSessionSwitch(func(newPath string) {
 		newSessionID := strings.TrimSuffix(filepath.Base(newPath), ".jsonl")
 		ag := m.Get(agentID)

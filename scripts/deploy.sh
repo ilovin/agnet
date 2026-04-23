@@ -12,6 +12,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+REPO_ROOT="$(pwd)"
+INSTALL_SCRIPT="$REPO_ROOT/scripts/install.sh"
+
 # Source build functions (incremental caching, parallel builds)
 source scripts/build.sh
 
@@ -260,40 +263,42 @@ deploy_mobile() {
 
 # ── Server deploy functions ───────────────────────────────────────────
 
+deploy_local_runtime() {
+    echo "[deploy] Refreshing local runtime via install.sh restart..."
+    bash "$INSTALL_SCRIPT" restart
+}
+
 deploy_local() {
-    echo "[deploy] Restarting local agentd..."
-    pkill -f "./agentd start" 2>/dev/null || true
-    pkill -f "$AGENTD_DIR/agentd start" 2>/dev/null || true
-
-    # Safety net: if a stale listener still holds 7373, kill it directly.
-    local port_pids=""
-    port_pids="$(lsof -nP -tiTCP:7373 -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' | xargs 2>/dev/null || true)"
-    if [[ -n "$port_pids" ]]; then
-        echo "[deploy] Killing stale 7373 listener(s): $port_pids"
-        kill $port_pids 2>/dev/null || true
-        sleep 1
-        port_pids="$(lsof -nP -tiTCP:7373 -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' | xargs 2>/dev/null || true)"
-        if [[ -n "$port_pids" ]]; then
-            echo "[deploy] Force killing stubborn 7373 listener(s): $port_pids"
-            kill -9 $port_pids 2>/dev/null || true
-        fi
-    fi
-
-    sleep 1
-    nohup "$LOCAL_BIN" start > /tmp/agentd-local.log 2>&1 &
-    sleep 2
-    if lsof -nP -iTCP:7373 -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "[deploy] Local agentd started (PID $(lsof -nP -tiTCP:7373 -sTCP:LISTEN | head -1))"
-    else
-        echo "[deploy] ERROR: local agentd failed to start"
-        tail -5 /tmp/agentd-local.log
+    echo "[deploy] Verifying local agentd build output..."
+    if [[ ! -f "$LOCAL_BIN" ]]; then
+        echo "[deploy] ERROR: local agentd binary not found at $LOCAL_BIN"
         return 1
     fi
-    tail -3 /tmp/agentd-local.log
+    echo "[deploy] Local runtime artifacts ready"
 }
 
 deploy_remote() {
     echo "[deploy] Deploying to $REMOTE_HOST (as user, NOT sudo)..."
+
+    # Sync token from agentgw config to remote agentd so auth stays consistent
+    local token
+    token="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('token',''))" ~/.agentgw/config.json 2>/dev/null || true)"
+    if [[ -n "$token" ]]; then
+        echo "[deploy] Syncing token to remote agentd config..."
+        ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/.agentd && python3 -c \"
+import json, os
+path = os.path.expanduser('~/.agentd/config.json')
+cfg = {'port': 7373, 'data_dir': os.path.expanduser('~/.agentd/data')}
+if os.path.exists(path):
+    with open(path) as f:
+        cfg = json.load(f)
+cfg['token'] = '$token'
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+\"" || true
+    fi
+
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/bin" || return 1
     scp -o ConnectTimeout=5 "$LINUX_BIN" "$REMOTE_HOST:~/bin/agentd-new" || return 1
 
@@ -311,40 +316,23 @@ deploy_remote() {
 }
 
 deploy_all() {
-    local local_pid remote_pid local_ok=0 remote_ok=0
+    local local_pid remote_pid runtime_pid local_ok=0 remote_ok=0 runtime_ok=0
     deploy_local & local_pid=$!
     deploy_remote & remote_pid=$!
     wait "$local_pid" && local_ok=1 || true
     wait "$remote_pid" && remote_ok=1 || true
-    [[ $local_ok -eq 1 && $remote_ok -eq 1 ]]
+    if [[ $local_ok -eq 1 ]]; then
+        deploy_local_runtime & runtime_pid=$!
+        wait "$runtime_pid" && runtime_ok=1 || true
+    fi
+    [[ $local_ok -eq 1 && $remote_ok -eq 1 && $runtime_ok -eq 1 ]]
 }
 
 # ── Gateway management ────────────────────────────────────────────────
 
 restart_agentgw() {
-    build_agentgw_mac
-    build_web
-    echo "[deploy] Restarting agentgw (to reconnect tunnels to agentd)..."
-    pkill -f "agentgw start" 2>/dev/null || true
-    sleep 1
-    local -a env_args=()
-    local runtime_env="$HOME/.agentgw/runtime.env"
-    if [[ -f "$runtime_env" ]]; then
-        env_args+=(env)
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            env_args+=("$line")
-        done < "$runtime_env"
-    fi
-    nohup "${env_args[@]}" "$GW_BIN" start --qr > /tmp/agentgw.log 2>&1 &
-    sleep 2
-    if pgrep -f "agentgw start" > /dev/null; then
-        echo "[deploy] agentgw started (PID $(pgrep -f "agentgw start"))"
-    else
-        echo "[deploy] ERROR: agentgw failed to start"
-        tail -5 /tmp/agentgw.log
-        return 1
-    fi
+    echo "[deploy] Refreshing local gateway runtime via install.sh restart..."
+    bash "$INSTALL_SCRIPT" restart
 }
 
 # ── Help ──────────────────────────────────────────────────────────────
@@ -361,6 +349,7 @@ Go binaries are rebuilt only when the source-content hash changes.
 TARGETS:
   all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
   build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
+  server           Build all Go binaries, deploy local + remote, restart agentgw (no mobile)
   local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
   ws               Build Linux agentd, deploy to remote \$REMOTE_HOST, restart agentgw
   apk              Build APK only and auto-install to connected Android devices
@@ -450,6 +439,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         devices)
             detect_devices
             ;;
+        server|bin)
+            build_go_all
+            deploy_all
+            restart_agentgw
+            ;;
         local)
             build_agentd_mac
             build_agentgw_mac
@@ -466,10 +460,44 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             restart_agentgw
             ;;
         all)
-            build_all
-            deploy_all
+            # Start all builds in parallel. Go binaries + web static are needed
+            # for deployment; mobile builds (APK/IPA) can finish in background.
+            build_agentd_mac & mac_pid=$!
+            build_agentd_linux & linux_pid=$!
+            build_agentgw_mac & gw_mac_pid=$!
+            build_agentgw_linux & gw_linux_pid=$!
+            build_web & web_pid=$!
+            build_apk & apk_pid=$!
+            build_ipa & ipa_pid=$!
+
+            local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 web_ok=0
+            wait "$mac_pid" && mac_ok=1 || true
+            wait "$linux_pid" && linux_ok=1 || true
+            wait "$gw_mac_pid" && gw_mac_ok=1 || true
+            wait "$gw_linux_pid" && gw_linux_ok=1 || true
+            wait "$web_pid" && web_ok=1 || true
+
+            if [[ $mac_ok -eq 0 || $linux_ok -eq 0 || $gw_mac_ok -eq 0 || $gw_linux_ok -eq 0 ]]; then
+                echo "[deploy] ERROR: Go binary build failed"
+                wait "$apk_pid" "$ipa_pid" 2>/dev/null || true
+                exit 1
+            fi
+
+            # Start deployment immediately — mobile app builds continue in background
+            deploy_all & deploy_pid=$!
+
+            local apk_ok=0 ipa_ok=0
+            wait "$apk_pid" && apk_ok=1 || true
+            wait "$ipa_pid" && ipa_ok=1 || true
+            echo "[deploy] Mobile build results: apk=$apk_ok ipa=$ipa_ok"
+
+            wait "$deploy_pid" || { echo "[deploy] ERROR: deployment failed"; exit 1; }
+
             restart_agentgw
-            deploy_mobile
+
+            if [[ $apk_ok -eq 1 || $ipa_ok -eq 1 ]]; then
+                deploy_mobile
+            fi
             ;;
         *)
             echo "Unknown target: $TARGET"

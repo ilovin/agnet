@@ -39,8 +39,8 @@ func PlanStepsWithToken(remoteDir string, binaryData []byte, token string) []Ste
 		{Kind: "mkdir", Path: remoteDir, Command: "mkdir -p " + quotedRemoteDir},
 	}
 	if token != "" {
-		configPath := filepath.Join(remoteDir, "config.yaml")
-		configContent := fmt.Sprintf("port: 7373\ntoken: %s\n", shellQuote(token))
+		configPath := filepath.Join(remoteDir, "config.json")
+		configContent := fmt.Sprintf("{\"port\": 7373, \"token\": %q}\n", token)
 		steps = append(steps, Step{Kind: "upload", Path: configPath, Data: []byte(configContent)})
 	}
 	steps = append(steps, []Step{

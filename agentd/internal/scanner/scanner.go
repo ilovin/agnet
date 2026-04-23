@@ -138,7 +138,7 @@ func (p *ProcessInfo) FindSessionFile() string {
 		return p.SessionFile
 	}
 	if p.Provider == "claude" {
-		_, sessionFile := findClaudeSessionInfo(p.PID, p.WorkDir)
+		_, sessionFile := findClaudeSessionInfo(p.PID, p.WorkDir, p.TmuxTarget)
 		return sessionFile
 	}
 	if p.Provider == "opencode" {
@@ -160,7 +160,7 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 		if proc.Provider == "claude" {
 			// Try to find session info, but don't skip if not found
 			// Process may still be attachable even without session file
-			sessionID, sessionFile := findClaudeSessionInfo(proc.PID, proc.WorkDir)
+			sessionID, sessionFile := findClaudeSessionInfo(proc.PID, proc.WorkDir, proc.TmuxTarget)
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		} else if proc.Provider == "opencode" {
@@ -209,7 +209,7 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 	return false
 }
 
-func findClaudeSessionInfo(pid int, workDir string) (string, string) {
+func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ""
@@ -222,36 +222,97 @@ func findClaudeSessionInfo(pid int, workDir string) (string, string) {
 	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
 	tasksDir := filepath.Join(home, ".claude", "tasks")
 
-	if sessionFile := findClaudeSessionFromTasks(pid, projectDir, tasksDir); sessionFile != "" {
-		sessionID := strings.TrimSuffix(filepath.Base(sessionFile), ".jsonl")
-		return sessionID, sessionFile
-	}
+	// Step 1: Task fd discovery
+	taskSessions := findClaudeSessionsFromTasks(pid, projectDir, tasksDir)
 
-	// When running as root, also scan /home/* for other users' Claude task dirs.
-	if _, err := os.Stat("/home"); err == nil {
-		entries, err := os.ReadDir("/home")
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				userHome := filepath.Join("/home", entry.Name())
-				projectDir = filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
-				tasksDir = filepath.Join(userHome, ".claude", "tasks")
-				if sessionFile := findClaudeSessionFromTasks(pid, projectDir, tasksDir); sessionFile != "" {
-					sessionID := strings.TrimSuffix(filepath.Base(sessionFile), ".jsonl")
-					return sessionID, sessionFile
+	// When running as root, also scan /home/* for other users' Claude task dirs
+	if len(taskSessions) == 0 {
+		if _, err := os.Stat("/home"); err == nil {
+			entries, err := os.ReadDir("/home")
+			if err == nil {
+				for _, entry := range entries {
+					if !entry.IsDir() {
+						continue
+					}
+					userHome := filepath.Join("/home", entry.Name())
+					projectDir = filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
+					tasksDir = filepath.Join(userHome, ".claude", "tasks")
+					taskSessions = findClaudeSessionsFromTasks(pid, projectDir, tasksDir)
+					if len(taskSessions) > 0 {
+						break
+					}
 				}
 			}
 		}
 	}
 
+	// If task fd found unique session, use it
+	if len(taskSessions) == 1 {
+		return taskSessions[0], filepath.Join(projectDir, taskSessions[0]+".jsonl")
+	}
+
+	// Step 2: Build candidate list.
+	// Always include the top N most-recently-modified .jsonl files from the project dir,
+	// because the current session may not have a task dir yet (e.g. no tasks spawned).
+	// Task fd sessions are merged in to ensure they're considered too.
+	candidates := listSessionCandidates(projectDir)
+	if len(taskSessions) > 0 {
+		taskSet := make(map[string]bool, len(taskSessions))
+		for _, sid := range taskSessions {
+			taskSet[sid] = true
+		}
+		// Mark task-fd candidates so they're not lost after truncation
+		for i := range candidates {
+			if taskSet[candidates[i].SessionID] {
+				delete(taskSet, candidates[i].SessionID)
+			}
+		}
+		// Add any task-fd sessions whose .jsonl wasn't in the dir listing
+		for sid := range taskSet {
+			jsonlPath := filepath.Join(projectDir, sid+".jsonl")
+			if _, err := os.Stat(jsonlPath); err == nil {
+				candidates = append(candidates, SessionCandidate{
+					SessionID:    sid,
+					JSONLPath:    jsonlPath,
+					LastActivity: getLastActivityTime(jsonlPath),
+				})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", ""
+	}
+
+	if len(candidates) == 1 {
+		return candidates[0].SessionID, candidates[0].JSONLPath
+	}
+
+	// Step 3: Time-based filtering (optional, only if pane activity available)
+	paneActivity := getPaneLastActivity(tmuxTarget)
+	candidates = filterByPaneActivity(candidates, paneActivity, 5*time.Minute)
+
+	if len(candidates) == 1 {
+		return candidates[0].SessionID, candidates[0].JSONLPath
+	}
+
+	// Step 4: Content matching
+	if matched := contentMatchSession(tmuxTarget, candidates, 5); matched != nil {
+		return matched.SessionID, matched.JSONLPath
+	}
+
+	// Fallback: most active candidate
+	if len(candidates) > 0 {
+		return candidates[0].SessionID, candidates[0].JSONLPath
+	}
+
 	return "", ""
 }
 
-func findClaudeSessionFromTasks(pid int, projectDir, tasksDir string) string {
+// findClaudeSessionsFromTasks returns all session IDs found via task fd discovery.
+func findClaudeSessionsFromTasks(pid int, projectDir, tasksDir string) []string {
 	if pid <= 0 || projectDir == "" || tasksDir == "" {
-		return ""
+		return nil
 	}
 	sessionIDs := make(map[string]struct{})
 
@@ -266,23 +327,27 @@ func findClaudeSessionFromTasks(pid int, projectDir, tasksDir string) string {
 				sessionIDs[sessionID] = struct{}{}
 			}
 		}
-		return bestClaudeTaskSession(projectDir, tasksDir, sessionIDs)
+	} else {
+		// macOS: use lsof
+		cmd := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn")
+		output, err := cmd.Output()
+		if err == nil {
+			for _, line := range strings.Split(string(output), "\n") {
+				if len(line) < 2 || line[0] != 'n' {
+					continue
+				}
+				if sessionID := claudeTaskSessionID(tasksDir, line[1:]); sessionID != "" {
+					sessionIDs[sessionID] = struct{}{}
+				}
+			}
+		}
 	}
 
-	cmd := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
+	var result []string
+	for sid := range sessionIDs {
+		result = append(result, sid)
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if len(line) < 2 || line[0] != 'n' {
-			continue
-		}
-		if sessionID := claudeTaskSessionID(tasksDir, line[1:]); sessionID != "" {
-			sessionIDs[sessionID] = struct{}{}
-		}
-	}
-	return bestClaudeTaskSession(projectDir, tasksDir, sessionIDs)
+	return result
 }
 
 func claudeTaskSessionID(tasksDir, path string) string {
@@ -308,26 +373,6 @@ func normalizeClaudeTaskPath(path string) string {
 		return strings.TrimPrefix(path, "/private")
 	}
 	return path
-}
-
-func bestClaudeTaskSession(projectDir, tasksDir string, sessionIDs map[string]struct{}) string {
-	var best string
-	var bestTaskTime time.Time
-	var bestSessionTime time.Time
-	for sessionID := range sessionIDs {
-		candidate := filepath.Join(projectDir, sessionID+".jsonl")
-		sessionInfo, err := os.Stat(candidate)
-		if err != nil {
-			continue
-		}
-		taskTime := latestClaudeTaskActivity(filepath.Join(tasksDir, sessionID))
-		if best == "" || taskTime.After(bestTaskTime) || (taskTime.Equal(bestTaskTime) && sessionInfo.ModTime().After(bestSessionTime)) {
-			best = candidate
-			bestTaskTime = taskTime
-			bestSessionTime = sessionInfo.ModTime()
-		}
-	}
-	return best
 }
 
 func latestClaudeTaskActivity(taskDir string) time.Time {

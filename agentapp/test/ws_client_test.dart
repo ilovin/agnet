@@ -188,16 +188,12 @@ void main() {
       final client = WsClient(
         url: 'ws://example.com/ws',
         token: 'secret-token',
-        channelConnector: (uri) {
+        channelConnector: (uri, {headers}) async {
           expect(uri.queryParameters['token'], equals('secret-token'));
           connectCount++;
           if (connectCount == 1) return firstChannel;
           if (connectCount == 2) {
-            return FakeWebSocketChannel(
-              ready: Future<void>.microtask(
-                () => throw StateError('handshake failed'),
-              ),
-            );
+            throw StateError('handshake failed');
           }
           return thirdChannel;
         },
@@ -249,7 +245,7 @@ void main() {
       final client = WsClient(
         url: 'ws://example.com/ws',
         token: 'secret-token',
-        channelConnector: (_) {
+        channelConnector: (_, {headers}) async {
           connectCount++;
           return firstChannel;
         },

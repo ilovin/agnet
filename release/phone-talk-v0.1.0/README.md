@@ -4,11 +4,9 @@
 
 ## 快速安装
 
-```bash
-tar xzf phone-talk-v0.1.0.tar.gz
-cd phone-talk-v0.1.0
-./install.sh
-```
+    tar xzf phone-talk-v0.1.0.tar.gz
+    cd phone-talk-v0.1.0
+    ./install.sh
 
 安装脚本会自动：
 - 扫描 SSH 配置发现远程节点
@@ -24,7 +22,17 @@ cd phone-talk-v0.1.0
 
 ## 日常管理
 
+    # 重启本地服务（安装后常用）
+    bash ./install.sh restart
 
+    # 查看运行状态
+    bash ./install.sh status
+
+    # 停止本地服务
+    bash ./install.sh stop
+
+    # 查看帮助
+    bash ./install.sh --help
 
 ## 手动添加连接
 
@@ -33,17 +41,14 @@ Token: 安装时生成的 Token
 
 ## 文件说明
 
-```
-bin/agentd-linux        # 远程服务器 Agent 守护进程
-bin/agentgw-macos-arm64 # macOS 网关
-bin/agentgw-linux       # Linux 网关
-bin/agentapp.apk        # Android App
-install.sh              # 一键安装脚本
-scripts/                # 部署与辅助脚本（可被管理 UI 调用）
-```
+    bin/agentd              # macOS 本地 Agent 守护进程
+    bin/agentd-linux        # 远程服务器 Agent 守护进程 (Linux)
+    bin/agentgw-macos-arm64 # macOS 网关
+    bin/agentgw-linux       # Linux 网关
+    bin/agentapp.apk        # Android App
+    install.sh              # 一键安装脚本
+    scripts/                # 部署与辅助脚本（可被管理 UI 调用）
 
 ## 架构
 
-```
-手机 App ──WebSocket──► agentgw ──SSH tunnel──► agentd ──PTY──► Claude/OpenCode
-```
+    手机 App ──WebSocket──► agentgw ──SSH tunnel──► agentd ──PTY──► Claude/OpenCode

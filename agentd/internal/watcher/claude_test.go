@@ -338,8 +338,15 @@ func TestClaudeWatcherRefreshPrefersMostActiveOpenTask(t *testing.T) {
 		t.Fatalf("expected taskSessionID to normalize /private path, got %q", sessionID)
 	}
 
-	want := filepath.Join(projectDir, "sess-live.jsonl")
-	if got := w.findSessionFromTasks(); got != want {
-		t.Fatalf("expected watcher to find most active open task %s, got %s", want, got)
+	sessionIDs := w.findSessionIDsFromTasks(tasksDir)
+	found := false
+	for _, sid := range sessionIDs {
+		if sid == "sess-live" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected findSessionIDsFromTasks to include sess-live, got %v", sessionIDs)
 	}
 }

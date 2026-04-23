@@ -81,7 +81,7 @@ func TestFindClaudeSessionInfoPrefersMostActiveOpenTask(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir)
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
 	if gotSessionID != "sess-live" {
 		t.Fatalf("expected session id sess-live, got %q", gotSessionID)
 	}

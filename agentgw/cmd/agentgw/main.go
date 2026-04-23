@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -127,8 +129,16 @@ func main() {
 			log.Fatalf("logout failed: %v", err)
 		}
 		fmt.Println("Unregistered successfully.")
+	case "status":
+		showStatus()
 	case "version":
 		fmt.Println("agentgw v0.1.0")
+	case "rotate-token":
+		var token string
+		if len(args) > 1 {
+			token = args[1]
+		}
+		rotateToken(token)
 	case "help", "--help", "-h":
 		showHelp()
 	default:
@@ -138,15 +148,20 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Print(`Usage: agentgw <start|login|logout|qr|version|help>
+	fmt.Print(`Usage: agentgw <start|login|logout|qr|status|version|rotate-token|help>
 
 Commands:
-  start    Start the gateway server
-  login    Register with tunnelhub and save credentials locally
-  logout   Unregister from tunnelhub and delete local credentials
-  qr       Print connection QR code to terminal now
-  version  Show version
-  help     Show this help message
+  start         Start the gateway server
+  login         Register with tunnelhub and save credentials locally
+  logout        Unregister from tunnelhub and delete local credentials
+  qr            Print connection QR code to terminal now
+  status        Show gateway status (node list, connections, uptime)
+  rotate-token  Generate a new token and sync it to all agentd configs
+                Usage: agentgw rotate-token [EXISTING_TOKEN]
+                If EXISTING_TOKEN is provided, use it instead of generating a new one.
+                Useful when tunnelhub provides a token after registration.
+  version       Show version
+  help          Show this help message
 
 Start flags:
   --hub string           Tunnelhub base URL, auto-constructs tunnel-url from saved credentials (env AGENTGW_HUB)
@@ -179,10 +194,114 @@ Environment:
 `)
 }
 
-// staticHandler wraps a http.FileServer and serves static files without auth.
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+func updateAgentdToken(path, token string) error {
+	script := fmt.Sprintf(`import json,os;path='%s';cfg={'port':7373,'data_dir':os.path.expanduser('~/.agentd/data')};os.path.exists(path) and [cfg.update(json.load(open(path)))];cfg['token']='%s';json.dump(cfg,open(path,'w'),indent=2);open(path,'a').write('\n')`, path, token)
+	cmd := exec.Command("python3", "-c", script)
+	return cmd.Run()
+}
+
+func sshUpdateAgentdToken(host string, port int, keyPath, token string) error {
+	script := fmt.Sprintf(`python3 -c "import json,os;path=os.path.expanduser('~/.agentd/config.json');cfg={'port':7373,'data_dir':os.path.expanduser('~/.agentd/data')};os.path.exists(path) and [cfg.update(json.load(open(path)))];cfg['token']='%s';json.dump(cfg,open(path,'w'),indent=2);open(path,'a').write('\n')"`, token)
+	args := []string{"-o", "ConnectTimeout=5", "-p", strconv.Itoa(port)}
+	if keyPath != "" {
+		args = append(args, "-i", keyPath)
+	}
+	args = append(args, host, script)
+	cmd := exec.Command("ssh", args...)
+	return cmd.Run()
+}
+
+func rotateToken(existingToken string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("get home dir: %v", err)
+	}
+
+	cfgPath := home + "/.agentgw/config.json"
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	newToken := existingToken
+	if newToken == "" {
+		newToken = generateToken()
+		fmt.Printf("Generated new token: %s\n", newToken)
+	} else {
+		fmt.Printf("Using provided token: %s\n", newToken)
+	}
+
+	// Update config
+	cfg.Token = newToken
+	for i := range cfg.Nodes {
+		cfg.Nodes[i].Token = newToken
+	}
+
+	// Save config
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		log.Fatalf("marshal config: %v", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
+		log.Fatalf("write config: %v", err)
+	}
+
+	fmt.Println("Updated agentgw config")
+
+	// Update local agentd config
+	localAgentdConfig := home + "/.agentd/config.json"
+	if err := updateAgentdToken(localAgentdConfig, newToken); err != nil {
+		log.Printf("warn: failed to update local agentd token: %v", err)
+	} else {
+		fmt.Println("Updated local agentd config")
+	}
+
+	// Update remote agentd configs
+	for _, n := range cfg.Nodes {
+		if n.Host == "localhost" || n.Host == "127.0.0.1" {
+			continue
+		}
+		target := n.Host
+		if n.SSHAlias != "" {
+			target = n.SSHAlias
+		}
+		port := n.SSHPort
+		if port == 0 {
+			port = 22
+		}
+		if err := sshUpdateAgentdToken(target, port, n.SSHKeyPath, newToken); err != nil {
+			log.Printf("warn: failed to update remote agentd token for %s: %v", target, err)
+		} else {
+			fmt.Printf("Updated remote agentd config for %s\n", target)
+		}
+	}
+
+	fmt.Println("\nToken rotated. Restart services to apply:")
+	fmt.Println("  ./scripts/install.sh restart")
+}
+
+// staticHandler wraps a http.FileServer and serves static files.
 func staticHandler(root string) http.Handler {
 	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/" || path == "/index.html" {
+			indexPath := filepath.Join(root, "index.html")
+			if data, err := os.ReadFile(indexPath); err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Write(data)
+				return
+			}
+		}
 		fs.ServeHTTP(w, r)
 	})
 }
@@ -204,13 +323,18 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 		log.Fatalf("get home dir: %v", err)
 	}
 
-	cfgPath := home + "/.agentgw/config.yaml"
+	cfgPath := home + "/.agentgw/config.json"
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 
-	store := nodecfg.New(cfg.NodesFile)
+	// Use config.json as the unified nodes store when nodes_file is not explicitly set.
+	nodesFile := cfg.NodesFile
+	if nodesFile == "" {
+		nodesFile = cfgPath
+	}
+	store := nodecfg.New(nodesFile)
 
 	// Load agentd binary for remote deploy
 	var agentdBin []byte
@@ -228,7 +352,10 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	if err != nil {
 		log.Printf("warn: could not load nodes: %v", err)
 	}
-	mgr.LoadAll(entries)
+
+	// Merge static nodes from config.json with persisted nodes, deduplicating by host/alias.
+	allEntries := dedupNodeEntries(append(entries, cfg.Nodes...))
+	mgr.LoadAll(allEntries)
 
 	srv := ws.New(mgr, cfg.Token)
 
@@ -249,6 +376,7 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	})
 
 	mgr.ConnectAll()
+	mgr.StartHealthCheck()
 
 	// Start reverse tunnel client if configured.
 	// Tunnel token is embedded into the URL query so that URL + token
@@ -258,34 +386,56 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 		tunnelURL = os.Getenv("AGENTGW_TUNNEL_URL")
 	}
 
-	// Auto-load credentials from local_auth.json for --hub mode
+	// Resolve tunnel credentials: prefer local_auth.json, then oauth.json, then config.json tunnel section.
 	var localAuth *oauth.LocalAuth
 	if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil {
 		localAuth = la
 	}
 
-	// Resolve tunnel token
+	// Resolve tunnel token from any available source.
 	tunnelToken := ""
 	if localAuth != nil && localAuth.Token != "" {
 		tunnelToken = localAuth.Token
 	} else if lr, err := oauth.LoadLoginResult(oauth.TokenFilePath()); err == nil && lr.AccessToken != "" {
 		tunnelToken = lr.AccessToken
+	} else {
+		// Fallback to config.json tunnel section
+		tunnelToken, _ = readTunnelAuthFromConfig(cfgPath)
 	}
 
-	// Auto-construct tunnel URL from --hub + userId if --tunnel-url not given
+	// Resolve tunnel userId from any available source.
+	tunnelUserID := ""
+	if localAuth != nil && localAuth.UserID != "" {
+		tunnelUserID = localAuth.UserID
+	} else {
+		_, tunnelUserID = readTunnelAuthFromConfig(cfgPath)
+	}
+
+	// Auto-construct tunnel URL from --hub if --tunnel-url not given.
+	// We only need a hub base and a valid token; local_auth.json is not required.
 	hubBase := hubBaseFlag
 	if hubBase == "" {
 		hubBase = os.Getenv("AGENTGW_HUB")
 	}
-	if tunnelURL == "" && hubBase != "" && localAuth != nil {
+	if tunnelURL == "" && hubBase != "" && tunnelToken != "" {
 		tunnelURL = strings.TrimRight(hubBase, "/")
 		log.Printf("[agentgw] constructed tunnel URL: %s", tunnelURL)
 	}
 
-	// Auto-construct app URL from hub base if not given
+	// Also allow hub_url from config to trigger tunnel when no --hub flag is given.
+	if tunnelURL == "" && cfg.Tunnel.HubURL != "" && tunnelToken != "" {
+		tunnelURL = strings.TrimRight(cfg.Tunnel.HubURL, "/")
+		log.Printf("[agentgw] constructed tunnel URL from config: %s", tunnelURL)
+	}
+
+	// Auto-construct app URL from hub base if not given.
 	if appURLFlag == "" && hubBase != "" {
 		appURLFlag = strings.TrimRight(hubBase, "/")
 		log.Printf("[agentgw] constructed app URL: %s", appURLFlag)
+	}
+	if appURLFlag == "" && cfg.Tunnel.AppURL != "" {
+		appURLFlag = strings.TrimRight(cfg.Tunnel.AppURL, "/")
+		log.Printf("[agentgw] constructed app URL from config: %s", appURLFlag)
 	}
 
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
@@ -323,6 +473,38 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	// Status endpoint for gw status command.
+	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if !checkToken(r, cfg.Token) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		nodes := mgr.List()
+		nodeStats := make([]map[string]any, 0, len(nodes))
+		statusCounts := map[string]int{"disconnected": 0, "connecting": 0, "connected": 0, "deploying": 0, "error": 0}
+		for _, n := range nodes {
+			statusCounts[string(n.GetStatus())]++
+			nodeStats = append(nodeStats, map[string]any{
+				"id":       n.ID,
+				"name":     n.Name,
+				"host":     n.Host,
+				"location": n.DisplayLocation(),
+				"status":   string(n.GetStatus()),
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"version":       "v0.1.0",
+			"uptimeSeconds": int(srv.Uptime().Seconds()),
+			"port":          cfg.Port,
+			"clientCount":   srv.ClientCount(),
+			"nodeCount":     len(nodes),
+			"statusCounts":  statusCounts,
+			"nodes":         nodeStats,
+			"tunnelUrl":     currentTunnelURL,
+		})
 	})
 
 	// Find static directory (check multiple locations)
@@ -390,10 +572,7 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	}
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
-	userID := ""
-	if localAuth != nil {
-		userID = localAuth.UserID
-	}
+	userID := tunnelUserID
 	if showQR {
 		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag, userID)
 	}
@@ -466,6 +645,28 @@ func restartWithListener(ln net.Listener) error {
 	// Existing connections remain alive because they have their own FDs.
 	ln.Close()
 	return nil
+}
+
+func dedupNodeEntries(entries []nodecfg.NodeEntry) []nodecfg.NodeEntry {
+	seenHost := make(map[string]bool)
+	seenAlias := make(map[string]bool)
+	result := make([]nodecfg.NodeEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.Host != "" && seenHost[e.Host] {
+			continue
+		}
+		if e.SSHAlias != "" && seenAlias[e.SSHAlias] {
+			continue
+		}
+		if e.Host != "" {
+			seenHost[e.Host] = true
+		}
+		if e.SSHAlias != "" {
+			seenAlias[e.SSHAlias] = true
+		}
+		result = append(result, e)
+	}
+	return result
 }
 
 func agentdBinCandidates() []string {
@@ -574,7 +775,7 @@ func printQRFromConfig(tunnelURL, tunnelToken, appURL string) {
 	if err != nil {
 		log.Fatalf("get home dir: %v", err)
 	}
-	cfgPath := home + "/.agentgw/config.yaml"
+	cfgPath := home + "/.agentgw/config.json"
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
@@ -588,9 +789,11 @@ func printQRFromConfig(tunnelURL, tunnelToken, appURL string) {
 			tunnelToken = tok
 		}
 	}
-	userID := ""
-	if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil {
-		userID = la.UserID
+	_, userID := readTunnelAuthFromConfig(cfgPath)
+	if userID == "" {
+		if la, err := oauth.LoadLocalAuth(oauth.LocalAuthFilePath()); err == nil {
+			userID = la.UserID
+		}
 	}
 	printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURL, userID)
 }
@@ -642,3 +845,97 @@ func getLocalIP() string {
 	}
 	return ""
 }
+
+func showStatus() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("get home dir: %v", err)
+	}
+	cfgPath := home + "/.agentgw/config.json"
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	url := fmt.Sprintf("http://localhost:%d/status", cfg.Port)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Fatalf("build request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentgw is not running (could not connect to port %d)\n", cfg.Port)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		fmt.Fprintln(os.Stderr, "unauthorized: token mismatch")
+		os.Exit(1)
+	}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "agentgw returned status %d\n", resp.StatusCode)
+		os.Exit(1)
+	}
+
+	var body struct {
+		Version      string `json:"version"`
+		UptimeSeconds int    `json:"uptimeSeconds"`
+		Port         int    `json:"port"`
+		ClientCount  int    `json:"clientCount"`
+		NodeCount    int    `json:"nodeCount"`
+		StatusCounts map[string]int `json:"statusCounts"`
+		Nodes        []struct {
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			Host     string `json:"host"`
+			Location string `json:"location"`
+			Status   string `json:"status"`
+		} `json:"nodes"`
+		TunnelURL string `json:"tunnelUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		log.Fatalf("decode response: %v", err)
+	}
+
+	fmt.Printf("agentgw %s (port %d)\n", body.Version, body.Port)
+	fmt.Printf("uptime:   %s\n", formatDuration(time.Duration(body.UptimeSeconds)*time.Second))
+	fmt.Printf("clients:  %d\n", body.ClientCount)
+	fmt.Printf("nodes:    %d total", body.NodeCount)
+	if body.NodeCount > 0 {
+		parts := []string{}
+		for _, s := range []string{"connected", "connecting", "disconnected", "error", "deploying"} {
+			if c := body.StatusCounts[s]; c > 0 {
+				parts = append(parts, fmt.Sprintf("%s=%d", s, c))
+			}
+		}
+		fmt.Printf(" (%s)\n", strings.Join(parts, ", "))
+	} else {
+		fmt.Println()
+	}
+	if body.TunnelURL != "" {
+		fmt.Printf("tunnel:   %s\n", body.TunnelURL)
+	}
+	if len(body.Nodes) > 0 {
+		fmt.Println()
+		fmt.Println("Nodes:")
+		for _, n := range body.Nodes {
+			fmt.Printf("  %-12s %-20s %-15s %s\n", n.ID[:8]+"...", n.Name, n.Location, n.Status)
+		}
+	}
+}
+
+func formatDuration(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+

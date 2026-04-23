@@ -998,7 +998,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             subtitle: Text(
-              '${widget.node.location.displayLocation}  ·  $_statusLabel',
+              '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
             ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1926,7 +1926,36 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
-  String get _subtitleLabel => _agentSubtitleText(widget.agent);
+  Widget _buildSubtitle(BuildContext context) {
+    final agent = widget.agent;
+    final prefixParts = <String>[
+      if ((agent.pid ?? 0) > 0) '${agent.pid}',
+      if ((agent.sessionId ?? '').trim().isNotEmpty) shortSessionId(agent.sessionId),
+    ];
+    final prefix = prefixParts.join('.');
+    final statusText = _statusLabel + (agent.status == AgentStatus.crashed ? '.异常' : '');
+    return Text.rich(
+      TextSpan(
+        style: const TextStyle(fontSize: 12),
+        children: [
+          if (prefix.isNotEmpty)
+            TextSpan(
+              text: '$prefix.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          TextSpan(
+            text: statusText,
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              color: _statusColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Future<void> _showAgentActions() async {
     final tileContext = _tileKey.currentContext;
@@ -2135,14 +2164,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            _subtitleLabel,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: _statusColor,
-            ),
-          ),
+          _buildSubtitle(context),
           if (previewLines.isNotEmpty) ...[
             const SizedBox(height: 4),
             ...previewLines.map(

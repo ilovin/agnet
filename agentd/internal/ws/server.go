@@ -197,6 +197,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.loop()
 }
 
+// ClientCount returns the number of currently connected WebSocket clients.
+func (s *Server) ClientCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.clients)
+}
+
 // broadcast sends an event to all connected clients except the excluded one.
 // Pass nil for exclude to send to all clients.
 func (s *Server) broadcast(ev RPCEvent, exclude *websocket.Conn) {
