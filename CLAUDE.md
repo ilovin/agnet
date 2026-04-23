@@ -73,6 +73,29 @@ flutter analyze                  # lint/static analysis
 - **agentgw NodeManager.LoadAll()** loads persisted nodes in batch at startup (avoids N redundant file writes)
 - **agentgw event forwarding**: agentd push events get `nodeId` injected before broadcast to App clients
 
+## Session Discovery Pipeline
+
+PID-to-session mapping uses a multi-stage pipeline (scanner + watcher share the same logic):
+
+1. **Task fd discovery** — check which `~/.claude/tasks/<sessionID>` dirs the PID has open (via `/proc` or `lsof`). If exactly one, use it directly.
+2. **Candidate list** — always list ALL `.jsonl` files from the project dir, then merge in any task fd sessions not already present. Never use task fd as the exclusive candidate set — the current session may have no task dir yet.
+3. **Time-based filtering** — if tmux pane activity is available, filter candidates by time proximity. Otherwise sort by lastActivity descending.
+4. **Content matching** — capture tmux pane text, extract fingerprints from JSONL files, pick the best match by substring hit count.
+5. **Fallback** — most recently active candidate wins.
+
+Key invariant: the PID mapping file (`sessions/<pid>.json`) is NOT authoritative — it goes stale after `/clear` or `--resume`. Never trust it as the sole source.
+
+## Build & Deploy
+
+Always use the repo scripts for building and deploying — never run manual `go build` + `scp` sequences:
+
+```bash
+scripts/build.sh              # build all components
+scripts/deploy.sh local       # deploy locally (restart agentd + agentgw)
+scripts/deploy.sh <node>      # deploy to remote node via SSH
+scripts/install.sh            # full install (first-time setup)
+```
+
 ## Conventions
 
 - Commit messages: `feat(component):`, `fix(component):`, `chore:` prefix style

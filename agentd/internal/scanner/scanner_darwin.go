@@ -4,6 +4,7 @@ package scanner
 
 import (
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -91,17 +92,20 @@ func (s *Scanner) parseDarwinProcess(line string, allProcs map[int]darwinProcInf
 	comm := fields[3]
 	args := fields[4:]
 
-	// Check if it's Claude or OpenCode
+	// Check if it's Claude or OpenCode.
+	// Only match the executable name (comm or args[0]), never match
+	// arbitrary arguments — paths like ~/.claude/shell-snapshots/... would
+	// otherwise cause false positives (e.g. zsh sub-processes).
 	var provider string
 	switch {
 	case strings.HasPrefix(comm, "claude"):
 		provider = "claude"
-	case strings.Contains(strings.Join(args, " "), "claude"):
+	case len(args) > 0 && strings.HasPrefix(filepath.Base(args[0]), "claude"):
 		provider = "claude"
 		comm = "claude"
 	case strings.HasPrefix(comm, "opencode"):
 		provider = "opencode"
-	case strings.Contains(strings.Join(args, " "), "opencode"):
+	case len(args) > 0 && strings.HasPrefix(filepath.Base(args[0]), "opencode"):
 		provider = "opencode"
 		comm = "opencode"
 	default:
