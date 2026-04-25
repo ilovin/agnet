@@ -78,7 +78,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
     });
 
-    testWidgets('tapping agent logo opens picker dialog', (tester) async {
+    testWidgets('long-pressing agent logo opens picker dialog', (tester) async {
       await pumpDashboardWithAgent(
         tester,
         nodeId: 'node1',
@@ -99,7 +99,7 @@ void main() {
       final logoInkWell = findLogoInkWell();
       expect(logoInkWell, findsOneWidget);
 
-      await tester.tap(logoInkWell);
+      await tester.longPress(logoInkWell);
       await tester.pumpAndSettle();
 
       // Dialog should appear with title
@@ -127,7 +127,7 @@ void main() {
       }
 
       final logoInkWell = findLogoInkWell();
-      await tester.tap(logoInkWell);
+      await tester.longPress(logoInkWell);
       await tester.pumpAndSettle();
 
       // The grid should contain icons
@@ -154,7 +154,7 @@ void main() {
       }
 
       final logoInkWell = findLogoInkWell();
-      await tester.tap(logoInkWell);
+      await tester.longPress(logoInkWell);
       await tester.pumpAndSettle();
 
       // Tap the second icon in the grid
@@ -190,7 +190,7 @@ void main() {
       }
 
       final logoInkWell = findLogoInkWell();
-      await tester.tap(logoInkWell);
+      await tester.longPress(logoInkWell);
       await tester.pumpAndSettle();
 
       // Tap reset button
@@ -221,7 +221,7 @@ void main() {
       }
 
       final logoInkWell = findLogoInkWell();
-      await tester.tap(logoInkWell);
+      await tester.longPress(logoInkWell);
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('取消'));

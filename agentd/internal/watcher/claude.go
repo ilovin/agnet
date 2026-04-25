@@ -179,10 +179,17 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		return
 	}
 
-	// Helper: check if current binding is still among candidates.
+	// Helper: check if current binding is still among candidates OR still exists on disk.
+	// The current file may live outside the project dir (e.g. an externally-provided
+	// session file from Attach). As long as it exists, don't switch away from it.
 	currentBound := func() bool {
 		for _, c := range candidates {
 			if c.jsonlPath == w.path {
+				return true
+			}
+		}
+		if w.path != "" {
+			if _, err := os.Stat(w.path); err == nil {
 				return true
 			}
 		}
