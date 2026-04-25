@@ -53,28 +53,32 @@
   </div>
 
   <script>
-    // Pre-load Noto Sans SC font for CanvasKit before Flutter initializes
-    // This ensures CanvasKit can render CJK characters without gstatic fallback
+    // Pre-load Noto Sans SC font for CanvasKit before Flutter initializes.
     window._flutterFontFamilies = window._flutterFontFamilies || {};
     fetch('assets/fonts/NotoSansSC-Regular.ttf')
       .then(r => r.arrayBuffer())
-      .then(buf => { window._flutterFontFamilies['NotoSansSC'] = buf; })
+      .then(buf => {
+        window._flutterFontFamilies['Noto Sans SC'] = buf;
+        window._flutterFontFamilies['NotoSansSC'] = buf;
+      })
       .catch(() => {});
 
-    // Hide loading when Flutter is ready
+    // Force local CanvasKit assets so restricted networks do not depend on gstatic.
+    window.flutterConfiguration = {
+      canvasKitBaseUrl: 'canvaskit/',
+    };
+
     window.addEventListener('flutter-first-frame', function() {
       const loading = document.getElementById('loading');
       if (loading) loading.style.display = 'none';
     });
 
-    // Fallback: hide after 15 seconds
     setTimeout(function() {
       const loading = document.getElementById('loading');
       if (loading) loading.style.display = 'none';
     }, 15000);
   </script>
 
-  <!-- Standard Flutter bootstrap: let flutter_bootstrap.js handle everything -->
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

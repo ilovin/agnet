@@ -7,13 +7,20 @@ import 'conversation_provider.dart';
 class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
   UnreadNotifier() : super(const {});
 
+  // Track seen msg_ids per conversation to avoid duplicate counting
+  // for streaming message_update events.
+  final Map<ConversationKey, Set<String>> _seenMsgIds = {};
+
   void handleEvent(WsMessage event) {
-    if (event.method != 'conversation.message') return;
+    if (event.method != 'conversation.message' &&
+        event.method != 'conversation.message_update') {
+      return;
+    }
     final params = event.params as Map<String, dynamic>?;
     if (params == null) return;
 
     final role = params['role'] as String?;
-    if (role != 'assistant') return;
+    if (role != null && role != 'assistant') return;
 
     // Skip tool calls and tool results
     final kind = params['kind'] as String?;
@@ -27,6 +34,17 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
     if (nodeId.isEmpty || agentId.isEmpty) return;
 
     final key = (nodeId, agentId);
+
+    // Deduplicate by msg_id for message_update events
+    if (event.method == 'conversation.message_update') {
+      final msgId = params['msg_id'] as String?;
+      if (msgId != null) {
+        final seen = _seenMsgIds.putIfAbsent(key, () => <String>{});
+        if (seen.contains(msgId)) return;
+        seen.add(msgId);
+      }
+    }
+
     state = {...state, key: (state[key] ?? 0) + 1};
   }
 
@@ -38,7 +56,10 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
     state = next;
   }
 
-  void clear() => state = const {};
+  void clear() {
+    state = const {};
+    _seenMsgIds.clear();
+  }
 }
 
 final unreadProvider =

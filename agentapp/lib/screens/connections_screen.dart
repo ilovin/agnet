@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -120,11 +121,28 @@ String? friendlyConnectProbeMessage(ConnectionProbeResult? result) {
   }
 
   final body = result.body?.toLowerCase() ?? '';
-  if (result.statusCode == 502 && body.contains('agentgw offline')) {
+  final bodyJson = parseProbeBodyJson(result.body);
+  final code = bodyJson?['code']?.toString().toUpperCase();
+  final detail = bodyJson?['detail']?.toString();
+
+  if (result.statusCode == 502 && (code == 'GW_OFFLINE' || body.contains('agentgw offline'))) {
+    if (detail != null && detail.isNotEmpty) {
+      return '连接失败：服务器可达，但 agentgw offline（$detail）。请检查网关进程或隧道是否已连接。';
+    }
     return '连接失败：服务器可达，但 agentgw offline。请检查网关进程或隧道是否已连接。';
   }
 
   return '连接失败：服务器可达，但 WebSocket 握手失败（HTTP ${result.statusCode}）。请检查 URL 路径、代理升级配置或 token。';
+}
+
+Map<String, dynamic>? parseProbeBodyJson(String? body) {
+  if (body == null || body.trim().isEmpty) return null;
+  try {
+    final decoded = jsonDecode(body);
+    if (decoded is Map<String, dynamic>) return decoded;
+    if (decoded is Map) return decoded.cast<String, dynamic>();
+  } catch (_) {}
+  return null;
 }
 
 /// Pick the best saved config to auto-reconnect.

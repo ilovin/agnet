@@ -11,6 +11,7 @@ import 'package:agentapp/models/connection_config.dart';
 import 'package:agentapp/models/message_model.dart';
 import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/providers/conversation_provider.dart';
+import 'package:agentapp/providers/health_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
@@ -22,6 +23,8 @@ Future<void> pumpNodeCard(
   NodeModel node, {
   List<Map<String, dynamic>> agents = const [],
   bool showSessionPreview = false,
+  bool isLargeScreen = false,
+  bool showDetails = false,
 }) async {
   final container = ProviderContainer();
   container.read(nodesProvider.notifier).loadNodes([
@@ -64,12 +67,80 @@ Future<void> pumpNodeCard(
       container: container,
       child: MaterialApp(
         home: Scaffold(
-          body: NodeCard(node: node, showSessionPreview: showSessionPreview),
+          body: NodeCard(
+            node: node,
+            showSessionPreview: showSessionPreview,
+            isLargeScreen: isLargeScreen,
+            showDetails: showDetails,
+          ),
         ),
       ),
     ),
   );
   await tester.pump();
+}
+
+Future<void> pumpAgentRow(
+  WidgetTester tester,
+  AgentModel agent,
+  String nodeId, {
+  bool showPreview = false,
+  bool isLargeScreen = false,
+  bool showDetails = false,
+}) async {
+  final container = ProviderContainer();
+  addTearDown(container.dispose);
+
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp(
+        home: Scaffold(
+          body: AgentRow(
+            agent: agent,
+            nodeId: nodeId,
+            showPreview: showPreview,
+            isLargeScreen: isLargeScreen,
+            showDetails: showDetails,
+          ),
+        ),
+      ),
+    ),
+  );
+  await tester.pump();
+}
+
+Future<void> pumpDashboardScreen(
+  WidgetTester tester, {
+  List<Map<String, dynamic>> nodes = const [],
+  List<Map<String, dynamic>> agents = const [],
+  Size screenSize = const Size(1440, 900),
+}) async {
+  tester.binding.window.physicalSizeTestValue = screenSize;
+  tester.binding.window.devicePixelRatioTestValue = 1.0;
+  addTearDown(tester.binding.window.clearPhysicalSizeTestValue);
+  addTearDown(tester.binding.window.clearDevicePixelRatioTestValue);
+
+  final container = ProviderContainer();
+  if (nodes.isNotEmpty) {
+    container.read(nodesProvider.notifier).loadNodes(nodes);
+  }
+  for (final agent in agents) {
+    final nodeId = agent['nodeId'] as String;
+    container.read(nodesProvider.notifier).loadAgents(nodeId, [agent]);
+  }
+  addTearDown(container.dispose);
+
+  await tester.pumpWidget(
+    UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: DashboardScreen()),
+    ),
+  );
+  await tester.pump();
+  // Allow Future.delayed in _startAutoRefresh to fire so its internal Timer
+  // is removed before the test framework checks for pending timers.
+  await tester.pump(const Duration(milliseconds: 150));
 }
 
 void main() {
@@ -93,6 +164,23 @@ void main() {
     );
 
     expect(message, equals('连接失败：服务器可达，但 agentgw offline。请检查网关进程或隧道是否已连接。'));
+  });
+
+  test('friendlyConnectError reports agentgw offline from probe json code/detail', () {
+    const cfg = ConnectionConfig(url: 'wss://ilovin.xyz/ws/fengming.xie', token: 't');
+    final message = friendlyConnectError(
+      const NativeWebSocketException('ws error', closeCode: 1006),
+      cfg,
+      probeResult: const ConnectionProbeResult.response(
+        502,
+        '{"error":"agentgw offline","code":"GW_OFFLINE","detail":"user/token verified, but agentgw tunnel is offline"}',
+      ),
+    );
+
+    expect(
+      message,
+      equals('连接失败：服务器可达，但 agentgw offline（user/token verified, but agentgw tunnel is offline）。请检查网关进程或隧道是否已连接。'),
+    );
   });
 
   test('friendlyConnectError reports server unreachable when probe fails', () {
@@ -728,5 +816,257 @@ void main() {
     expect(shouldShowTerminalControls('custom'), isTrue);
     expect(shouldShowRawToggle('opencode'), isTrue);
     expect(shouldShowRawToggle('custom'), isTrue);
+  });
+
+  // R-003: Compact dashboard header and status folding
+  testWidgets('NodeCard hides summary chips when showDetails is false on large screen', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.connected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+      agents: [
+        {
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+      isLargeScreen: true,
+      showDetails: false,
+    );
+
+    expect(find.text('会话 1'), findsNothing);
+    expect(find.text('活跃 1'), findsNothing);
+  });
+
+  testWidgets('NodeCard shows summary chips when showDetails is true on large screen', (
+    WidgetTester tester,
+  ) async {
+    await pumpNodeCard(
+      tester,
+      const NodeModel(
+        id: 'n1',
+        name: 'remote1',
+        host: '10.0.0.1',
+        status: NodeStatus.connected,
+        location: NodeLocation(
+          type: 'remote',
+          host: '10.0.0.1',
+          displayLocation: 'ws (10.0.0.1)',
+        ),
+      ),
+      agents: [
+        {
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+      isLargeScreen: true,
+      showDetails: true,
+    );
+
+    expect(find.text('会话 1'), findsOneWidget);
+    expect(find.text('活跃 1'), findsOneWidget);
+  });
+
+  testWidgets('AgentRow hides meta badges when showDetails is false on large screen', (
+    WidgetTester tester,
+  ) async {
+    await pumpAgentRow(
+      tester,
+      const AgentModel(
+        id: 'a1',
+        name: 'claude-live',
+        workDir: '/tmp',
+        nodeId: 'n1',
+        provider: 'claude',
+        status: AgentStatus.idle,
+        runtimeState: 'live',
+        sessionState: 'active',
+      ),
+      'n1',
+      isLargeScreen: true,
+      showDetails: false,
+    );
+
+    expect(find.text('运行中'), findsNothing);
+    expect(find.text('会话活跃'), findsNothing);
+  });
+
+  testWidgets('AgentRow shows meta badges when showDetails is true on large screen', (
+    WidgetTester tester,
+  ) async {
+    await pumpAgentRow(
+      tester,
+      const AgentModel(
+        id: 'a1',
+        name: 'claude-live',
+        workDir: '/tmp',
+        nodeId: 'n1',
+        provider: 'claude',
+        status: AgentStatus.idle,
+        runtimeState: 'live',
+        sessionState: 'active',
+      ),
+      'n1',
+      isLargeScreen: true,
+      showDetails: true,
+    );
+
+    expect(find.text('运行中'), findsOneWidget);
+    expect(find.text('会话活跃'), findsOneWidget);
+  });
+
+  testWidgets('DashboardScreen AppBar shows subtitle with node and agent stats', (
+    WidgetTester tester,
+  ) async {
+    await pumpDashboardScreen(
+      tester,
+      nodes: [
+        {
+          'id': 'n1',
+          'name': 'remote1',
+          'host': '10.0.0.1',
+          'status': 'connected',
+          'location': {
+            'type': 'remote',
+            'host': '10.0.0.1',
+            'displayLocation': 'ws (10.0.0.1)',
+          },
+          'agentCount': 1,
+        },
+      ],
+      agents: [
+        {
+          'nodeId': 'n1',
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+    );
+
+    expect(find.text('仪表盘'), findsOneWidget);
+    expect(find.text('1 节点 · 1 活跃'), findsOneWidget);
+
+    // Dispose widget tree to cancel DashboardScreen periodic timer
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
+
+  testWidgets('DashboardScreen hides HealthIndicator when collapsed', (
+    WidgetTester tester,
+  ) async {
+    await pumpDashboardScreen(
+      tester,
+      nodes: [
+        {
+          'id': 'n1',
+          'name': 'remote1',
+          'host': '10.0.0.1',
+          'status': 'connected',
+          'location': {
+            'type': 'remote',
+            'host': '10.0.0.1',
+            'displayLocation': 'ws (10.0.0.1)',
+          },
+          'agentCount': 1,
+        },
+      ],
+    );
+
+    // HealthIndicator should not render when _showDetails defaults to false
+    expect(find.byKey(const Key('healthIndicator')), findsNothing);
+
+    // Dispose widget tree to cancel DashboardScreen periodic timer
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
+
+  testWidgets('DashboardScreen toggle showDetails reveals summary chips and HealthIndicator', (
+    WidgetTester tester,
+  ) async {
+    await pumpDashboardScreen(
+      tester,
+      nodes: [
+        {
+          'id': 'n1',
+          'name': 'remote1',
+          'host': '10.0.0.1',
+          'status': 'connected',
+          'location': {
+            'type': 'remote',
+            'host': '10.0.0.1',
+            'displayLocation': 'ws (10.0.0.1)',
+          },
+          'agentCount': 1,
+        },
+      ],
+      agents: [
+        {
+          'nodeId': 'n1',
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+    );
+
+    // Initially collapsed: no summary chips, no HealthIndicator
+    expect(find.text('会话 1'), findsNothing);
+    expect(find.byKey(const Key('healthIndicator')), findsNothing);
+    expect(find.byIcon(Icons.expand_more), findsOneWidget);
+
+    // Tap expand button
+    await tester.tap(find.byIcon(Icons.expand_more));
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.expand_less), findsOneWidget);
+
+    // Expanded: summary chips should appear
+    expect(find.text('会话 1'), findsOneWidget);
+
+    // HealthIndicator renders when expanded
+    expect(find.byKey(const Key('healthIndicator')), findsOneWidget);
+
+    // Tap collapse button
+    await tester.tap(find.byIcon(Icons.expand_less));
+    await tester.pumpAndSettle();
+
+    // Collapsed again
+    expect(find.text('会话 1'), findsNothing);
+    expect(find.byKey(const Key('healthIndicator')), findsNothing);
+
+    // Dispose widget tree to cancel DashboardScreen periodic timer
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
   });
 }

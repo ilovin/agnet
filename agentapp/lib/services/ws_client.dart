@@ -292,6 +292,9 @@ class WsClient {
   /// Register a callback for server push events.
   void onEvent(EventCallback cb) => _eventListeners.add(cb);
 
+  /// Remove a previously registered event callback.
+  void offEvent(EventCallback cb) => _eventListeners.remove(cb);
+
   /// Send a JSON-RPC request and return the result (or throw on error).
   Future<dynamic> call(
     String method,
@@ -326,6 +329,7 @@ class WsClient {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _teardownTransport();
+    _eventListeners.clear();
     _connectedCtrl.close();
     _reconnectingCtrl.close();
   }

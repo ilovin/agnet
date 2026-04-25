@@ -89,7 +89,7 @@ TextSpan parseAnsiToSpan(
   String input, {
   Color? defaultColor,
   double fontSize = 14,
-  String fontFamily = 'monospace',
+  String fontFamily = 'Noto Sans SC',
 }) {
   final spans = <TextSpan>[];
   final buf = StringBuffer();
@@ -124,6 +124,7 @@ TextSpan parseAnsiToSpan(
         color: fg,
         backgroundColor: bg,
         fontFamily: fontFamily,
+        fontFamilyFallback: const ['Noto Sans SC'],
         fontSize: fontSize,
         height: 1.4,
         fontWeight: style.bold ? FontWeight.bold : FontWeight.normal,

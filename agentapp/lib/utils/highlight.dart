@@ -43,7 +43,11 @@ TextSpan highlightCode(String code, {String? language, required bool isDark}) {
 
   int lastEnd = 0;
   final baseColor = isDark ? const Color(0xFFABB2BF) : const Color(0xFF1F2328);
-  final baseStyle = TextStyle(fontFamily: 'monospace', color: baseColor);
+  final baseStyle = TextStyle(
+    fontFamily: 'Noto Sans SC',
+    fontFamilyFallback: const ['Noto Sans SC'],
+    color: baseColor,
+  );
 
   for (final match in tokenRegex.allMatches(code)) {
     if (match.start > lastEnd) {

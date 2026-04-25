@@ -3644,7 +3644,8 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                 ? Text(
                     collapsedCode,
                     style: TextStyle(
-                      fontFamily: 'monospace',
+                      fontFamily: 'Noto Sans SC',
+                      fontFamilyFallback: const ['Noto Sans SC'],
                       fontSize: widget.fontSize,
                       height: 1.4,
                       fontWeight: FontWeight.w500,
@@ -3659,7 +3660,8 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                         highlightCode(collapsedCode, isDark: widget.isDark),
                       ],
                       style: TextStyle(
-                        fontFamily: 'monospace',
+                        fontFamily: 'Noto Sans SC',
+                        fontFamilyFallback: const ['Noto Sans SC'],
                         fontSize: widget.fontSize,
                         height: 1.4,
                         fontWeight: FontWeight.w500,
@@ -3715,7 +3717,8 @@ Widget _codeBlock(
     textWidget = Text(
       code,
       style: TextStyle(
-        fontFamily: 'monospace',
+        fontFamily: 'Noto Sans SC',
+        fontFamilyFallback: const ['Noto Sans SC'],
         fontSize: fontSize,
         height: 1.4,
         fontWeight: FontWeight.w500,
@@ -3727,7 +3730,8 @@ Widget _codeBlock(
       TextSpan(
         children: [highlightCode(code, isDark: isDark)],
         style: TextStyle(
-          fontFamily: 'monospace',
+          fontFamily: 'Noto Sans SC',
+          fontFamilyFallback: const ['Noto Sans SC'],
           fontSize: fontSize,
           height: 1.4,
           fontWeight: FontWeight.w500,
@@ -3834,6 +3838,8 @@ class _MarkdownContent extends ConsumerWidget {
             height: 1.4,
           ),
           code: TextStyle(
+            fontFamily: 'Noto Sans SC',
+            fontFamilyFallback: const ['Noto Sans SC'],
             fontSize: fontSize,
             fontWeight: FontWeight.w500,
             color: isNaive
@@ -3927,7 +3933,8 @@ class _MarkdownContent extends ConsumerWidget {
           TextSpan(
             text: match[6]!,
             style: TextStyle(
-              fontFamily: 'monospace',
+              fontFamily: 'Noto Sans SC',
+              fontFamilyFallback: const ['Noto Sans SC'],
               fontSize: fontSize - 1,
               color: isDark ? const Color(0xFF98C379) : const Color(0xFF0550AE),
               backgroundColor: null,

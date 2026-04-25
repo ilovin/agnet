@@ -6,11 +6,12 @@ cd "$(dirname "$0")"
 echo ">>> Building Flutter Web (no CDN)..."
 https_proxy=${https_proxy:-http://proxy.nioint.com:8080} flutter build web --no-web-resources-cdn
 
-echo ">>> Patching gstatic font URLs in main.dart.js..."
+echo ">>> Patching local web resources..."
 cd build/web
 sed -i '' 's|https://fonts.gstatic.com/s/|/fonts/|g' main.dart.js
+sed -i '' 's|https://www.gstatic.com/flutter-canvaskit|canvaskit|g' flutter_bootstrap.js
 
-if grep -q 'gstatic' main.dart.js; then
+if grep -q 'gstatic' main.dart.js flutter_bootstrap.js; then
   echo "WARNING: gstatic references still found!"
   exit 1
 fi

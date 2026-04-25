@@ -11,13 +11,15 @@ import '../providers/connection_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
+import '../providers/session_logo_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
-import 'agent_detail_screen.dart' show
-    buildCollapsedPreview,
-    collapseConsecutiveActivityBlocks,
-    convertEventsToMessages,
-    normalizeHistoryEvent;
+import 'agent_detail_screen.dart'
+    show
+        buildCollapsedPreview,
+        collapseConsecutiveActivityBlocks,
+        convertEventsToMessages,
+        normalizeHistoryEvent;
 
 String shortSessionId(String? value) {
   final sessionId = value?.trim() ?? '';
@@ -110,6 +112,30 @@ List<Map<String, String>> getDefaultModels(String provider) {
   };
 
   return defaultModels[provider] ?? defaultModels['claude']!;
+}
+
+enum DashboardLayoutMode { list, grid, wideGrid }
+
+String dashboardLayoutLabel(DashboardLayoutMode mode) {
+  switch (mode) {
+    case DashboardLayoutMode.list:
+      return '列表';
+    case DashboardLayoutMode.grid:
+      return '双列';
+    case DashboardLayoutMode.wideGrid:
+      return '三列';
+  }
+}
+
+IconData dashboardLayoutIcon(DashboardLayoutMode mode) {
+  switch (mode) {
+    case DashboardLayoutMode.list:
+      return Icons.view_agenda_outlined;
+    case DashboardLayoutMode.grid:
+      return Icons.grid_view;
+    case DashboardLayoutMode.wideGrid:
+      return Icons.view_module;
+  }
 }
 
 class SessionCandidate {
@@ -314,6 +340,85 @@ String sessionIdentityKey({
   return lowerProvider;
 }
 
+List<AgentModel> visibleManagedAgentsForNode(List<AgentModel> agents) {
+  final bySignature = <String, AgentModel>{};
+  for (final a in agents) {
+    final isActive =
+        a.status == AgentStatus.working ||
+        a.status == AgentStatus.starting ||
+        a.status == AgentStatus.idle;
+    if (!isActive) continue;
+    final key = managedVisibilityKey(a);
+    final existing = bySignature[key];
+    if (_preferManagedAgent(a, existing)) {
+      bySignature[key] = a;
+    }
+  }
+
+  final visibleAgents = bySignature.values.toList()
+    ..sort((a, b) {
+      return managedAgentSortTitle(a).compareTo(managedAgentSortTitle(b));
+    });
+  return visibleAgents;
+}
+
+class DashboardSessionTarget {
+  final String nodeId;
+  final String nodeName;
+  final AgentModel agent;
+
+  const DashboardSessionTarget({
+    required this.nodeId,
+    required this.nodeName,
+    required this.agent,
+  });
+
+  String get key => '$nodeId:${agent.id}';
+}
+
+List<DashboardSessionTarget> buildVisibleDashboardSessions(NodeState state) {
+  final sessions = <DashboardSessionTarget>[];
+  for (final node in state.nodeList) {
+    final visibleAgents = visibleManagedAgentsForNode(state.agentsFor(node.id));
+    for (final agent in visibleAgents) {
+      sessions.add(
+        DashboardSessionTarget(nodeId: node.id, nodeName: node.name, agent: agent),
+      );
+    }
+  }
+
+  sessions.sort((a, b) {
+    final nodeCmp = a.nodeName.toLowerCase().compareTo(b.nodeName.toLowerCase());
+    if (nodeCmp != 0) return nodeCmp;
+    return managedAgentSortTitle(a.agent).compareTo(managedAgentSortTitle(b.agent));
+  });
+  return sessions;
+}
+
+enum CanvasPanelSize { compact, regular, expanded }
+
+String canvasPanelSizeLabel(CanvasPanelSize size) {
+  switch (size) {
+    case CanvasPanelSize.compact:
+      return '紧凑';
+    case CanvasPanelSize.regular:
+      return '标准';
+    case CanvasPanelSize.expanded:
+      return '展开';
+  }
+}
+
+CanvasPanelSize nextCanvasPanelSize(CanvasPanelSize size) {
+  switch (size) {
+    case CanvasPanelSize.compact:
+      return CanvasPanelSize.regular;
+    case CanvasPanelSize.regular:
+      return CanvasPanelSize.expanded;
+    case CanvasPanelSize.expanded:
+      return CanvasPanelSize.compact;
+  }
+}
+
 class OpencodeFileCandidate {
   final String id;
   final String name;
@@ -352,9 +457,72 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Timer? _refreshTimer;
   bool _wsConnected = true;
   bool _showSessionPreview = false;
+  DashboardLayoutMode _layoutMode = DashboardLayoutMode.list;
+  List<String> _canvasPanelOrder = const [];
+  final Map<String, CanvasPanelSize> _canvasPanelSizes = {};
+  final Map<String, TextEditingController> _canvasInputControllers = {};
+  final Map<String, bool> _canvasSending = {};
+  String? _canvasPickerSelectionKey;
+  bool _showDetails = false;
+  EventCallback? _eventHandler;
+  WsClient? _eventClient;
+  StreamSubscription<WsConnectionState>? _connSub;
+
+  bool _isLargeScreen(BuildContext context) =>
+      MediaQuery.of(context).size.width >= 900;
+
+  int _crossAxisCountForWidth(double width) {
+    if (width >= 1600) {
+      return _layoutMode == DashboardLayoutMode.list
+          ? 1
+          : (_layoutMode == DashboardLayoutMode.grid ? 2 : 3);
+    }
+    if (width >= 1300) {
+      return _layoutMode == DashboardLayoutMode.list
+          ? 1
+          : (_layoutMode == DashboardLayoutMode.grid ? 2 : 3);
+    }
+    if (width >= 1100) {
+      return _layoutMode == DashboardLayoutMode.list ? 1 : 2;
+    }
+    return 1;
+  }
+
+  Future<void> _pickLayoutMode() async {
+    final selected = await showModalBottomSheet<DashboardLayoutMode>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: DashboardLayoutMode.values
+              .map(
+                (mode) => ListTile(
+                  leading: Icon(dashboardLayoutIcon(mode)),
+                  title: Text(dashboardLayoutLabel(mode)),
+                  trailing: mode == _layoutMode
+                      ? Icon(
+                          Icons.check,
+                          color: Theme.of(ctx).colorScheme.primary,
+                        )
+                      : null,
+                  onTap: () => Navigator.pop(ctx, mode),
+                ),
+              )
+              .toList(),
+        ),
+      ),
+    );
+    if (!mounted || selected == null || selected == _layoutMode) return;
+    setState(() {
+      _layoutMode = selected;
+    });
+  }
 
   Future<void> _prefetchVisibleAgentPreviews() async {
-    if (!_showSessionPreview) return;
+    final shouldLoadPreview =
+        _showSessionPreview || _layoutMode != DashboardLayoutMode.list;
+    if (!shouldLoadPreview) return;
     final client = ref.read(connectionProvider);
     if (client == null) return;
     final nodeState = ref.read(nodesProvider);
@@ -384,11 +552,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       final events = ((raw['events'] as List?) ?? const [])
           .map((e) => normalizeHistoryEvent(e as Map))
           .toList();
-      final messages = collapseConsecutiveActivityBlocks(
-        convertEventsToMessages(events),
-      )
-          .where((m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall)
-          .toList();
+      final messages =
+          collapseConsecutiveActivityBlocks(convertEventsToMessages(events))
+              .where(
+                (m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall,
+              )
+              .toList();
       notifier.mergeHistory(
         nodeId,
         agentId,
@@ -409,11 +578,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _setupEventListener();
+    _subscribeEvents();
     _startAutoRefresh();
     // Listen for connection state changes
     final notifier = ref.read(connectionProvider.notifier);
-    notifier.onStateChanged.listen((state) {
+    _connSub = notifier.onStateChanged.listen((state) {
       if (!mounted) return;
       setState(() {
         _wsConnected = state == WsConnectionState.connected;
@@ -423,28 +592,22 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         _refreshAllNodes();
         _prefetchVisibleAgentPreviews();
         // Re-subscribe to events on the new connection
-        final client = ref.read(connectionProvider);
-        if (client != null) {
-          client.onEvent((event) {
-            ref.read(nodesProvider.notifier).handleEvent(event);
-            ref.read(conversationProvider.notifier).handleEvent(event);
-          });
-          // Register auto-refresh for newly discovered agents
-          ref.read(nodesProvider.notifier).onAgentsRefresh = (nodeId) async {
-            try {
-              final ar = await client.call('agent.list', {'nodeId': nodeId});
-              final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
-              ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
-            } catch (_) {}
-          };
-        }
+        _subscribeEvents();
       }
     });
   }
 
   @override
   void dispose() {
+    _connSub?.cancel();
+    if (_eventClient != null && _eventHandler != null) {
+      _eventClient!.offEvent(_eventHandler!);
+    }
     _refreshTimer?.cancel();
+    for (final controller in _canvasInputControllers.values) {
+      controller.dispose();
+    }
+    _canvasInputControllers.clear();
     super.dispose();
   }
 
@@ -478,22 +641,33 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
-  void _setupEventListener() {
-    final client = ref.read(connectionProvider);
-    if (client == null) return;
-
-    client.onEvent((event) {
-      if (event.method == 'node.status_changed') {
-        final params = event.params as Map<String, dynamic>;
-        final nodeId = params['nodeId'] as String;
-        final status = params['status'] as String;
-
-        // When a node becomes connected, refresh its agents
-        if (status == 'connected') {
+  void _onWsEvent(WsMessage event) {
+    if (event.method == 'node.status_changed') {
+      final params = event.params as Map<String, dynamic>?;
+      if (params != null) {
+        final nodeId = params['nodeId'] as String? ?? '';
+        final status = params['status'] as String? ?? '';
+        if (status == 'connected' && nodeId.isNotEmpty) {
           _refreshNodeAgents(nodeId);
         }
       }
-    });
+    }
+    ref.read(nodesProvider.notifier).handleEvent(event);
+    ref.read(conversationProvider.notifier).handleEvent(event);
+    if (ref.read(unreadSettingProvider)) {
+      ref.read(unreadProvider.notifier).handleEvent(event);
+    }
+  }
+
+  void _subscribeEvents() {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    if (_eventHandler != null && _eventClient != null) {
+      _eventClient!.offEvent(_eventHandler!);
+    }
+    _eventHandler = _onWsEvent;
+    _eventClient = client;
+    client.onEvent(_eventHandler!);
   }
 
   Future<void> _refreshNodeAgents(String nodeId) async {
@@ -807,33 +981,439 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
+  TextEditingController _canvasControllerFor(String panelKey) {
+    return _canvasInputControllers.putIfAbsent(
+      panelKey,
+      () => TextEditingController(),
+    );
+  }
+
+  CanvasPanelSize _canvasSizeFor(String panelKey) {
+    return _canvasPanelSizes[panelKey] ?? CanvasPanelSize.regular;
+  }
+
+  int _canvasSpanFor(CanvasPanelSize size, int columns) {
+    if (columns <= 1) return 1;
+    switch (size) {
+      case CanvasPanelSize.compact:
+        return 1;
+      case CanvasPanelSize.regular:
+        return columns >= 2 ? 2 : 1;
+      case CanvasPanelSize.expanded:
+        return columns;
+    }
+  }
+
+  Future<void> _addSessionToCanvas(DashboardSessionTarget target) async {
+    final panelKey = target.key;
+    if (_canvasPanelOrder.contains(panelKey)) return;
+    setState(() {
+      _canvasPanelOrder = [..._canvasPanelOrder, panelKey];
+      _canvasPanelSizes.putIfAbsent(panelKey, () => CanvasPanelSize.regular);
+    });
+
+    final client = ref.read(connectionProvider);
+    if (client != null) {
+      await _loadAgentPreview(client, target.nodeId, target.agent.id);
+    }
+  }
+
+  void _removeCanvasPanel(String panelKey) {
+    setState(() {
+      _canvasPanelOrder =
+          _canvasPanelOrder.where((key) => key != panelKey).toList();
+      _canvasPanelSizes.remove(panelKey);
+      _canvasSending.remove(panelKey);
+      if (_canvasPickerSelectionKey == panelKey) {
+        _canvasPickerSelectionKey = null;
+      }
+    });
+    _canvasInputControllers.remove(panelKey)?.dispose();
+  }
+
+  Future<void> _sendCanvasReply(DashboardSessionTarget target) async {
+    final panelKey = target.key;
+    final controller = _canvasControllerFor(panelKey);
+    final text = controller.text.trim();
+    if (text.isEmpty || (_canvasSending[panelKey] ?? false)) return;
+
+    if (target.agent.isReadOnly) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('当前会话是只读附加会话，无法在画布内回复')),
+        );
+      }
+      return;
+    }
+
+    final client = ref.read(connectionProvider);
+    if (client == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('连接未就绪，无法发送')));
+      }
+      return;
+    }
+
+    controller.clear();
+    setState(() {
+      _canvasSending[panelKey] = true;
+    });
+
+    try {
+      await client.call('conversation.send', {
+        'nodeId': target.nodeId,
+        'agentId': target.agent.id,
+        'message': text,
+        'raw': false,
+      }, timeout: const Duration(seconds: 30));
+      ref.read(unreadProvider.notifier).markAsRead(target.nodeId, target.agent.id);
+      await _loadAgentPreview(client, target.nodeId, target.agent.id);
+    } catch (e) {
+      controller.text = text;
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('发送失败: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _canvasSending[panelKey] = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _showCanvasLogoPicker(String sessionKey, IconData current) async {
+    final picked = await showDialog<IconData>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择会话图标'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: GridView.builder(
+            shrinkWrap: true,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 6,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+            ),
+            itemCount: availableSessionLogos.length,
+            itemBuilder: (context, index) {
+              final icon = availableSessionLogos[index];
+              final isSelected = icon == current;
+              return InkWell(
+                onTap: () => Navigator.pop(ctx, icon),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : null,
+                    borderRadius: BorderRadius.circular(8),
+                    border: isSelected
+                        ? Border.all(
+                            color: Theme.of(context).colorScheme.primary,
+                            width: 2,
+                          )
+                        : null,
+                  ),
+                  child: Icon(
+                    icon,
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              ref.read(sessionLogoProvider.notifier).resetLogo(sessionKey);
+              Navigator.pop(ctx);
+            },
+            child: const Text('恢复默认'),
+          ),
+        ],
+      ),
+    );
+    if (picked != null) {
+      ref.read(sessionLogoProvider.notifier).setLogo(sessionKey, picked);
+    }
+  }
+
+  Widget _buildDashboardListPane(List<NodeModel> nodes) {
+    return ListView.builder(
+      itemCount: nodes.length,
+      padding: const EdgeInsets.all(12),
+      itemBuilder: (_, i) => NodeCard(
+        node: nodes[i],
+        showSessionPreview: _showSessionPreview,
+        isLargeScreen: true,
+        showDetails: _showDetails,
+      ),
+    );
+  }
+
+  Widget _buildCanvasPane(
+    List<DashboardSessionTarget> sessions,
+    Map<String, DashboardSessionTarget> sessionByKey,
+  ) {
+    final activePanelKeys = _canvasPanelOrder
+        .where((key) => sessionByKey.containsKey(key))
+        .toList();
+    if (activePanelKeys.length != _canvasPanelOrder.length) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          _canvasPanelOrder = activePanelKeys;
+        });
+      });
+    }
+
+    final addable = sessions
+        .where((s) => !activePanelKeys.contains(s.key))
+        .toList(growable: false);
+    final selectedPicker =
+        (_canvasPickerSelectionKey != null &&
+            addable.any((s) => s.key == _canvasPickerSelectionKey))
+        ? _canvasPickerSelectionKey
+        : (addable.isNotEmpty ? addable.first.key : null);
+
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '详情画布',
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: selectedPicker,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    labelText: '从可见会话添加到画布',
+                  ),
+                  items: addable
+                      .map(
+                        (session) => DropdownMenuItem(
+                          value: session.key,
+                          child: Text(
+                            '${session.nodeName} · ${managedAgentTitle(session.agent)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: addable.isEmpty
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _canvasPickerSelectionKey = value;
+                          });
+                        },
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: selectedPicker == null
+                    ? null
+                    : () {
+                        final target = sessionByKey[selectedPicker];
+                        if (target != null) {
+                          _addSessionToCanvas(target);
+                        }
+                      },
+                icon: const Icon(Icons.add),
+                label: const Text('添加'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: activePanelKeys.isEmpty
+                ? const Center(
+                    child: Text(
+                      '暂无画布面板\n请从上方选择会话并添加',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  )
+                : LayoutBuilder(
+                    builder: (context, constraints) {
+                      final spacing = 12.0;
+                      final columns = _crossAxisCountForWidth(
+                        constraints.maxWidth,
+                      );
+                      final baseWidth =
+                          (constraints.maxWidth - spacing * (columns - 1)) /
+                          columns;
+
+                      return SingleChildScrollView(
+                        child: Wrap(
+                          spacing: spacing,
+                          runSpacing: spacing,
+                          children: activePanelKeys.map((panelKey) {
+                            final target = sessionByKey[panelKey]!;
+                            final size = _canvasSizeFor(panelKey);
+                            final span = _canvasSpanFor(size, columns);
+                            final panelWidth =
+                                baseWidth * span + spacing * (span - 1);
+                            final logoKey =
+                                '${target.nodeId}:${sessionIdentityKey(
+                              provider: target.agent.provider,
+                              sessionId: target.agent.sessionId,
+                              pid: target.agent.pid,
+                            )}';
+                            final logo = ref
+                                .watch(sessionLogoProvider.notifier)
+                                .iconFor(logoKey);
+                            return SizedBox(
+                              width: panelWidth,
+                              child: _CanvasSessionPanel(
+                                panelKey: panelKey,
+                                target: target,
+                                size: size,
+                                messages:
+                                    ref.watch(conversationProvider)[
+                                        (target.nodeId, target.agent.id)] ??
+                                    const [],
+                                unreadCount:
+                                    ref.watch(unreadProvider)[
+                                        (target.nodeId, target.agent.id)] ??
+                                    0,
+                                controller: _canvasControllerFor(panelKey),
+                                sending: _canvasSending[panelKey] ?? false,
+                                onSizeChanged: (next) {
+                                  setState(() {
+                                    _canvasPanelSizes[panelKey] = next;
+                                  });
+                                },
+                                onSend: () => _sendCanvasReply(target),
+                                onOpenDetail: () {
+                                  context.push(
+                                    '/agent/${target.nodeId}/${target.agent.id}',
+                                  );
+                                },
+                                onRemove: () => _removeCanvasPanel(panelKey),
+                                logo: logo,
+                                onLogoTap: () => _showCanvasLogoPicker(
+                                  logoKey,
+                                  logo,
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final nodeState = ref.watch(nodesProvider);
     final nodes = nodeState.nodeList;
 
+    // Dashboard subtitle stats
+    final connectedNodes = nodes.where((n) => n.status == NodeStatus.connected).length;
+    final activeAgents = nodes.fold<int>(
+      0,
+      (sum, n) =>
+          sum +
+          nodeState
+              .agentsFor(n.id)
+              .where(
+                (a) =>
+                    a.status == AgentStatus.working ||
+                    a.status == AgentStatus.starting ||
+                    a.status == AgentStatus.idle,
+              )
+              .length,
+    );
+    final subtitleParts = <String>[
+      '${nodes.length} 节点',
+      if (connectedNodes != nodes.length) '$connectedNodes 已连接',
+      '$activeAgents 活跃',
+    ];
+    final subtitle = subtitleParts.join(' · ');
+
     return Scaffold(
       appBar: AppBar(
-        title: Row(
+        toolbarHeight:
+            (64 * MediaQuery.textScalerOf(context).scale(1.0)).clamp(64.0, 96.0),
+        leading: IconButton(
+          icon: const Icon(Icons.dashboard),
+          tooltip: '仪表盘',
+          onPressed: null,
+        ),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('仪表盘'),
-            if (!_wsConnected) ...[
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '仪表盘',
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
                 ),
-              ),
-            ],
+                if (!_wsConnected) ...[
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            Text(
+              subtitle,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
           ],
         ),
         actions: [
-          // Health status indicator
-          const _HealthIndicator(),
+          if (_showDetails) const _HealthIndicator(),
+          IconButton(
+            icon: Icon(_showDetails ? Icons.expand_less : Icons.expand_more),
+            tooltip: _showDetails ? '折叠详情' : '展开详情',
+            onPressed: () {
+              setState(() {
+                _showDetails = !_showDetails;
+              });
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.search),
             tooltip: '发现节点',
@@ -850,11 +1430,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             onPressed: _wsConnected ? () => _restartGateway(ref) : null,
           ),
           IconButton(
-            icon: Icon(
-              _showSessionPreview
-                  ? Icons.notes_outlined
-                  : Icons.notes,
-            ),
+            icon: Icon(_showSessionPreview ? Icons.notes_outlined : Icons.notes),
             tooltip: _showSessionPreview ? '隐藏会话预览' : '显示会话预览',
             onPressed: () {
               setState(() {
@@ -865,29 +1441,294 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               }
             },
           ),
+          if (_isLargeScreen(context))
+            IconButton(
+              icon: Icon(dashboardLayoutIcon(_layoutMode)),
+              tooltip: '画布布局：${dashboardLayoutLabel(_layoutMode)}',
+              onPressed: _pickLayoutMode,
+            ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: nodes.isEmpty
-                ? const Center(
-                    child: Text('暂无节点', style: TextStyle(color: Colors.grey)),
-                  )
-                : ListView.builder(
+      body: nodes.isEmpty
+          ? const Center(child: Text('暂无节点', style: TextStyle(color: Colors.grey)))
+          : LayoutBuilder(
+              builder: (context, constraints) {
+                final largeScreen = _isLargeScreen(context);
+                if (!largeScreen) {
+                  return ListView.builder(
                     itemCount: nodes.length,
                     padding: const EdgeInsets.all(12),
                     itemBuilder: (_, i) => NodeCard(
                       node: nodes[i],
                       showSessionPreview: _showSessionPreview,
+                      isLargeScreen: false,
+                    ),
+                  );
+                }
+
+                final sessions = buildVisibleDashboardSessions(nodeState);
+                final sessionByKey = {
+                  for (final session in sessions) session.key: session,
+                };
+
+                return Row(
+                  children: [
+                    Expanded(flex: 5, child: _buildDashboardListPane(nodes)),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      flex: 6,
+                      child: _buildCanvasPane(sessions, sessionByKey),
+                    ),
+                  ],
+                );
+              },
+            ),
+    );
+  }
+}
+
+class _CanvasSessionPanel extends StatelessWidget {
+  final String panelKey;
+  final DashboardSessionTarget target;
+  final CanvasPanelSize size;
+  final List<MessageModel> messages;
+  final int unreadCount;
+  final TextEditingController controller;
+  final bool sending;
+  final ValueChanged<CanvasPanelSize> onSizeChanged;
+  final VoidCallback onSend;
+  final VoidCallback onOpenDetail;
+  final VoidCallback onRemove;
+  final IconData logo;
+  final VoidCallback? onLogoTap;
+
+  const _CanvasSessionPanel({
+    required this.panelKey,
+    required this.target,
+    required this.size,
+    required this.messages,
+    required this.unreadCount,
+    required this.controller,
+    required this.sending,
+    required this.onSizeChanged,
+    required this.onSend,
+    required this.onOpenDetail,
+    required this.onRemove,
+    required this.logo,
+    this.onLogoTap,
+  });
+
+  double _previewHeightFor(CanvasPanelSize panelSize) {
+    switch (panelSize) {
+      case CanvasPanelSize.compact:
+        return 120;
+      case CanvasPanelSize.regular:
+        return 170;
+      case CanvasPanelSize.expanded:
+        return 230;
+    }
+  }
+
+  int _maxLinesFor(CanvasPanelSize panelSize) {
+    switch (panelSize) {
+      case CanvasPanelSize.compact:
+        return 4;
+      case CanvasPanelSize.regular:
+        return 6;
+      case CanvasPanelSize.expanded:
+        return 9;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = managedAgentTitle(target.agent);
+    final subtitleParts = <String>[
+      target.nodeName,
+      if ((target.agent.sessionId ?? '').trim().isNotEmpty)
+        shortSessionId(target.agent.sessionId),
+      AgentStatusTheme.getLabel(target.agent.status),
+    ];
+    final previewTexts = messages
+        .where((m) => m.text.trim().isNotEmpty)
+        .map((m) {
+          final role = m.role == MessageRole.user ? '你' : 'AI';
+          return '$role: ${m.text}';
+        })
+        .toList();
+    final lines = buildSessionPreviewLines(
+      previewTexts,
+      maxLines: _maxLinesFor(size),
+      maxCharsPerLine: 120,
+    );
+
+    final inputEnabled = !sending && !target.agent.isReadOnly;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                InkWell(
+                  onTap: onLogoTap,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4),
+                    child: Icon(
+                      logo,
+                      color: providerColor(target.agent.provider),
+                      size: 20,
                     ),
                   ),
-          ),
-        ],
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      Text(
+                        subtitleParts.join(' · '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (unreadCount > 0)
+                  Container(
+                    margin: const EdgeInsets.only(right: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '未读 $unreadCount',
+                      style: const TextStyle(color: Colors.white, fontSize: 11),
+                    ),
+                  ),
+                PopupMenuButton<CanvasPanelSize>(
+                  tooltip: '面板尺寸',
+                  icon: const Icon(Icons.aspect_ratio, size: 18),
+                  onSelected: onSizeChanged,
+                  itemBuilder: (context) => CanvasPanelSize.values
+                      .map(
+                        (value) => PopupMenuItem<CanvasPanelSize>(
+                          value: value,
+                          child: Row(
+                            children: [
+                              Text(canvasPanelSizeLabel(value)),
+                              if (value == size) ...[
+                                const SizedBox(width: 8),
+                                Icon(
+                                  Icons.check,
+                                  size: 16,
+                                  color: Theme.of(context).colorScheme.primary,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+                IconButton(
+                  tooltip: '打开详情',
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  onPressed: onOpenDetail,
+                ),
+                IconButton(
+                  tooltip: '移除面板',
+                  icon: const Icon(Icons.close, size: 18),
+                  onPressed: onRemove,
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              height: _previewHeightFor(size),
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: lines.isEmpty
+                  ? Center(
+                      child: Text(
+                        '暂无会话内容',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: lines.length,
+                      itemBuilder: (context, index) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          lines[index],
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                      ),
+                    ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: controller,
+                    enabled: inputEnabled,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => onSend(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                      hintText: target.agent.isReadOnly
+                          ? '只读会话，无法回复'
+                          : '输入回复…',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: inputEnabled ? onSend : null,
+                  child: sending
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send, size: 16),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -896,10 +1737,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 class NodeCard extends ConsumerStatefulWidget {
   final NodeModel node;
   final bool showSessionPreview;
+  final bool isLargeScreen;
+  final bool showDetails;
   const NodeCard({
     super.key,
     required this.node,
     this.showSessionPreview = false,
+    this.isLargeScreen = false,
+    this.showDetails = false,
   });
 
   @override
@@ -936,6 +1781,37 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     }
   }
 
+  List<Widget> _buildSummaryChips(
+    BuildContext context,
+    List<AgentModel> agents,
+  ) {
+    final active = agents
+        .where(
+          (a) =>
+              a.status == AgentStatus.working ||
+              a.status == AgentStatus.starting ||
+              a.status == AgentStatus.idle,
+        )
+        .length;
+
+    final style = Theme.of(context).textTheme.labelSmall;
+    return [
+      if (agents.isNotEmpty)
+        Chip(
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          label: Text('会话 ${agents.length}', style: style),
+        ),
+      if (active > 0)
+        Chip(
+          visualDensity: VisualDensity.compact,
+          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          avatar: const Icon(Icons.play_circle_outline, size: 16),
+          label: Text('活跃 $active', style: style),
+        ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     final agents = ref.watch(nodesProvider).agentsFor(widget.node.id);
@@ -950,24 +1826,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
 
     // Only show active agents. Stopped/crashed agents are hidden from the main list
     // and should be managed through the session manager instead.
-    final bySignature = <String, AgentModel>{};
-    for (final a in agents) {
-      final isActive =
-          a.status == AgentStatus.working ||
-          a.status == AgentStatus.starting ||
-          a.status == AgentStatus.idle;
-      if (!isActive) continue;
-      final key = managedVisibilityKey(a);
-      final existing = bySignature[key];
-      if (_preferManagedAgent(a, existing)) {
-        bySignature[key] = a;
-      }
-    }
-
-    final visibleAgents = bySignature.values.toList()
-      ..sort((a, b) {
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
+    final visibleAgents = visibleManagedAgentsForNode(agents);
+    final summaryChips = _buildSummaryChips(context, visibleAgents);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -980,8 +1840,19 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               nodeDisplay,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            subtitle: Text(
-              '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
+                ),
+                if (widget.isLargeScreen &&
+                    widget.showDetails &&
+                    summaryChips.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 6, runSpacing: 6, children: summaryChips),
+                ],
+              ],
             ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -1001,6 +1872,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               agent: a,
               nodeId: widget.node.id,
               showPreview: widget.showSessionPreview,
+              isLargeScreen: widget.isLargeScreen,
+              showDetails: widget.showDetails,
             ),
           ),
           if (visibleAgents.isEmpty)
@@ -1076,7 +1949,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     try {
       await client.call('node.connect', {'nodeId': widget.node.id});
       if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text('正在连接 ${widget.node.name}…')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('正在连接 ${widget.node.name}…')),
+      );
     } catch (e) {
       if (!mounted) return;
       messenger.showSnackBar(SnackBar(content: Text('连接节点失败: $e')));
@@ -1091,7 +1966,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     try {
       await client.call('node.restart', {'nodeId': widget.node.id});
       if (!mounted) return;
-      messenger.showSnackBar(SnackBar(content: Text('正在重启 ${widget.node.name}…')));
+      messenger.showSnackBar(
+        SnackBar(content: Text('正在重启 ${widget.node.name}…')),
+      );
     } catch (e) {
       if (!mounted) return;
       messenger.showSnackBar(SnackBar(content: Text('重启节点失败: $e')));
@@ -1851,11 +2728,15 @@ class AgentRow extends ConsumerStatefulWidget {
   final AgentModel agent;
   final String nodeId;
   final bool showPreview;
+  final bool isLargeScreen;
+  final bool showDetails;
   const AgentRow({
     super.key,
     required this.agent,
     required this.nodeId,
     this.showPreview = false,
+    this.isLargeScreen = false,
+    this.showDetails = false,
   });
 
   @override
@@ -1872,10 +2753,12 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final agent = widget.agent;
     final prefixParts = <String>[
       if ((agent.pid ?? 0) > 0) '${agent.pid}',
-      if ((agent.sessionId ?? '').trim().isNotEmpty) shortSessionId(agent.sessionId),
+      if ((agent.sessionId ?? '').trim().isNotEmpty)
+        shortSessionId(agent.sessionId),
     ];
     final prefix = prefixParts.join('.');
-    final statusText = _statusLabel + (agent.status == AgentStatus.crashed ? '.异常' : '');
+    final statusText =
+        _statusLabel + (agent.status == AgentStatus.crashed ? '.异常' : '');
     return Text.rich(
       TextSpan(
         style: const TextStyle(fontSize: 12),
@@ -1889,10 +2772,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             ),
           TextSpan(
             text: statusText,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: _statusColor,
-            ),
+            style: TextStyle(fontWeight: FontWeight.w600, color: _statusColor),
           ),
         ],
       ),
@@ -1906,7 +2786,10 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     if (tileBox == null) return;
     final tileRect = Rect.fromPoints(
       tileBox.localToGlobal(Offset.zero, ancestor: overlay),
-      tileBox.localToGlobal(tileBox.size.bottomRight(Offset.zero), ancestor: overlay),
+      tileBox.localToGlobal(
+        tileBox.size.bottomRight(Offset.zero),
+        ancestor: overlay,
+      ),
     );
     final agent = widget.agent;
     final items = <PopupMenuEntry<String>>[
@@ -1975,10 +2858,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     }
     if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
       details.add(
-        _detailMenuItem(
-          Icons.info_outline,
-          agent.sessionStateReason!.trim(),
-        ),
+        _detailMenuItem(Icons.info_outline, agent.sessionStateReason!.trim()),
       );
     }
     if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
@@ -2056,6 +2936,71 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     }
   }
 
+  Future<void> _showLogoPicker(String sessionKey, IconData current) async {
+    final picked = await showDialog<IconData>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选择会话图标'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: GridView.builder(
+            shrinkWrap: true,
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 6,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 8,
+            ),
+            itemCount: availableSessionLogos.length,
+            itemBuilder: (context, index) {
+              final icon = availableSessionLogos[index];
+              final isSelected = icon == current;
+              return InkWell(
+                onTap: () => Navigator.pop(ctx, icon),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : null,
+                    borderRadius: BorderRadius.circular(8),
+                    border: isSelected
+                        ? Border.all(
+                            color: Theme.of(context).colorScheme.primary,
+                            width: 2,
+                          )
+                        : null,
+                  ),
+                  child: Icon(
+                    icon,
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.primary
+                        : Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () {
+              ref.read(sessionLogoProvider.notifier).resetLogo(sessionKey);
+              Navigator.pop(ctx);
+            },
+            child: const Text('恢复默认'),
+          ),
+        ],
+      ),
+    );
+    if (picked != null) {
+      ref.read(sessionLogoProvider.notifier).setLogo(sessionKey, picked);
+    }
+  }
+
   PopupMenuItem<String> _detailMenuItem(IconData icon, String text) {
     return PopupMenuItem<String>(
       enabled: false,
@@ -2081,6 +3026,21 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     );
   }
 
+  List<String> _buildMetaBadges(AgentModel agent) {
+    final badges = <String>[];
+    final runtime = _runtimeStateLabel(agent.runtimeState).trim();
+    if (runtime.isNotEmpty) badges.add(runtime);
+    final sessionState = _sessionStateLabel(agent.sessionState).trim();
+    if (sessionState.isNotEmpty) badges.add(sessionState);
+    final control = _sessionControlLabel(agent.sessionControl).trim();
+    if (control.isNotEmpty) badges.add(control);
+    final providerState = _providerStateLabel(agent.providerState).trim();
+    if (providerState.isNotEmpty) badges.add(providerState);
+    final mode = agent.permissionMode?.trim() ?? '';
+    if (mode.isNotEmpty) badges.add('权限:$mode');
+    return badges;
+  }
+
   @override
   Widget build(BuildContext context) {
     final agent = widget.agent;
@@ -2091,16 +3051,30 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 const [],
           )
         : const <String>[];
-    final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, agent.id)] ?? 0;
+    final unreadCount =
+        ref.watch(unreadProvider)[(widget.nodeId, agent.id)] ?? 0;
+    final metaBadges = widget.isLargeScreen && widget.showDetails
+        ? _buildMetaBadges(agent)
+        : const <String>[];
+
+    final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
+      provider: agent.provider,
+      sessionId: agent.sessionId,
+      pid: agent.pid,
+    )}';
+    final sessionLogo = ref.watch(sessionLogoProvider.notifier).iconFor(sessionKey);
 
     return ListTile(
       key: _tileKey,
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
-      leading: Icon(
-        providerIcon(agent.provider),
-        color: providerColor(agent.provider),
-        size: 20,
+      leading: InkWell(
+        onTap: () => _showLogoPicker(sessionKey, sessionLogo),
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Icon(sessionLogo, color: providerColor(agent.provider), size: 22),
+        ),
       ),
       title: Text(displayTitle, maxLines: 2, overflow: TextOverflow.ellipsis),
       trailing: unreadCount > 0
@@ -2118,6 +3092,36 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         mainAxisSize: MainAxisSize.min,
         children: [
           _buildSubtitle(context),
+          if (metaBadges.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: metaBadges
+                  .map(
+                    (badge) => Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        badge,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ],
           if (previewLines.isNotEmpty) ...[
             const SizedBox(height: 4),
             ...previewLines.map(
@@ -2143,7 +3147,8 @@ class _AgentRowState extends ConsumerState<AgentRow> {
 String _agentSubtitleText(AgentModel agent) {
   final parts = <String>[
     if ((agent.pid ?? 0) > 0) '${agent.pid}',
-    if ((agent.sessionId ?? '').trim().isNotEmpty) shortSessionId(agent.sessionId),
+    if ((agent.sessionId ?? '').trim().isNotEmpty)
+      shortSessionId(agent.sessionId),
     AgentStatusTheme.getLabel(agent.status),
   ];
   if (agent.status == AgentStatus.crashed) {
@@ -2296,7 +3301,7 @@ class _HealthIndicator extends ConsumerWidget {
       padding: const EdgeInsets.only(right: 8),
       child: Tooltip(
         message: tooltip,
-        child: Icon(Icons.circle, color: color, size: 14),
+        child: Icon(Icons.circle, color: color, size: 14, key: const Key('healthIndicator')),
       ),
     );
   }

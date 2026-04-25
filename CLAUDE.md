@@ -30,6 +30,12 @@ All three communicate via WebSocket JSON-RPC 2.0. Auth supports both `Authorizat
 
 Plans contain exact code and shell commands. Follow them task-by-task when implementing.
 
+## Instruction Priority & Conflict Resolution
+
+- Priority order: direct user request > this `CLAUDE.md` > design plans/docs.
+- If a design plan conflicts with current code/tests/runtime reality, follow the working code path and update implementation accordingly.
+- If two instructions conflict at the same level, follow the latest explicit instruction.
+
 ## Build & Test Commands
 
 ### agentd / agentgw (Go)
@@ -54,15 +60,64 @@ flutter analyze                  # lint/static analysis
 
 ## Development Workflow
 
+### MUST
+
 - Follow **test-driven development (TDD)** for all non-trivial changes.
 - After **every development step or code change**, run the relevant tests before continuing.
-- Minimum expectation per change:
+- Minimum test expectation per change:
   - backend changes: targeted Go unit tests
   - app changes: targeted Flutter tests
   - cross-component/session changes: relevant integration tests
 - For session/chat pipeline work, use `agentgw/test_plan.md` as the executable test plan.
 - Final acceptance is gated by **real Chrome interaction in the existing tab**; do not treat a change as done until Chrome validation passes.
-- Any future debug scripts, screenshots, temporary captures, and generated debug artifacts must go under a fixed ignored directory: `agentapp/scripts/debug/` (or an equivalent component-local `scripts/debug/` directory). Do not leave debug PNGs, ad-hoc scripts, or runtime artifacts in the project root.
+- Any debug scripts, screenshots, temporary captures, and generated debug artifacts must go under `agentapp/scripts/debug/` (or equivalent component-local `scripts/debug/`). Do not leave debug artifacts in the project root.
+
+### SHOULD
+
+- Prefer running targeted tests first, then broaden scope only when the change surface is large.
+- Keep changes minimal and directly scoped to the requested task.
+
+## Manager-Driven Delivery Workflow
+
+### MUST
+
+- Use a single **Manager** role to run delivery end-to-end: requirement intake, clarification/discussion, task decomposition, assignment, progress tracking, and final status sync.
+- Manager must delegate implementation to teammates/sub-agents and **must not implement code directly**.
+- Manager may create up to **5 teammates** for parallel development.
+- Manager must define clear scope and acceptance criteria before assigning work.
+- Manager must track teammate ownership and progress continuously, and re-balance assignments when blocked.
+- Manager must ensure all delegated work follows this repo's TDD/test/validation requirements.
+
+### Role Assignment
+
+- **Manager**: owns requirement alignment, decomposition, assignment, dependency management, progress tracking, and release readiness decision.
+- **Developer teammate**: implements assigned tasks and self-checks against acceptance criteria.
+- **Reviewer teammate**: reviews code quality/scope/risk; should not be the same teammate as the primary developer for that task whenever possible.
+- **Tester/Acceptance teammate**: runs test and acceptance checklist, validates behavior/regression, and records acceptance evidence.
+
+### Documentation Requirement (mandatory)
+
+- Keep requirement and progress summaries in docs, separated by purpose:
+  - `docs/superpowers/management/requirements.md` — requirement discussion outcomes, scope, acceptance criteria, task split, assignees.
+  - `docs/superpowers/management/progress.md` — execution progress, task status, blockers, risks, ETA updates, completion summary.
+- Update both documents whenever scope/assignment/progress changes materially.
+
+### Acceptance Criteria (Definition of Done)
+
+A task is accepted only when all items below are satisfied:
+
+1. Requirement scope and expected output are matched (no hidden scope expansion).
+2. Required tests for the change type are executed and passing (unit/integration/UI as applicable).
+3. Reviewer sign-off is recorded with no unresolved critical issues.
+4. For UI-related work, real Chrome interaction validation in the existing tab is completed and recorded.
+5. Risks/blockers/follow-ups are documented in `progress.md`.
+6. Requirement-to-delivery status is updated in both `requirements.md` and `progress.md`.
+
+### SHOULD
+
+- Prefer small, independently testable task slices per teammate.
+- Keep at least one teammate slot free for urgent fixes/review support when possible.
+- Prefer assigning reviewer and tester as different teammates on medium/large changes.
 
 ## Key Design Decisions
 
@@ -85,14 +140,15 @@ PID-to-session mapping uses a multi-stage pipeline (scanner + watcher share the 
 
 Key invariant: the PID mapping file (`sessions/<pid>.json`) is NOT authoritative — it goes stale after `/clear` or `--resume`. Never trust it as the sole source.
 
-## Build & Deploy
+## Build / Deploy / Release / Install (Scripts only)
 
-Always use the repo scripts for building and deploying — never run manual `go build` + `scp` sequences:
+All build, deploy, release, and install operations must go through repo scripts. Do not use manual `go build` + `scp` or ad-hoc deployment/release/install commands.
 
 ```bash
 scripts/build.sh              # build all components
 scripts/deploy.sh local       # deploy locally (restart agentd + agentgw)
 scripts/deploy.sh <node>      # deploy to remote node via SSH
+scripts/release.sh            # package and release artifacts
 scripts/install.sh            # full install (first-time setup)
 ```
 
