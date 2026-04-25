@@ -171,6 +171,9 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		if strings.HasPrefix(resumeID, "agent-") {
+			continue
+		}
 		derived := h.server.manager.DeriveAgentState(ag.ID)
 		provider := h.deriveProviderSnapshot(ag)
 		var lastMsgTimeMs int64
@@ -485,6 +488,9 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+		if strings.HasPrefix(resumeID, "agent-") {
+			continue
+		}
 		candidate := managedAgent{
 			ID: ag.ID, Name: ag.Name, Provider: ag.Provider,
 			WorkDir: ag.WorkDir, ProjectName: projectName, Status: string(ag.Status()),
