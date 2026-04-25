@@ -410,7 +410,7 @@ func filterCandidatesByPaneActivity(candidates []sessionCandidate, paneActivity 
 // contentMatchFromCandidates captures tmux pane content and matches against candidates.
 // Returns the jsonlPath of the best match, or "" if no match.
 func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate, maxCandidates int) string {
-	paneRaw, err := capturePaneContent(tmuxTarget)
+	paneRaw, err := capturePaneContentFunc(tmuxTarget)
 	if err != nil {
 		return ""
 	}
@@ -425,9 +425,10 @@ func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate
 	}
 
 	bestScore := 0
+	secondBest := 0
 	bestPath := ""
 	for _, c := range top {
-		fps := extractFingerprintsFromJSONL(c.jsonlPath, 20)
+		fps := extractFingerprintsFunc(c.jsonlPath, 20)
 		score := 0
 		for _, fp := range fps {
 			if strings.Contains(paneText, fp) {
@@ -435,14 +436,20 @@ func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate
 			}
 		}
 		if score > bestScore {
+			secondBest = bestScore
 			bestScore = score
 			bestPath = c.jsonlPath
+		} else if score > secondBest {
+			secondBest = score
 		}
 	}
 
-	if bestScore > 0 {
-		log.Printf("[ContentMatch] pane %s matched %s (score %d)", tmuxTarget, filepath.Base(bestPath), bestScore)
+	if bestScore >= minContentMatchScore && (bestScore-secondBest) >= minContentMatchMargin {
+		log.Printf("[ContentMatch] pane %s matched %s (score %d, runner-up %d)", tmuxTarget, filepath.Base(bestPath), bestScore, secondBest)
 		return bestPath
+	}
+	if bestScore > 0 {
+		log.Printf("[ContentMatch] pane %s ambiguous (best %d, runner-up %d), skip switch", tmuxTarget, bestScore, secondBest)
 	}
 	return ""
 }
@@ -467,6 +474,14 @@ func cleanPaneText(raw string) string {
 var tuiDecoRe = regexp.MustCompile(`[─━│┃┌┐└┘├┤┬┴┼╔╗╚╝║═⏺⏵✻※❯⎿]`)
 var wsRe = regexp.MustCompile(`\s+`)
 var mdRe = regexp.MustCompile("[*`#\\[\\]]")
+
+const (
+	minContentMatchScore   = 3
+	minContentMatchMargin  = 2
+)
+
+var capturePaneContentFunc = capturePaneContent
+var extractFingerprintsFunc = extractFingerprintsFromJSONL
 
 // extractFingerprintsFromJSONL extracts text snippets from a JSONL file for matching.
 // Skips pure tool_use messages. Stops when maxFPs fingerprints are collected.
@@ -666,6 +681,8 @@ func (w *ClaudeWatcher) poll() error {
 // claudeLine is the minimal structure we need from Claude's JSONL output.
 type claudeLine struct {
 	Type    string `json:"type"`
+	Subtype string `json:"subtype,omitempty"`
+	Content string `json:"content,omitempty"`
 	Message struct {
 		Role       string      `json:"role"`
 		Content    interface{} `json:"content"`     // Can be string or array
@@ -719,9 +736,47 @@ func buildToolSummary(name string, input map[string]interface{}) string {
 	}
 }
 
+func parseLocalCommandContent(content string) (ConversationEvent, bool) {
+	stdoutStart := strings.Index(content, "<local-command-stdout>")
+	if stdoutStart >= 0 {
+		start := stdoutStart + len("<local-command-stdout>")
+		endRel := strings.Index(content[start:], "</local-command-stdout>")
+		if endRel >= 0 {
+			text := strings.TrimSpace(content[start : start+endRel])
+			if text == "" {
+				text = "Local command completed"
+			}
+			s := StatusStandby
+			return ConversationEvent{Role: "assistant", Text: text, StatusChange: &s}, true
+		}
+	}
+
+	stderrStart := strings.Index(content, "<local-command-stderr>")
+	if stderrStart >= 0 {
+		start := stderrStart + len("<local-command-stderr>")
+		endRel := strings.Index(content[start:], "</local-command-stderr>")
+		if endRel >= 0 {
+			text := strings.TrimSpace(content[start : start+endRel])
+			if text == "" {
+				text = "Local command failed"
+			}
+			s := StatusStandby
+			return ConversationEvent{Role: "assistant", Text: text, StatusChange: &s}, true
+		}
+	}
+
+	return ConversationEvent{}, false
+}
+
 func parseLine(data []byte) (ConversationEvent, bool) {
 	var line claudeLine
 	if err := json.Unmarshal(data, &line); err != nil {
+		return ConversationEvent{}, false
+	}
+	if line.Type == "system" && line.Subtype == "local_command" {
+		if ev, ok := parseLocalCommandContent(line.Content); ok {
+			return ev, true
+		}
 		return ConversationEvent{}, false
 	}
 	// Only process user and assistant messages

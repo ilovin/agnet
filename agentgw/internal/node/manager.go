@@ -74,6 +74,13 @@ func (m *Manager) SetRestartFunc(fn func(*Node, string) error) {
 	m.restartFn = fn
 }
 
+// SetAgentdBinary replaces the embedded agentd binary used by Deploy.
+func (m *Manager) SetAgentdBinary(binary []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentdBin = binary
+}
+
 // LoadAll populates nodes from persisted config without writing back to disk.
 func (m *Manager) LoadAll(entries []nodecfg.NodeEntry) {
 	m.mu.Lock()

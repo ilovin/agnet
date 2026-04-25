@@ -55,6 +55,47 @@ EOF
 SKIP_APK=false
 SKIP_IOS=false
 
+auto_increment_version() {
+  local bump="${RELEASE_BUMP:-patch}"
+  local latest major minor patch
+
+  latest="$(git tag --list 'v*' --sort=-v:refname | head -n1)"
+  if [[ -z "$latest" || ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    echo "v0.1.0"
+    return
+  fi
+
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  patch="${BASH_REMATCH[3]}"
+
+  case "$bump" in
+    major)
+      major=$((major + 1))
+      minor=0
+      patch=0
+      ;;
+    minor)
+      minor=$((minor + 1))
+      patch=0
+      ;;
+    patch)
+      patch=$((patch + 1))
+      ;;
+    *)
+      echo "invalid RELEASE_BUMP: $bump (expected major|minor|patch)" >&2
+      exit 1
+      ;;
+  esac
+
+  echo "v${major}.${minor}.${patch}"
+}
+
+sha256_file() {
+  local path="$1"
+  shasum -a 256 "$path" | awk '{print $1}'
+}
+
 for arg in "$@"; do
   case "$arg" in
     -h|--help)
@@ -66,12 +107,9 @@ for arg in "$@"; do
   esac
 done
 
-VERSION="${VERSION:-$(grep -m1 'agentgw v' agentgw/cmd/agentgw/main.go | sed -n 's/.*\(v[0-9][0-9.]*\).*/\1/p')}"
-if [[ -z "$VERSION" ]]; then
-  VERSION="v0.3.0"
-fi
-
+VERSION="${VERSION:-$(auto_increment_version)}"
 RELEASE_DIR="release/phone-talk-${VERSION}"
+MANIFEST_PATH="${RELEASE_DIR}/manifest.json"
 
 echo "=== Release ${VERSION} ==="
 rm -rf "$RELEASE_DIR"
@@ -79,12 +117,17 @@ mkdir -p "$RELEASE_DIR/bin"
 
 # ── Go binaries ─────────────────────────────────────────────────────
 echo "[release] Building Go binaries in parallel..."
-build_go_all
+BUILD_VERSION="$VERSION" build_go_all
 
 cp "$LOCAL_BIN" "${RELEASE_DIR}/bin/agentd"
 cp "$LINUX_BIN" "${RELEASE_DIR}/bin/agentd-linux"
 cp "$GW_BIN" "${RELEASE_DIR}/bin/agentgw-macos-arm64"
 cp "$GW_LINUX_BIN" "${RELEASE_DIR}/bin/agentgw-linux"
+
+AGENTD_MAC_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentd")"
+AGENTD_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentd-linux")"
+AGENTGW_MAC_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentgw-macos-arm64")"
+AGENTGW_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentgw-linux")"
 
 echo "[release] agentd (macOS): $(ls -lh "${RELEASE_DIR}/bin/agentd" | awk '{print $5}')"
 echo "[release] agentd-linux: $(ls -lh "${RELEASE_DIR}/bin/agentd-linux" | awk '{print $5}')"
@@ -92,10 +135,12 @@ echo "[release] agentgw-macos-arm64: $(ls -lh "${RELEASE_DIR}/bin/agentgw-macos-
 echo "[release] agentgw-linux: $(ls -lh "${RELEASE_DIR}/bin/agentgw-linux" | awk '{print $5}')"
 
 # ── Android APK ────────────────────────────────────────────────────
+APK_SHA=""
 if ! $SKIP_APK; then
   if build_apk; then
     if [[ -f "$APK_OUTPUT" ]]; then
       cp "$APK_OUTPUT" "${RELEASE_DIR}/bin/agentapp.apk"
+      APK_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentapp.apk")"
       echo "[release] APK: $(ls -lh "${RELEASE_DIR}/bin/agentapp.apk" | awk '{print $5}')"
     else
       echo "[release] WARNING: APK not found"
@@ -108,10 +153,12 @@ else
 fi
 
 # ── iOS IPA ────────────────────────────────────────────────────────
+IPA_SHA=""
 if ! $SKIP_IOS && command -v xcodebuild &>/dev/null; then
   if build_ipa; then
     if [[ -f "$IPA_OUTPUT" ]]; then
       cp "$IPA_OUTPUT" "${RELEASE_DIR}/bin/agentapp.ipa"
+      IPA_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentapp.ipa")"
       echo "[release] IPA: $(ls -lh "${RELEASE_DIR}/bin/agentapp.ipa" | awk '{print $5}')"
     else
       echo "[release] WARNING: IPA not found"
@@ -202,6 +249,74 @@ EOF
 cat > "${RELEASE_DIR}/VERSION" <<EOF
 version: ${VERSION}
 build_date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+cat > "$MANIFEST_PATH" <<EOF
+{
+  "package": "phone-talk",
+  "version": "${VERSION}",
+  "buildDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "components": {
+    "agentgw": [
+      {
+        "os": "darwin",
+        "arch": "arm64",
+        "path": "bin/agentgw-macos-arm64",
+        "sha256": "${AGENTGW_MAC_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-macos-arm64")
+      },
+      {
+        "os": "linux",
+        "arch": "amd64",
+        "path": "bin/agentgw-linux",
+        "sha256": "${AGENTGW_LINUX_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-linux")
+      }
+    ],
+    "agentd": [
+      {
+        "os": "darwin",
+        "arch": "arm64",
+        "path": "bin/agentd",
+        "sha256": "${AGENTD_MAC_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentd")
+      },
+      {
+        "os": "linux",
+        "arch": "amd64",
+        "path": "bin/agentd-linux",
+        "sha256": "${AGENTD_LINUX_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentd-linux")
+      }
+    ],
+    "agentapp": {
+      "apk": $(if [[ -n "$APK_SHA" ]]; then cat <<JSON
+{
+        "path": "bin/agentapp.apk",
+        "sha256": "${APK_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.apk")
+      }
+JSON
+else
+cat <<JSON
+null
+JSON
+fi),
+      "ipa": $(if [[ -n "$IPA_SHA" ]]; then cat <<JSON
+{
+        "path": "bin/agentapp.ipa",
+        "sha256": "${IPA_SHA}",
+        "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.ipa")
+      }
+JSON
+else
+cat <<JSON
+null
+JSON
+fi)
+    }
+  }
+}
 EOF
 
 # ── Tarball ────────────────────────────────────────────────────────

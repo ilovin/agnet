@@ -1,9 +1,11 @@
 package ws_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"github.com/phone-talk/agentgw/internal/node"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 	"github.com/phone-talk/agentgw/internal/proxy"
+	"github.com/phone-talk/agentgw/internal/upgrade"
 	"github.com/phone-talk/agentgw/internal/ws"
 )
 
@@ -504,6 +507,197 @@ func TestGatewayRestartCallsRestartFunc(t *testing.T) {
 		// success
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected restart function to be called")
+	}
+}
+
+func TestPackageUpgradeCheckNotConfigured(t *testing.T) {
+	ts, _ := newTestServer(t)
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(t, conn, "package.upgrade.check", nil)
+	if resp["error"] == nil {
+		t.Fatal("expected package.upgrade.check to fail when service is not configured")
+	}
+}
+
+func TestPackageUpgradeCheckConfigured(t *testing.T) {
+	manifestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"package":   "phone-talk",
+			"version":   "v0.2.0",
+			"buildDate": "2026-04-24T00:00:00Z",
+			"components": map[string]any{
+				"agentgw": []map[string]any{{
+					"os":     "darwin",
+					"arch":   "arm64",
+					"path":   "agentgw-darwin-arm64",
+					"sha256": "abc",
+					"size":   1,
+				}},
+				"agentd": []map[string]any{{
+					"os":     "linux",
+					"arch":   "amd64",
+					"path":   "agentd-linux-amd64",
+					"sha256": "def",
+					"size":   1,
+				}},
+				"agentapp": map[string]any{
+					"apk": map[string]any{
+						"os":     "android",
+						"arch":   "arm64",
+						"path":   "agentapp.apk",
+						"sha256": "ghi",
+						"size":   1,
+					},
+					"ipa": nil,
+				},
+			},
+		})
+	}))
+	defer manifestServer.Close()
+
+	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.json"))
+	mgr := node.NewManager(store, nil)
+	srv := ws.New(mgr, "testtoken")
+	srv.SetUpgradeService(&upgrade.Service{
+		ManifestURL: manifestServer.URL + "/manifest.json",
+		NowVersion: func() string {
+			return "v0.1.0"
+		},
+	})
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(t, conn, "package.upgrade.check", nil)
+	if resp["error"] != nil {
+		t.Fatalf("package.upgrade.check error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp["result"])
+	}
+	if result["currentVersion"] != "v0.1.0" {
+		t.Fatalf("expected currentVersion v0.1.0, got %v", result["currentVersion"])
+	}
+	if result["targetVersion"] != "v0.2.0" {
+		t.Fatalf("expected targetVersion v0.2.0, got %v", result["targetVersion"])
+	}
+	if result["hasUpdate"] != true {
+		t.Fatalf("expected hasUpdate true, got %v", result["hasUpdate"])
+	}
+	if result["includesApp"] != true {
+		t.Fatalf("expected includesApp true, got %v", result["includesApp"])
+	}
+}
+
+func TestPackageUpgradeApplyCallsRestartAfterResponse(t *testing.T) {
+	manifestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"package":   "phone-talk",
+				"version":   "v0.2.0",
+				"buildDate": "2026-04-24T00:00:00Z",
+				"components": map[string]any{
+					"agentgw": []map[string]any{{
+						"os":     "darwin",
+						"arch":   "arm64",
+						"path":   "agentgw-darwin-arm64",
+						"sha256": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+						"size":   1,
+					}},
+					"agentd": []map[string]any{{
+						"os":     "linux",
+						"arch":   "amd64",
+						"path":   "agentd-linux-amd64",
+						"sha256": "df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
+						"size":   1,
+					}},
+					"agentapp": map[string]any{"apk": nil, "ipa": nil},
+				},
+			})
+		case "/agentgw-darwin-arm64":
+			_, _ = w.Write([]byte("A"))
+		case "/agentd-linux-amd64":
+			_, _ = w.Write([]byte("B"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer manifestServer.Close()
+
+	execPath := filepath.Join(t.TempDir(), "agentgw-bin")
+	if err := os.WriteFile(execPath, []byte("OLD"), 0o755); err != nil {
+		t.Fatalf("write fake executable: %v", err)
+	}
+
+	store := nodecfg.New(filepath.Join(t.TempDir(), "nodes.json"))
+	mgr := node.NewManager(store, []byte("orig"))
+	srv := ws.New(mgr, "testtoken")
+	restarted := make(chan struct{}, 1)
+	srv.SetGatewayRestartFunc(func() error {
+		restarted <- struct{}{}
+		return nil
+	})
+	srv.SetUpgradeService(&upgrade.Service{
+		ManifestURL: manifestServer.URL + "/manifest.json",
+		Manager:     mgr,
+		RestartFn: func() error {
+			restarted <- struct{}{}
+			return nil
+		},
+		NowVersion: func() string {
+			return "v0.1.0"
+		},
+		Executable: func() (string, error) {
+			return execPath, nil
+		},
+	})
+
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(t, conn, "package.upgrade.apply", nil)
+	if resp["error"] != nil {
+		t.Fatalf("package.upgrade.apply error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result map, got %T", resp["result"])
+	}
+	if result["targetVersion"] != "v0.2.0" {
+		t.Fatalf("expected targetVersion v0.2.0, got %v", result["targetVersion"])
+	}
+	if result["skippedApk"] != true {
+		t.Fatalf("expected skippedApk true, got %v", result["skippedApk"])
+	}
+	if result["upgradedGateway"] != true {
+		t.Fatalf("expected upgradedGateway true, got %v", result["upgradedGateway"])
+	}
+
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected restart to be called")
+	}
+
+	newBin, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatalf("read upgraded executable: %v", err)
+	}
+	if string(newBin) != "A" {
+		t.Fatalf("expected upgraded executable content A, got %q", string(newBin))
+	}
+
+	backupBin, err := os.ReadFile(execPath + ".bak")
+	if err != nil {
+		t.Fatalf("read backup executable: %v", err)
+	}
+	if string(backupBin) != "OLD" {
+		t.Fatalf("expected backup executable content OLD, got %q", string(backupBin))
 	}
 }
 

@@ -83,6 +83,10 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return dispatchResult{resp: h.systemHealth(req)}
 	case "gateway.restart":
 		return h.gatewayRestart(req)
+	case "package.upgrade.check":
+		return dispatchResult{resp: h.packageUpgradeCheck(req)}
+	case "package.upgrade.apply":
+		return h.packageUpgradeApply(req)
 	case "rpc.ping":
 		return dispatchResult{resp: okResp(req.ID, map[string]any{"ok": true, "time": time.Now().Unix()})}
 	default:
@@ -624,6 +628,52 @@ func (h *handler) gatewayRestart(req RPCRequest) dispatchResult {
 	}
 	return dispatchResult{
 		resp:     okResp(req.ID, map[string]any{"ok": true, "message": "restarting gateway"}),
+		postSend: postSend,
+	}
+}
+
+func (h *handler) packageUpgradeCheck(req RPCRequest) RPCResponse {
+	h.server.mu.RLock()
+	svc := h.server.upgradeSvc
+	h.server.mu.RUnlock()
+	if svc == nil {
+		return errResp(req.ID, -32000, "package upgrade not configured")
+	}
+	result, err := svc.Check()
+	if err != nil {
+		return errResp(req.ID, -32000, err.Error())
+	}
+	return okResp(req.ID, result)
+}
+
+func (h *handler) packageUpgradeApply(req RPCRequest) dispatchResult {
+	h.server.mu.RLock()
+	svc := h.server.upgradeSvc
+	h.server.mu.RUnlock()
+	if svc == nil {
+		return dispatchResult{resp: errResp(req.ID, -32000, "package upgrade not configured")}
+	}
+	result, err := svc.ApplyWithoutRestart()
+	if err != nil {
+		return dispatchResult{resp: errResp(req.ID, -32000, err.Error())}
+	}
+
+	h.server.mu.RLock()
+	restartFn := h.server.restartFn
+	h.server.mu.RUnlock()
+	if restartFn == nil {
+		return dispatchResult{resp: errResp(req.ID, -32000, "gateway restart not configured")}
+	}
+
+	postSend := func() {
+		time.Sleep(500 * time.Millisecond)
+		if err := restartFn(); err != nil {
+			log.Printf("gateway restart failed: %v", err)
+		}
+	}
+
+	return dispatchResult{
+		resp:     okResp(req.ID, result),
 		postSend: postSend,
 	}
 }

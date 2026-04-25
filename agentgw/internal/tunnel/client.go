@@ -35,6 +35,25 @@ type Client struct {
 	wg         sync.WaitGroup
 	reality    *RealityConfig
 	httpClient *http.Client
+
+	statusMu              sync.RWMutex
+	connected             bool
+	connectedAt           time.Time
+	lastHandshakeDuration time.Duration
+	lastHandshakeAt       time.Time
+	lastCommunicationAt   time.Time
+	lastDisconnectedAt    time.Time
+	lastError             string
+}
+
+type StatusSnapshot struct {
+	Connected             bool
+	ConnectedAt           time.Time
+	LastHandshakeDuration time.Duration
+	LastHandshakeAt       time.Time
+	LastCommunicationAt   time.Time
+	LastDisconnectedAt    time.Time
+	LastError             string
 }
 
 func NewClient(hubURL, token, localAddr, localToken string) *Client {
@@ -105,7 +124,49 @@ func (c *Client) Stop() {
 	c.wg.Wait()
 }
 
+func (c *Client) Status() StatusSnapshot {
+	c.statusMu.RLock()
+	defer c.statusMu.RUnlock()
+	return StatusSnapshot{
+		Connected:             c.connected,
+		ConnectedAt:           c.connectedAt,
+		LastHandshakeDuration: c.lastHandshakeDuration,
+		LastHandshakeAt:       c.lastHandshakeAt,
+		LastCommunicationAt:   c.lastCommunicationAt,
+		LastDisconnectedAt:    c.lastDisconnectedAt,
+		LastError:             c.lastError,
+	}
+}
+
+func (c *Client) updateStatusConnected(handshakeDuration time.Duration) {
+	now := time.Now()
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	c.connected = true
+	c.connectedAt = now
+	c.lastHandshakeDuration = handshakeDuration
+	c.lastHandshakeAt = now
+	c.lastError = ""
+}
+
+func (c *Client) updateLastCommunication() {
+	c.statusMu.Lock()
+	c.lastCommunicationAt = time.Now()
+	c.statusMu.Unlock()
+}
+
+func (c *Client) updateStatusDisconnected(err error) {
+	c.statusMu.Lock()
+	defer c.statusMu.Unlock()
+	c.connected = false
+	c.lastDisconnectedAt = time.Now()
+	if err != nil {
+		c.lastError = err.Error()
+	}
+}
+
 func (c *Client) runOnce() error {
+	start := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.cancel = cancel
@@ -145,6 +206,9 @@ func (c *Client) runOnce() error {
 		return fmt.Errorf("dial local: %w", err)
 	}
 
+	handshakeDuration := time.Since(start)
+	c.updateStatusConnected(handshakeDuration)
+	c.updateLastCommunication()
 	log.Printf("[Tunnel] bridged to local %s", c.localAddr)
 
 	errCh := make(chan error, 2)
@@ -168,6 +232,7 @@ func (c *Client) runOnce() error {
 				errCh <- fmt.Errorf("local write: %w", err)
 				return
 			}
+			c.updateLastCommunication()
 		}
 	}()
 
@@ -186,6 +251,7 @@ func (c *Client) runOnce() error {
 				errCh <- fmt.Errorf("hub write: %w", err)
 				return
 			}
+			c.updateLastCommunication()
 		}
 	}()
 
@@ -200,6 +266,11 @@ func (c *Client) runOnce() error {
 	resp.Body.Close()
 	pw.Close()
 	log.Printf("[Tunnel] disconnected from hub")
+	if err != nil {
+		c.updateStatusDisconnected(err)
+	} else {
+		c.updateStatusDisconnected(nil)
+	}
 	return err
 }
 

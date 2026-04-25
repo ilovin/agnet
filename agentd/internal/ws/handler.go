@@ -630,7 +630,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 
 	// For attached agents with a model change, update settings.json without
 	// restarting the process. Claude reads settings dynamically.
-	if ag.AttachMode() != "" && modelSpecified && !providerSpecified && permissionMode == "" {
+	if ag.Provider == "claude" && ag.AttachMode() != "" && modelSpecified && !providerSpecified && permissionMode == "" {
 		settingsPath := findClaudeSettings()
 		if settingsPath == "" {
 			return errResp(req.ID, -32000, "settings.json not found"), nil
@@ -666,7 +666,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 		return okResp(req.ID, map[string]any{"id": id}), nil
 	}
 
-	if ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
+	if ag.Provider != "opencode" && ag.AttachMode() != "" && ag.AttachMode() != "tmux" {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
 			reason = "attached session is read-only"

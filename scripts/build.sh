@@ -34,6 +34,7 @@ GW_LINUX_BIN="$OUT_DIR_LINUX/agentgw"
 APK_OUTPUT="$OUT_DIR_ANDROID/agentapp.apk"
 IPA_OUTPUT="$OUT_DIR_IOS/agentapp.ipa"
 WEB_STATIC_DIR="$OUT_DIR/static"
+BUILD_VERSION="${BUILD_VERSION:-}"
 
 mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
 
@@ -56,6 +57,11 @@ link_legacy() {
 binary_hash_file() {
     local output="$1"
     echo "${output}.buildhash"
+}
+
+version_hash_file() {
+    local output="$1"
+    echo "${output}.buildversion"
 }
 
 compute_source_hash() {
@@ -88,18 +94,30 @@ binary_up_to_date() {
     local output="$1"
     shift
     [[ -f "$output" ]] || return 1
-    local hash_file expected actual
+    local hash_file expected actual version_file recorded_version
     hash_file="$(binary_hash_file "$output")"
     [[ -f "$hash_file" ]] || return 1
     expected="$(<"$hash_file")"
     actual="$(compute_source_hash "$@" | shasum -a 256 | awk '{print $1}')"
-    [[ -n "$expected" && "$expected" == "$actual" ]]
+    [[ -n "$expected" && "$expected" == "$actual" ]] || return 1
+    if [[ -n "$BUILD_VERSION" ]]; then
+        version_file="$(version_hash_file "$output")"
+        [[ -f "$version_file" ]] || return 1
+        recorded_version="$(<"$version_file")"
+        [[ "$recorded_version" == "$BUILD_VERSION" ]] || return 1
+    fi
+    return 0
 }
 
 record_binary_hash() {
     local output="$1"
     shift
     compute_source_hash "$@" | shasum -a 256 | awk '{print $1}' > "$(binary_hash_file "$output")"
+    if [[ -n "$BUILD_VERSION" ]]; then
+        printf '%s' "$BUILD_VERSION" > "$(version_hash_file "$output")"
+    else
+        rm -f "$(version_hash_file "$output")"
+    fi
 }
 
 # Check if an output file is up-to-date versus its source files.
@@ -145,7 +163,11 @@ build_agentgw_mac() {
         return 0
     fi
     echo "[build] Building agentgw for macOS..."
-    (cd "$AGENTGW_DIR" && go build -o "../$GW_BIN" ./cmd/agentgw/)
+    if [[ -n "$BUILD_VERSION" ]]; then
+        (cd "$AGENTGW_DIR" && go build -ldflags "-X main.Version=$BUILD_VERSION" -o "../$GW_BIN" ./cmd/agentgw/)
+    else
+        (cd "$AGENTGW_DIR" && go build -o "../$GW_BIN" ./cmd/agentgw/)
+    fi
     record_binary_hash "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum
     link_legacy "$GW_BIN" "$AGENTGW_DIR/agentgw"
     echo "[build] agentgw (macOS): $(ls -lh "$GW_BIN" | awk '{print $5}')"
@@ -157,7 +179,11 @@ build_agentgw_linux() {
         return 0
     fi
     echo "[build] Building agentgw for Linux amd64..."
-    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
+    if [[ -n "$BUILD_VERSION" ]]; then
+        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$BUILD_VERSION" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
+    else
+        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
+    fi
     record_binary_hash "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum
     link_legacy "$GW_LINUX_BIN" "$AGENTGW_DIR/agentgw-linux"
     echo "[build] agentgw (Linux): $(ls -lh "$GW_LINUX_BIN" | awk '{print $5}')"

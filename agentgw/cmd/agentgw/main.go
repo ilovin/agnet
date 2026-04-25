@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/phone-talk/agentgw/internal/nodecfg"
 	"github.com/phone-talk/agentgw/internal/oauth"
 	"github.com/phone-talk/agentgw/internal/tunnel"
+	"github.com/phone-talk/agentgw/internal/upgrade"
 	"github.com/phone-talk/agentgw/internal/ws"
 	"github.com/skip2/go-qrcode"
 )
@@ -33,6 +35,39 @@ var activeTunnel *tunnel.Client
 var currentTunnelURL string
 var currentTunnelToken string
 var currentRealityCfg *tunnel.RealityConfig
+
+// Version is set at build time via -ldflags "-X main.Version=<version>".
+var Version = "v0.1.0"
+
+type tunnelStatusBody struct {
+	Connected               bool      `json:"connected"`
+	ConnectedAt             time.Time `json:"connectedAt"`
+	LastHandshakeDurationMs int64     `json:"lastHandshakeDurationMs"`
+	LastHandshakeAt         time.Time `json:"lastHandshakeAt"`
+	LastCommunicationAt     time.Time `json:"lastCommunicationAt"`
+	LastDisconnectedAt      time.Time `json:"lastDisconnectedAt"`
+	LastError               string    `json:"lastError"`
+}
+
+var configLoadPath string
+
+var statusHTTPGet = func(url, token string) ([]byte, int, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
 
 func restartTunnel(url, token, localAddr, localToken string) {
 	currentTunnelURL = url
@@ -71,7 +106,7 @@ func main() {
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
-		hubBase := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub base URL, e.g. wss://domain:8443 (env AGENTGW_HUB)")
+		hubBase := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub public base URL, e.g. https://domain (env AGENTGW_HUB)")
 		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		realityPub := fs.String("reality-pub", os.Getenv("AGENTGW_REALITY_PUB"), "REALITY public key base64 (env AGENTGW_REALITY_PUB)")
 		realitySID := fs.String("reality-sid", os.Getenv("AGENTGW_REALITY_SID"), "REALITY short ID hex (env AGENTGW_REALITY_SID)")
@@ -81,7 +116,7 @@ func main() {
 		var rcfg *tunnel.RealityConfig
 		if *realityPub != "" && *realitySNI != "" {
 			rcfg = &tunnel.RealityConfig{
-				PublicKey:   *realityPub,
+				PublicKey:  *realityPub,
 				ShortId:    *realitySID,
 				ServerName: *realitySNI,
 			}
@@ -132,7 +167,7 @@ func main() {
 	case "status":
 		showStatus()
 	case "version":
-		fmt.Println("agentgw v0.1.0")
+		fmt.Println("agentgw " + Version)
 	case "rotate-token":
 		var token string
 		if len(args) > 1 {
@@ -164,7 +199,7 @@ Commands:
   help          Show this help message
 
 Start flags:
-  --hub string           Tunnelhub base URL, auto-constructs tunnel-url from saved credentials (env AGENTGW_HUB)
+  --hub string           Tunnelhub public base URL, use fixed entry (recommend https://domain, env AGENTGW_HUB)
   --tunnel-url string    Full tunnel hub URL, overrides --hub (env AGENTGW_TUNNEL_URL)
   --tunnel-token string  Tunnel auth token, overrides saved credentials (env AGENTGW_TUNNEL_TOKEN)
   --app-url string       App-facing hub URL for QR code (env AGENTGW_APP_URL)
@@ -177,8 +212,8 @@ Login flags:
   --hub string           Tunnelhub base URL for registration (env AGENTGW_HUB)
 
 Quick start:
-  agentgw login --hub https://ilovin.xyz:8443
-  agentgw start --hub https://ilovin.xyz:8443 --qr
+  agentgw login --hub https://ilovin.xyz
+  agentgw start --hub https://ilovin.xyz --qr
 
 REALITY mode (anti-detection):
   agentgw start --hub https://domain:443 \
@@ -365,9 +400,23 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 		log.Fatalf("listen: %v", err)
 	}
 
-	srv.SetGatewayRestartFunc(func() error {
+	gatewayRestartFn := func() error {
 		return restartWithListener(ln)
-	})
+	}
+	srv.SetGatewayRestartFunc(gatewayRestartFn)
+
+	if cfg.Upgrade.ManifestURL != "" {
+		srv.SetUpgradeService(&upgrade.Service{
+			ManifestURL: cfg.Upgrade.ManifestURL,
+			Manager:     mgr,
+			RestartFn:   gatewayRestartFn,
+			NowVersion: func() string {
+				return Version
+			},
+			Executable: os.Executable,
+		})
+		log.Printf("package upgrade enabled with manifest: %s", cfg.Upgrade.ManifestURL)
+	}
 
 	mgr.OnEvent(func(nodeID string, ev map[string]any) {
 		method, _ := ev["method"].(string)
@@ -428,6 +477,15 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 		log.Printf("[agentgw] constructed tunnel URL from config: %s", tunnelURL)
 	}
 
+	if tunnelURL != "" {
+		if normalized, err := normalizePublicHubURL(tunnelURL); err == nil {
+			tunnelURL = normalized
+			log.Printf("[agentgw] normalized tunnel URL: %s", tunnelURL)
+		} else {
+			log.Printf("[agentgw] tunnel URL normalization skipped: %v", err)
+		}
+	}
+
 	// Auto-construct app URL from hub base if not given.
 	if appURLFlag == "" && hubBase != "" {
 		appURLFlag = strings.TrimRight(hubBase, "/")
@@ -436,6 +494,17 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	if appURLFlag == "" && cfg.Tunnel.AppURL != "" {
 		appURLFlag = strings.TrimRight(cfg.Tunnel.AppURL, "/")
 		log.Printf("[agentgw] constructed app URL from config: %s", appURLFlag)
+	}
+	if appURLFlag == "" {
+		appURLFlag = tunnelURL
+	}
+	if appURLFlag != "" {
+		if normalized, err := normalizePublicHubURL(appURLFlag); err == nil {
+			appURLFlag = normalized
+			log.Printf("[agentgw] normalized app URL: %s", appURLFlag)
+		} else {
+			log.Printf("[agentgw] app URL normalization skipped: %v", err)
+		}
 	}
 
 	localAddr := fmt.Sprintf("localhost:%d", cfg.Port)
@@ -494,9 +563,25 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 				"status":   string(n.GetStatus()),
 			})
 		}
+		tunnelStatus := map[string]any(nil)
+		if currentTunnelURL != "" {
+			tunnelStatus = map[string]any{"connected": false}
+			if activeTunnel != nil {
+				s := activeTunnel.Status()
+				tunnelStatus = map[string]any{
+					"connected":               s.Connected,
+					"connectedAt":             s.ConnectedAt,
+					"lastHandshakeDurationMs": s.LastHandshakeDuration.Milliseconds(),
+					"lastHandshakeAt":         s.LastHandshakeAt,
+					"lastCommunicationAt":     s.LastCommunicationAt,
+					"lastDisconnectedAt":      s.LastDisconnectedAt,
+					"lastError":               s.LastError,
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"version":       "v0.1.0",
+			"version":       Version,
 			"uptimeSeconds": int(srv.Uptime().Seconds()),
 			"port":          cfg.Port,
 			"clientCount":   srv.ClientCount(),
@@ -504,6 +589,7 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 			"statusCounts":  statusCounts,
 			"nodes":         nodeStats,
 			"tunnelUrl":     currentTunnelURL,
+			"tunnelStatus":  tunnelStatus,
 		})
 	})
 
@@ -710,6 +796,40 @@ func findStaticDir() string {
 	return ""
 }
 
+func normalizePublicHubURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty url")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse url: %w", err)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	if u.Scheme == "" {
+		u.Scheme = "https"
+	}
+	if u.Scheme == "ws" {
+		u.Scheme = "http"
+	}
+	if u.Scheme == "wss" {
+		u.Scheme = "https"
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("missing hostname")
+	}
+	u.User = nil
+	u.Host = host
+	u.Path = ""
+	u.RawPath = ""
+	u.RawQuery = ""
+	u.Fragment = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
 func buildRemoteQRURL(tunnelURL, appURL, userID string) string {
 	if tunnelURL == "" {
 		return ""
@@ -847,54 +967,52 @@ func getLocalIP() string {
 }
 
 func showStatus() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("get home dir: %v", err)
+	cfgPath := configLoadPath
+	if cfgPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Fatalf("get home dir: %v", err)
+		}
+		cfgPath = home + "/.agentgw/config.json"
 	}
-	cfgPath := home + "/.agentgw/config.json"
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 
 	url := fmt.Sprintf("http://localhost:%d/status", cfg.Port)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		log.Fatalf("build request: %v", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	resp, err := http.DefaultClient.Do(req)
+	bodyBytes, statusCode, err := statusHTTPGet(url, cfg.Token)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agentgw is not running (could not connect to port %d)\n", cfg.Port)
 		os.Exit(1)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
+	if statusCode == http.StatusUnauthorized {
 		fmt.Fprintln(os.Stderr, "unauthorized: token mismatch")
 		os.Exit(1)
 	}
-	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "agentgw returned status %d\n", resp.StatusCode)
+	if statusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "agentgw returned status %d\n", statusCode)
 		os.Exit(1)
 	}
 
 	var body struct {
-		Version      string `json:"version"`
-		UptimeSeconds int    `json:"uptimeSeconds"`
-		Port         int    `json:"port"`
-		ClientCount  int    `json:"clientCount"`
-		NodeCount    int    `json:"nodeCount"`
-		StatusCounts map[string]int `json:"statusCounts"`
-		Nodes        []struct {
+		Version       string         `json:"version"`
+		UptimeSeconds int            `json:"uptimeSeconds"`
+		Port          int            `json:"port"`
+		ClientCount   int            `json:"clientCount"`
+		NodeCount     int            `json:"nodeCount"`
+		StatusCounts  map[string]int `json:"statusCounts"`
+		Nodes         []struct {
 			ID       string `json:"id"`
 			Name     string `json:"name"`
 			Host     string `json:"host"`
 			Location string `json:"location"`
 			Status   string `json:"status"`
 		} `json:"nodes"`
-		TunnelURL string `json:"tunnelUrl"`
+		TunnelURL    string            `json:"tunnelUrl"`
+		TunnelStatus *tunnelStatusBody `json:"tunnelStatus"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		log.Fatalf("decode response: %v", err)
 	}
 
@@ -915,6 +1033,28 @@ func showStatus() {
 	}
 	if body.TunnelURL != "" {
 		fmt.Printf("tunnel:   %s\n", body.TunnelURL)
+		if body.TunnelStatus != nil {
+			state := "disconnected"
+			if body.TunnelStatus.Connected {
+				state = "connected"
+			}
+			fmt.Printf("state:    %s\n", state)
+			if body.TunnelStatus.LastHandshakeDurationMs > 0 {
+				fmt.Printf("handshake:%dms\n", body.TunnelStatus.LastHandshakeDurationMs)
+			}
+			if !body.TunnelStatus.LastCommunicationAt.IsZero() {
+				fmt.Printf("last comm:%s\n", body.TunnelStatus.LastCommunicationAt.Format(time.RFC3339))
+			}
+			if !body.TunnelStatus.ConnectedAt.IsZero() {
+				fmt.Printf("connected:%s\n", body.TunnelStatus.ConnectedAt.Format(time.RFC3339))
+			}
+			if !body.TunnelStatus.LastDisconnectedAt.IsZero() {
+				fmt.Printf("last disc:%s\n", body.TunnelStatus.LastDisconnectedAt.Format(time.RFC3339))
+			}
+			if body.TunnelStatus.LastError != "" {
+				fmt.Printf("last err: %s\n", body.TunnelStatus.LastError)
+			}
+		}
 	}
 	if len(body.Nodes) > 0 {
 		fmt.Println()
@@ -937,5 +1077,3 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%ds", s)
 }
-
-

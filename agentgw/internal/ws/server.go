@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentgw/internal/node"
+	"github.com/phone-talk/agentgw/internal/upgrade"
 )
 
 const (
@@ -45,6 +46,7 @@ type Server struct {
 	clients    map[*websocket.Conn]*client
 	startTime  time.Time
 	restartFn  func() error
+	upgradeSvc *upgrade.Service
 }
 
 func New(mgr *node.Manager, token string) *Server {
@@ -61,6 +63,13 @@ func (s *Server) SetGatewayRestartFunc(fn func() error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.restartFn = fn
+}
+
+// SetUpgradeService sets the service used by package.upgrade RPC methods.
+func (s *Server) SetUpgradeService(svc *upgrade.Service) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upgradeSvc = svc
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

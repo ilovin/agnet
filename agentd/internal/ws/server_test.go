@@ -1010,6 +1010,194 @@ func TestConversationSendRejectsWatcherAttach(t *testing.T) {
 	}
 }
 
+func TestAgentRestartAttachedModelUpdateWritesSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	data, err := json.Marshal(map[string]any{
+		"model": "claude-old",
+		"env": map[string]any{"ANTHROPIC_MODEL": "claude-old"},
+	})
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         123,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.restart", map[string]any{
+		"agentId": ag.ID,
+		"model":   "claude-sonnet-4-6",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("agent.restart error: %v", resp["error"])
+	}
+
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(updated, &settings); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	if got, _ := settings["model"].(string); got != "claude-sonnet-4-6" {
+		t.Fatalf("settings.model = %q, want claude-sonnet-4-6", got)
+	}
+	envMap, _ := settings["env"].(map[string]any)
+	if got, _ := envMap["ANTHROPIC_MODEL"].(string); got != "claude-sonnet-4-6" {
+		t.Fatalf("settings.env.ANTHROPIC_MODEL = %q, want claude-sonnet-4-6", got)
+	}
+}
+
+func TestAgentRestartAttachedOpenCodeUsesRestartInPlace(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached-opencode.json")
+	if err := os.WriteFile(sessionFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         234,
+		Provider:    "opencode",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+		SessionID:   "ses_attached",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.restart", map[string]any{
+		"agentId": ag.ID,
+		"model":   "tb-api/claude-sonnet-4-6",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("agent.restart error: %v", resp["error"])
+	}
+
+	restarted := mgr.Get(ag.ID)
+	if restarted == nil {
+		t.Fatal("agent missing after restart")
+	}
+	if restarted.Provider != "opencode" {
+		t.Fatalf("provider = %q, want opencode", restarted.Provider)
+	}
+	if filepath.Base(restarted.Cmd) != "opencode" {
+		t.Fatalf("cmd = %q, want basename opencode", restarted.Cmd)
+	}
+	if len(restarted.Args) < 4 {
+		t.Fatalf("args too short: %v", restarted.Args)
+	}
+	if restarted.Args[0] != "-s" {
+		t.Fatalf("args[0] = %q, want -s (all=%v)", restarted.Args[0], restarted.Args)
+	}
+	if restarted.Args[1] == "" {
+		t.Fatalf("args[1] should be non-empty session id (all=%v)", restarted.Args)
+	}
+	if restarted.Args[2] != "-m" {
+		t.Fatalf("args[2] = %q, want -m (all=%v)", restarted.Args[2], restarted.Args)
+	}
+	if restarted.Args[3] != "tb-api/claude-sonnet-4-6" {
+		t.Fatalf("args[3] = %q, want tb-api/claude-sonnet-4-6 (all=%v)", restarted.Args[3], restarted.Args)
+	}
+}
+
+func TestAgentRestartAttachedOpenCodeWatcherModeAllowsModelSwitch(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+	sessionFile := filepath.Join(t.TempDir(), "attached-opencode.json")
+	if err := os.WriteFile(sessionFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:         345,
+		Provider:    "opencode",
+		WorkDir:     t.TempDir(),
+		SessionFile: sessionFile,
+		SessionID:   "ses_attached",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	ag.SetAttachInputRoute("watcher", true, "watch-only attach", "")
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.restart", map[string]any{
+		"agentId": ag.ID,
+		"model":   "tb-api/claude-sonnet-4-6",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("agent.restart error: %v", resp["error"])
+	}
+
+	restarted := mgr.Get(ag.ID)
+	if restarted == nil {
+		t.Fatal("agent missing after restart")
+	}
+	if restarted.Provider != "opencode" {
+		t.Fatalf("provider = %q, want opencode", restarted.Provider)
+	}
+	if len(restarted.Args) < 4 {
+		t.Fatalf("args too short: %v", restarted.Args)
+	}
+	if restarted.Args[0] != "-s" || restarted.Args[2] != "-m" || restarted.Args[3] != "tb-api/claude-sonnet-4-6" {
+		t.Fatalf("unexpected args: %v", restarted.Args)
+	}
+}
+
 func TestAgentRestartRejectsWatcherAttach(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

@@ -36,7 +36,7 @@ RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
 GW_PORT=7374
-DEFAULT_HUB_URL="https://ilovin.xyz:8443"
+DEFAULT_HUB_URL="https://ilovin.xyz"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
@@ -65,7 +65,7 @@ COMMANDS:
 
 OPTIONS (for install):
   --token TOKEN      Pre-set authentication token
-  --hub URL          Tunnelhub base URL (e.g. https://ilovin.xyz:8443)
+  --hub URL          Tunnelhub base URL (e.g. https://ilovin.xyz)
   --tunnel-url URL   Full tunnel URL (overrides --hub)
   --app-url URL      App-facing remote URL for QR/websocket
   --local-only       Only setup local agentgw, skip remote deployment
@@ -73,7 +73,7 @@ OPTIONS (for install):
   -h, --help         Show this help message and exit
 
 ENVIRONMENT:
-  AGENTGW_HUB              Tunnelhub base URL (default: https://ilovin.xyz:8443)
+  AGENTGW_HUB              Tunnelhub base URL (default: https://ilovin.xyz)
   AGENTGW_TUNNEL_URL       Full tunnel URL (overrides AGENTGW_HUB)
   AGENTGW_APP_URL          App-facing remote URL
   AGENTGW_REALITY_PUB      REALITY public key (base64)
@@ -411,6 +411,15 @@ show_status() {
   echo "  agentd:  tail -f /tmp/agentd-local.log"
   echo "  agentgw: tail -f /tmp/agentgw.log"
   echo ""
+  if [[ -n "$apid" ]]; then
+    local local_bin
+    local_bin="$(detect_local_agentd 2>/dev/null || true)"
+    if [[ -n "$local_bin" && -x "$local_bin" ]]; then
+      echo -e "${CYAN}agentd 详情:${NC}"
+      "$local_bin" status 2>/dev/null || true
+      echo ""
+    fi
+  fi
   if [[ -n "$gwpid" && -x "$INSTALL_DIR/agentgw" ]]; then
     echo -e "${CYAN}agentgw 详情:${NC}"
     "$INSTALL_DIR/agentgw" status 2>/dev/null || true
@@ -825,13 +834,6 @@ if [[ -n "$HUB_URL" ]]; then
 
   if [[ -z "$APP_URL" && -n "$HUB_URL" ]]; then
     APP_URL="${HUB_URL%/}"
-    # App connects via standard TLS on 8443 (WebSocket).
-    # agentgw connects via REALITY on 443 (gRPC-Web).
-    if [[ "$APP_URL" == *":443" ]]; then
-      APP_URL="${APP_URL%:443}:8443"
-    elif [[ "$APP_URL" == https://* ]] && [[ "$APP_URL" != *:[0-9]* ]]; then
-      APP_URL="${APP_URL}:8443"
-    fi
   fi
   if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
     TOKEN="$REGISTERED_TOKEN"

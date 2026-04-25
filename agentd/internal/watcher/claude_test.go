@@ -3,6 +3,7 @@ package watcher
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -153,17 +154,71 @@ func collectStatuses(ch <-chan AgentStatus, count int, timeout time.Duration) []
 	}
 }
 
-func TestClaudeWatcherStopIdempotent(t *testing.T) {
-	dir := t.TempDir()
-	sessionFile := filepath.Join(dir, "test.jsonl")
-	os.WriteFile(sessionFile, []byte{}, 0644)
+func TestParseLineLocalCommandStdout(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"local_command","content":"<local-command-stdout>Status dialog dismissed</local-command-stdout>"}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected local_command stdout line to be parsed")
+	}
+	if ev.Role != "assistant" {
+		t.Fatalf("expected role assistant, got %q", ev.Role)
+	}
+	if ev.Text != "Status dialog dismissed" {
+		t.Fatalf("expected parsed stdout text, got %q", ev.Text)
+	}
+	if ev.StatusChange == nil || *ev.StatusChange != StatusStandby {
+		t.Fatalf("expected standby status change, got %#v", ev.StatusChange)
+	}
+}
 
-	w := NewClaudeWatcher(sessionFile, func(e ConversationEvent) {})
-	w.Start()
+func TestParseLineLocalCommandEmptyStdoutFallback(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"local_command","content":"<local-command-stdout></local-command-stdout>"}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected local_command empty stdout line to be parsed")
+	}
+	if ev.Text != "Local command completed" {
+		t.Fatalf("expected fallback text, got %q", ev.Text)
+	}
+	if ev.StatusChange == nil || *ev.StatusChange != StatusStandby {
+		t.Fatalf("expected standby status change, got %#v", ev.StatusChange)
+	}
+}
 
-	// Calling Stop twice must not panic
-	w.Stop()
-	w.Stop() // should be a no-op, not a panic
+func TestParseLineLocalCommandStderr(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"local_command","content":"<local-command-stderr>Error: failed</local-command-stderr>"}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected local_command stderr line to be parsed")
+	}
+	if ev.Role != "assistant" {
+		t.Fatalf("expected role assistant, got %q", ev.Role)
+	}
+	if ev.Text != "Error: failed" {
+		t.Fatalf("expected parsed stderr text, got %q", ev.Text)
+	}
+	if ev.StatusChange == nil || *ev.StatusChange != StatusStandby {
+		t.Fatalf("expected standby status change, got %#v", ev.StatusChange)
+	}
+}
+
+func TestParseLineLocalCommandMetaIgnored(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"local_command","content":"<command-name>/status</command-name><command-message>status</command-message>"}`)
+	_, ok := parseLine(line)
+	if ok {
+		t.Fatal("expected command metadata-only local_command line to be ignored")
+	}
+}
+
+func TestParseLineLocalCommandMultilineStdout(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"local_command","content":"<local-command-stdout>line1\nline2</local-command-stdout>"}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected multiline stdout line to be parsed")
+	}
+	if !strings.Contains(ev.Text, "line1") || !strings.Contains(ev.Text, "line2") {
+		t.Fatalf("expected multiline text preserved, got %q", ev.Text)
+	}
 }
 
 func TestClaudeWatcherRefreshPrefersCurrentTaskSession(t *testing.T) {
@@ -271,7 +326,76 @@ func TestClaudeWatcherRefreshNoCrossTalk(t *testing.T) {
 	}
 }
 
-func TestClaudeWatcherRefreshPrefersMostActiveOpenTask(t *testing.T) {
+func TestContentMatchFromCandidatesRequiresConfidence(t *testing.T) {
+	origCapture := capturePaneContentFunc
+	origExtract := extractFingerprintsFunc
+	t.Cleanup(func() {
+		capturePaneContentFunc = origCapture
+		extractFingerprintsFunc = origExtract
+	})
+
+	capturePaneContentFunc = func(string) (string, error) {
+		return "This pane shows alpha beta gamma and some extra text", nil
+	}
+	extractFingerprintsFunc = func(path string, _ int) []string {
+		switch path {
+		case "/tmp/a.jsonl":
+			return []string{"alpha", "beta", "gamma"}
+		case "/tmp/b.jsonl":
+			return []string{"alpha", "beta"}
+		default:
+			return nil
+		}
+	}
+
+	matched := contentMatchFromCandidates("0:1.2", []sessionCandidate{
+		{jsonlPath: "/tmp/a.jsonl"},
+		{jsonlPath: "/tmp/b.jsonl"},
+	}, 5)
+	if matched != "" {
+		t.Fatalf("expected ambiguous match to be rejected, got %s", matched)
+	}
+}
+
+func TestContentMatchFromCandidatesAcceptsStrongWinner(t *testing.T) {
+	origCapture := capturePaneContentFunc
+	origExtract := extractFingerprintsFunc
+	t.Cleanup(func() {
+		capturePaneContentFunc = origCapture
+		extractFingerprintsFunc = origExtract
+	})
+
+	capturePaneContentFunc = func(string) (string, error) {
+		return "pane text includes alpha beta gamma delta", nil
+	}
+	extractFingerprintsFunc = func(path string, _ int) []string {
+		switch path {
+		case "/tmp/a.jsonl":
+			return []string{"alpha", "beta", "gamma", "delta"}
+		case "/tmp/b.jsonl":
+			return []string{"alpha", "beta"}
+		default:
+			return nil
+		}
+	}
+
+	matched := contentMatchFromCandidates("0:1.2", []sessionCandidate{
+		{jsonlPath: "/tmp/a.jsonl"},
+		{jsonlPath: "/tmp/b.jsonl"},
+	}, 5)
+	if matched != "/tmp/a.jsonl" {
+		t.Fatalf("expected strong winner /tmp/a.jsonl, got %s", matched)
+	}
+}
+
+func TestClaudeWatcherRefreshKeepsCurrentOnAmbiguousContentMatch(t *testing.T) {
+	origCapture := capturePaneContentFunc
+	origExtract := extractFingerprintsFunc
+	t.Cleanup(func() {
+		capturePaneContentFunc = origCapture
+		extractFingerprintsFunc = origExtract
+	})
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -283,70 +407,43 @@ func TestClaudeWatcherRefreshPrefersMostActiveOpenTask(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
-	tasksDir := filepath.Join(home, ".claude", "tasks")
-	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
-		t.Fatalf("mkdir tasks dir: %v", err)
-	}
 
-	sessions := []string{"sess-old", "sess-mid", "sess-live"}
+	sessA := filepath.Join(projectDir, "sess-a.jsonl")
+	sessB := filepath.Join(projectDir, "sess-b.jsonl")
+	if err := os.WriteFile(sessA, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write sessA: %v", err)
+	}
+	if err := os.WriteFile(sessB, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write sessB: %v", err)
+	}
 	baseTime := time.Now()
-	var openDirs []*os.File
-	for i, sid := range sessions {
-		sessionFile := filepath.Join(projectDir, sid+".jsonl")
-		if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
-			t.Fatalf("write session file: %v", err)
-		}
-		if err := os.Chtimes(sessionFile, baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
-			t.Fatalf("chtimes session file: %v", err)
-		}
-
-		taskDir := filepath.Join(tasksDir, sid)
-		if err := os.MkdirAll(taskDir, 0o755); err != nil {
-			t.Fatalf("mkdir task dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
-			t.Fatalf("write highwatermark: %v", err)
-		}
-		if err := os.Chtimes(filepath.Join(taskDir, ".highwatermark"), baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
-			t.Fatalf("chtimes highwatermark: %v", err)
-		}
-		if sid == "sess-live" {
-			liveTask := filepath.Join(taskDir, "26.json")
-			if err := os.WriteFile(liveTask, []byte(`{"id":26}`), 0o644); err != nil {
-				t.Fatalf("write live task json: %v", err)
-			}
-			if err := os.Chtimes(liveTask, baseTime.Add(10*time.Second), baseTime.Add(10*time.Second)); err != nil {
-				t.Fatalf("chtimes live task json: %v", err)
-			}
-		}
-		dirHandle, err := os.Open(taskDir)
-		if err != nil {
-			t.Fatalf("open task dir: %v", err)
-		}
-		openDirs = append(openDirs, dirHandle)
+	if err := os.Chtimes(sessA, baseTime, baseTime); err != nil {
+		t.Fatalf("chtimes sessA: %v", err)
 	}
-	defer func() {
-		for _, dirHandle := range openDirs {
-			dirHandle.Close()
-		}
-	}()
+	if err := os.Chtimes(sessB, baseTime.Add(time.Second), baseTime.Add(time.Second)); err != nil {
+		t.Fatalf("chtimes sessB: %v", err)
+	}
 
-	w := NewClaudeWatcher(filepath.Join(projectDir, "sess-old.jsonl"), func(ConversationEvent) {})
+	capturePaneContentFunc = func(string) (string, error) {
+		return "pane has alpha and beta", nil
+	}
+	extractFingerprintsFunc = func(path string, _ int) []string {
+		switch path {
+		case sessA:
+			return []string{"alpha", "beta", "gamma"}
+		case sessB:
+			return []string{"alpha", "beta"}
+		default:
+			return nil
+		}
+	}
+
+	w := NewClaudeWatcher(sessA, func(ConversationEvent) {})
 	w.SetWorkDir(workDir)
-	w.SetPID(os.Getpid())
-	if sessionID := taskSessionID(tasksDir, filepath.Join("/private", tasksDir, "sess-live", "26.json")); sessionID != "sess-live" {
-		t.Fatalf("expected taskSessionID to normalize /private path, got %q", sessionID)
-	}
+	w.SetTmuxTarget("0:1.2")
+	w.refreshSessionFile()
 
-	sessionIDs := w.findSessionIDsFromTasks(tasksDir)
-	found := false
-	for _, sid := range sessionIDs {
-		if sid == "sess-live" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected findSessionIDsFromTasks to include sess-live, got %v", sessionIDs)
+	if w.path != sessA {
+		t.Fatalf("expected watcher to keep current session on ambiguous match, got %s", w.path)
 	}
 }

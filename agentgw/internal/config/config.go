@@ -19,12 +19,17 @@ type TunnelConfig struct {
 	RealitySNI string `json:"reality_sni"`
 }
 
+type UpgradeConfig struct {
+	ManifestURL string `json:"manifest_url"`
+}
+
 type Config struct {
 	Port      int                 `json:"port"`
 	Token     string              `json:"token"` // local agentgw /ws auth token
 	NodesFile string              `json:"nodes_file"`
 	SSHKey    string              `json:"ssh_key"` // path to default SSH private key
 	Tunnel    TunnelConfig        `json:"tunnel"`
+	Upgrade   UpgradeConfig       `json:"upgrade"`
 	Nodes     []nodecfg.NodeEntry `json:"nodes"`
 }
 
