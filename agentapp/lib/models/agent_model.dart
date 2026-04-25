@@ -38,6 +38,8 @@ class AgentModel {
   final String? providerWriteMode;
   final String? providerReadOnlyReason;
   final String? permissionMode;
+  /// Unix milliseconds of the last conversation message, or null if unknown.
+  final int? lastMessageTime;
 
   const AgentModel({
     required this.id,
@@ -62,6 +64,7 @@ class AgentModel {
     this.providerWriteMode,
     this.providerReadOnlyReason,
     this.permissionMode,
+    this.lastMessageTime,
   });
 
   factory AgentModel.fromJson(Map<String, dynamic> json) => AgentModel(
@@ -87,6 +90,7 @@ class AgentModel {
     providerWriteMode: json['providerWriteMode'] as String?,
     providerReadOnlyReason: json['providerReadOnlyReason'] as String?,
     permissionMode: json['permissionMode'] as String?,
+    lastMessageTime: (json['lastMessageTime'] as num?)?.toInt(),
   );
 
   AgentModel copyWith({
@@ -112,6 +116,7 @@ class AgentModel {
     String? providerWriteMode,
     String? providerReadOnlyReason,
     String? permissionMode,
+    int? lastMessageTime,
   }) => AgentModel(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -136,5 +141,6 @@ class AgentModel {
     providerReadOnlyReason:
         providerReadOnlyReason ?? this.providerReadOnlyReason,
     permissionMode: permissionMode ?? this.permissionMode,
+    lastMessageTime: lastMessageTime ?? this.lastMessageTime,
   );
 }

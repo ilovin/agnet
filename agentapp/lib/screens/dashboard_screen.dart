@@ -2759,6 +2759,9 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final prefix = prefixParts.join('.');
     final statusText =
         _statusLabel + (agent.status == AgentStatus.crashed ? '.异常' : '');
+    final timeText = agent.lastMessageTime != null
+        ? _formatRelativeTime(agent.lastMessageTime!)
+        : null;
     return Text.rich(
       TextSpan(
         style: const TextStyle(fontSize: 12),
@@ -2774,6 +2777,13 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             text: statusText,
             style: TextStyle(fontWeight: FontWeight.w600, color: _statusColor),
           ),
+          if (timeText != null)
+            TextSpan(
+              text: '  $timeText',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
         ],
       ),
     );
@@ -3069,7 +3079,18 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       dense: true,
       contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
       leading: InkWell(
-        onTap: () => _showLogoPicker(sessionKey, sessionLogo),
+        onTap: () {
+          final t = agent.lastMessageTime;
+          if (t != null) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('最后消息：${_formatRelativeTime(t)}'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        },
+        onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
         borderRadius: BorderRadius.circular(20),
         child: Padding(
           padding: const EdgeInsets.all(4),
@@ -3159,6 +3180,21 @@ String _agentSubtitleText(AgentModel agent) {
 
 String _agentDisplayTitle(AgentModel agent) {
   return managedAgentTitle(agent);
+}
+
+/// Returns a human-readable relative time string for a Unix-ms timestamp.
+String _formatRelativeTime(int unixMs) {
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final diffMs = now - unixMs;
+  if (diffMs < 0) return '刚刚';
+  final diffSec = diffMs ~/ 1000;
+  if (diffSec < 60) return '${diffSec}秒前';
+  final diffMin = diffSec ~/ 60;
+  if (diffMin < 60) return '${diffMin}分钟前';
+  final diffHour = diffMin ~/ 60;
+  if (diffHour < 24) return '${diffHour}小时前';
+  final diffDay = diffHour ~/ 24;
+  return '${diffDay}天前';
 }
 
 String managedAgentTitle(AgentModel agent) {

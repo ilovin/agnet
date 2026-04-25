@@ -1551,6 +1551,10 @@ func (m *Manager) LastPersistedSeq(agentID string) (uint64, error) {
 	return m.store.LastConversationSeq(agentID)
 }
 
+func (m *Manager) LastConversationEventTime(agentID string) (time.Time, error) {
+	return m.store.LastConversationEventTime(agentID)
+}
+
 func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 	ag := m.Get(id)
 	if ag == nil {

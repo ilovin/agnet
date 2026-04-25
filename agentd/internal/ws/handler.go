@@ -161,6 +161,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		ProviderWriteMode      string `json:"providerWriteMode,omitempty"`
 		ProviderReadOnlyReason string `json:"providerReadOnlyReason,omitempty"`
 		PermissionMode         string `json:"permissionMode,omitempty"`
+		LastMessageTime        int64  `json:"lastMessageTime,omitempty"`
 	}
 	result := make([]agentInfo, 0, len(agents))
 	for _, ag := range agents {
@@ -172,6 +173,10 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
 		derived := h.server.manager.DeriveAgentState(ag.ID)
 		provider := h.deriveProviderSnapshot(ag)
+		var lastMsgTimeMs int64
+		if t, err := h.server.manager.LastConversationEventTime(ag.ID); err == nil && !t.IsZero() {
+			lastMsgTimeMs = t.UnixMilli()
+		}
 		result = append(result, agentInfo{
 			ID:                     ag.ID,
 			Name:                   ag.Name,
@@ -194,6 +199,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			ProviderWriteMode:      provider.ProviderWriteMode,
 			ProviderReadOnlyReason: provider.ProviderReadOnlyReason,
 			PermissionMode:         currentPermissionMode(ag.Args),
+			LastMessageTime:        lastMsgTimeMs,
 		})
 	}
 	return okResp(req.ID, result)
