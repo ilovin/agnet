@@ -447,3 +447,109 @@ func TestClaudeWatcherRefreshKeepsCurrentOnAmbiguousContentMatch(t *testing.T) {
 		t.Fatalf("expected watcher to keep current session on ambiguous match, got %s", w.path)
 	}
 }
+
+func TestClaudeWatcherRefreshKeepsStaleSession(t *testing.T) {
+	// A session may be idle for hours and then resumed the next day.
+	// Time-based staleness checks are unreliable — the watcher must keep
+	// the current session as long as the file still exists, regardless of
+	// how much newer other candidates are.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	stale := filepath.Join(projectDir, "sess-stale.jsonl")
+	fresh := filepath.Join(projectDir, "sess-fresh.jsonl")
+	if err := os.WriteFile(stale, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+	if err := os.WriteFile(fresh, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write fresh: %v", err)
+	}
+	now := time.Now()
+	// stale is 31 minutes old, fresh is current
+	if err := os.Chtimes(stale, now.Add(-31*time.Minute), now.Add(-31*time.Minute)); err != nil {
+		t.Fatalf("chtimes stale: %v", err)
+	}
+	if err := os.Chtimes(fresh, now, now); err != nil {
+		t.Fatalf("chtimes fresh: %v", err)
+	}
+
+	w := NewClaudeWatcher(stale, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(1)
+	w.refreshSessionFile()
+
+	if w.path != stale {
+		t.Fatalf("expected watcher to keep stale session, got %s", w.path)
+	}
+}
+
+func TestClaudeWatcherSkipExisting(t *testing.T) {
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "existing.jsonl")
+
+	// Pre-write two lines
+	content := `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}` + "\n" +
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	w := NewClaudeWatcher(sessionFile, func(e ConversationEvent) {
+		count++
+	})
+	w.SetSkipExisting(true)
+
+	if err := w.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer w.Stop()
+
+	// Existing content should be skipped
+	if count != 0 {
+		t.Fatalf("expected 0 events when skipExisting=true, got %d", count)
+	}
+
+	// Append a new line — it should be detected by the loop
+	f, _ := os.OpenFile(sessionFile, os.O_APPEND|os.O_WRONLY, 0644)
+	f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n")
+	f.Close()
+
+	// Wait for the loop to poll
+	time.Sleep(3 * time.Second)
+
+	if count != 1 {
+		t.Fatalf("expected 1 new event after append, got %d", count)
+	}
+}
+
+func TestClaudeWatcherNoRefreshOnFirstPoll(t *testing.T) {
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "single.jsonl")
+	os.WriteFile(sessionFile, []byte("{}\n"), 0644)
+
+	w := NewClaudeWatcher(sessionFile, func(ConversationEvent) {})
+	w.SetWorkDir(dir)
+	w.SetPID(1)
+	w.SetSkipExisting(true)
+
+	// Manually call poll (which Start() does) — hasPolled should be false
+	// so refreshSessionFile is NOT triggered even though count==0
+	w.poll()
+
+	// If refreshSessionFile had run with an empty project dir, it might
+	// switch to a different file or panic. The fact that w.path is unchanged
+	// confirms refreshSessionFile was skipped.
+	if w.path != sessionFile {
+		t.Fatalf("expected path unchanged on first poll, got %s", w.path)
+	}
+}

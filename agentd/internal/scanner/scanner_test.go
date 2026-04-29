@@ -206,6 +206,106 @@ func TestResolveTmuxTargetFromPaneListMatchesTTY(t *testing.T) {
 	}
 }
 
+func TestFindClaudeSessionInfoReturnsEmptyWhenNoJSONL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ownPID := os.Getpid()
+	// Write PID mapping file with a valid session ID
+	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
+	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-from-pid"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// No .jsonl file exists in projectDir - should return empty, not use PID mapping fallback
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "" {
+		t.Fatalf("expected empty session id when no .jsonl exists, got %q", gotSessionID)
+	}
+	if gotSessionFile != "" {
+		t.Fatalf("expected empty session file when no .jsonl exists, got %q", gotSessionFile)
+	}
+}
+
+func TestFindClaudeSessionInfoReturnsEmptyWithoutResume(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ownPID := os.Getpid()
+	// PID mapping exists but no .jsonl (claude started without --resume)
+	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
+	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"fresh-session"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "" {
+		t.Fatalf("expected empty session ID when no .jsonl exists, got %q", gotSessionID)
+	}
+	if gotSessionFile != "" {
+		t.Fatalf("expected empty session file when no .jsonl exists, got %q", gotSessionFile)
+	}
+}
+
+func TestFindClaudeSessionInfoReturnsEmptyWithNonUUIDResumeNoJSONL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ownPID := os.Getpid()
+	// Non-UUID session name like "sample-level-packing-alignment"
+	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
+	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sample-level-packing-alignment"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "" {
+		t.Fatalf("expected empty session ID when no .jsonl exists, got %q", gotSessionID)
+	}
+	if gotSessionFile != "" {
+		t.Fatalf("expected empty session file when no .jsonl exists, got %q", gotSessionFile)
+	}
+}
+
 func TestProcessInfoAttachRoutingMetadata(t *testing.T) {
 	t.Run("tmux is writable", func(t *testing.T) {
 		proc := ProcessInfo{Provider: "claude", Terminal: "/dev/ttys002", TmuxTarget: "dev:1.2"}

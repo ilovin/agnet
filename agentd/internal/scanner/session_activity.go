@@ -90,6 +90,7 @@ func getPaneLastActivity(tmuxTarget string) *time.Time {
 }
 
 // listSessionCandidates lists all .jsonl files in projectDir with their activity times.
+// Files inside subagents/ directories are excluded (team-mode sub-agent sessions).
 func listSessionCandidates(projectDir string) []SessionCandidate {
 	entries, err := os.ReadDir(projectDir)
 	if err != nil {
@@ -101,6 +102,9 @@ func listSessionCandidates(projectDir string) []SessionCandidate {
 			continue
 		}
 		jsonlPath := filepath.Join(projectDir, entry.Name())
+		if strings.Contains(jsonlPath, "subagents/") {
+			continue
+		}
 		candidates = append(candidates, SessionCandidate{
 			SessionID:    strings.TrimSuffix(entry.Name(), ".jsonl"),
 			JSONLPath:    jsonlPath,

@@ -137,6 +137,32 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 	}
 }
 
+// isSubAgentSession reports whether the given resume session ID belongs to a
+// Claude Code team-mode sub-agent. Sub-agent sessions are stored in
+// subagents/ directories under ~/.claude/projects/, distinct from main
+// agent sessions which live at the project root.
+func isSubAgentSession(workDir, resumeID string) bool {
+	if workDir == "" || resumeID == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	subAgentPath := filepath.Join(projectDir, "subagents", resumeID+".jsonl")
+	_, err = os.Stat(subAgentPath)
+	return err == nil
+}
+
+// projectDirName mirrors Claude's project directory naming: replace / . _ with -.
+func projectDirName(workDir string) string {
+	s := strings.ReplaceAll(strings.TrimRight(workDir, "/"), "/", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	return s
+}
+
 func (h *handler) agentList(req RPCRequest) RPCResponse {
 	agents := h.server.manager.List()
 	type agentInfo struct {
@@ -171,7 +197,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
-		if strings.HasPrefix(resumeID, "agent-") {
+		if isSubAgentSession(ag.WorkDir, resumeID) {
 			continue
 		}
 		derived := h.server.manager.DeriveAgentState(ag.ID)
@@ -488,7 +514,7 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 			projectName = filepath.Base(strings.TrimRight(ag.WorkDir, "/"))
 		}
 		resumeID, _ := h.server.manager.GetResumeSessionID(ag.ID)
-		if strings.HasPrefix(resumeID, "agent-") {
+		if isSubAgentSession(ag.WorkDir, resumeID) {
 			continue
 		}
 		candidate := managedAgent{
@@ -1583,6 +1609,12 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 		if p.WorkDir != "" {
 			projectName = filepath.Base(strings.TrimRight(p.WorkDir, "/"))
 		}
+		// Display candidates are shown for informational purposes only;
+		// don't claim a session file since their session association is uncertain.
+		sessionFile := ""
+		if candidate.Decision != agent.AttachDecisionDisplay {
+			sessionFile = p.FindSessionFile()
+		}
 		result = append(result, processInfo{
 			PID:            p.PID,
 			Provider:       p.Provider,
@@ -1592,7 +1624,7 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 			Session:        p.Session,
 			SessionID:      p.SessionID,
 			Terminal:       p.Terminal,
-			SessionFile:    p.FindSessionFile(),
+			SessionFile:    sessionFile,
 			AttachMode:     p.AttachMode(),
 			ReadOnly:       p.AttachReadOnly(),
 			ReadOnlyReason: p.AttachReadOnlyReason(),

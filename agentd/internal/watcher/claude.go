@@ -38,6 +38,7 @@ type ConversationEvent struct {
 type SessionWatcher interface {
 	Start() error
 	Stop()
+	SetSkipExisting(bool)
 }
 
 // ClaudeWatcher tails a Claude Code JSONL session file and emits ConversationEvents.
@@ -56,6 +57,9 @@ type ClaudeWatcher struct {
 	lastRefreshAt time.Time              // rate-limit refreshSessionFile (lsof is expensive)
 	lastSwitchAt  time.Time              // cooldown after switchToFile to prevent oscillation
 	onSwitch      func(newPath string)   // called when session file changes
+
+	skipExisting bool // when true, Start() skips existing file content (for restarted watchers)
+	hasPolled    bool // true after the first poll; gates refreshSessionFile on empty polls
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
@@ -77,6 +81,13 @@ func (w *ClaudeWatcher) SetTmuxTarget(target string) {
 	w.tmuxTarget = target
 }
 
+// SetSkipExisting tells the watcher to skip existing file content on Start().
+// Use this when restarting a watcher for an agent that already has persisted
+// events, so historical lines are not re-processed with fresh timestamps.
+func (w *ClaudeWatcher) SetSkipExisting(skip bool) {
+	w.skipExisting = skip
+}
+
 // OnSessionSwitch registers a callback invoked when the watcher switches to a
 // different session file (e.g. after /clear).
 func (w *ClaudeWatcher) OnSessionSwitch(fn func(newPath string)) {
@@ -84,10 +95,15 @@ func (w *ClaudeWatcher) OnSessionSwitch(fn func(newPath string)) {
 }
 
 func (w *ClaudeWatcher) Start() error {
-	// Parse existing content first
+	if w.skipExisting {
+		if fi, err := os.Stat(w.path); err == nil {
+			w.offset = fi.Size()
+		}
+	}
 	if err := w.poll(); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	w.hasPolled = true
 	go w.loop()
 	return nil
 }
@@ -351,6 +367,7 @@ func getPaneActivity(tmuxTarget string) *time.Time {
 }
 
 // listSessionCandidatesInDir lists all .jsonl files in a directory with their activity times.
+// Files inside subagents/ directories are excluded (team-mode sub-agent sessions).
 func listSessionCandidatesInDir(projectDir string) []sessionCandidate {
 	entries, err := os.ReadDir(projectDir)
 	if err != nil {
@@ -362,6 +379,9 @@ func listSessionCandidatesInDir(projectDir string) []sessionCandidate {
 			continue
 		}
 		jsonlPath := filepath.Join(projectDir, entry.Name())
+		if strings.Contains(jsonlPath, "subagents/") {
+			continue
+		}
 		candidates = append(candidates, sessionCandidate{
 			sessionID:    strings.TrimSuffix(entry.Name(), ".jsonl"),
 			jsonlPath:    jsonlPath,
@@ -679,7 +699,9 @@ func (w *ClaudeWatcher) poll() error {
 
 	// No new events — the process may have switched sessions (e.g. /clear, resume).
 	// Trigger immediate refresh instead of waiting for a timer.
-	if count == 0 {
+	// Skip refresh on the very first poll (hasPolled==false) so that a watcher
+	// restarted with skipExisting does not immediately hop to another session.
+	if count == 0 && w.hasPolled {
 		w.refreshSessionFile()
 	}
 	return nil

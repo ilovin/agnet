@@ -1679,6 +1679,7 @@ func (m *Manager) StartWatcherForAgent(id string) error {
 	// Start new watcher
 	cb := m.makeWatcherCallback(id, ag)
 	w := watcher.NewClaudeWatcher(sessionFile, cb)
+	w.SetSkipExisting(true)
 
 	if err := w.Start(); err != nil {
 		return fmt.Errorf("watcher start: %w", err)
@@ -1794,7 +1795,7 @@ func (m *Manager) ClassifyAttachCandidate(info scanner.ProcessInfo) AttachCandid
 	if info.SessionID != "" {
 		return AttachCandidate{Process: info, Decision: AttachDecisionAuto, Reason: "stable session identity"}
 	}
-	return AttachCandidate{Process: info, Decision: AttachDecisionAmbiguous, Reason: "claude process has no stable session id"}
+	return AttachCandidate{Process: info, Decision: AttachDecisionDisplay, Reason: "claude process has no stable session id"}
 }
 
 func (m *Manager) AutoAttachExisting() {
@@ -1924,6 +1925,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		if sessionFile != "" || info.Provider == "opencode" {
 			cb := m.makeWatcherCallback(existing.ID, existing)
 			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)
+			w.SetSkipExisting(true)
 			if err := w.Start(); err != nil {
 				log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
 			} else {
@@ -1982,7 +1984,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	// Start the appropriate watcher
 	cb := m.makeWatcherCallback(id, ag)
 	w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, id)
-
+	w.SetSkipExisting(true)
 	if err := w.Start(); err != nil {
 		log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
 	} else {

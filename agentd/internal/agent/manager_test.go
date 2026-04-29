@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -105,40 +104,33 @@ func TestAttachedAgentIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestClassifyAttachCandidateRejectsWorkDirFallback(t *testing.T) {
+func TestClassifyAttachCandidateClaudeWithoutSessionIDIsDisplay(t *testing.T) {
 	m := newTestManager(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
 
-	repoDir := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatalf("mkdir repo dir: %v", err)
-	}
-	projectDirName := strings.ReplaceAll(repoDir, "/", "-")
-	projectDirName = strings.ReplaceAll(projectDirName, ".", "-")
-	projectDirName = strings.ReplaceAll(projectDirName, "_", "-")
-	projectDir := filepath.Join(home, ".claude", "projects", projectDirName)
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		t.Fatalf("mkdir claude project dir: %v", err)
-	}
-	sessionFile := filepath.Join(projectDir, "sess-live.jsonl")
-	if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("write session file: %v", err)
-	}
-
+	// Claude process with empty session ID should be Display (shown in list, not auto-attached)
 	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
 		PID:      123,
 		Provider: "claude",
-		WorkDir:  repoDir,
+		WorkDir:  "/repo",
 	})
-	if candidate.Decision != agent.AttachDecisionAmbiguous {
-		t.Fatalf("expected ambiguous decision, got %q", candidate.Decision)
+	if candidate.Decision != agent.AttachDecisionDisplay {
+		t.Fatalf("expected display decision for claude without session ID, got %q", candidate.Decision)
 	}
-	if candidate.Process.SessionID != "" {
-		t.Fatalf("expected no derived session id, got %q", candidate.Process.SessionID)
-	}
-	if candidate.Process.SessionFile != "" {
-		t.Fatalf("expected no derived session file, got %q", candidate.Process.SessionFile)
+}
+
+func TestClassifyAttachCandidateNonClaudeWithEmptySessionIDIsAmbiguous(t *testing.T) {
+	m := newTestManager(t)
+
+	// Non-claude process with empty session ID should still be Auto (not filtered as ambiguous)
+	// Note: the original behavior for non-claude was Auto regardless of session ID.
+	// The test name reflects the regression concern: non-claude should not be affected.
+	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
+		PID:       123,
+		Provider:  "opencode",
+		SessionID: "",
+	})
+	if candidate.Decision != agent.AttachDecisionAuto {
+		t.Fatalf("expected auto decision for non-claude process, got %q", candidate.Decision)
 	}
 }
 

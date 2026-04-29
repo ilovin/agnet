@@ -1403,6 +1403,8 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		}
 		if entry["provider"] == "claude" {
 			if pid, _ := entry["pid"].(float64); int(pid) == teamChildPID {
+				// Display candidates have empty sessionFile so they are filtered
+				// by session.catalog (empty sessionID) even though they pass agentScan.
 				t.Fatalf("expected ambiguous child claude session to be hidden from attachable, got %v", attachable)
 			}
 		}
@@ -1449,6 +1451,182 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	}
 	if !foundArchivedClaude {
 		t.Fatalf("expected archived claude session to remain in claudeFiles, got %v", claudeFiles)
+	}
+}
+
+func TestAgentListExcludesSubAgents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	// Set up Claude project directory with main session and sub-agent session
+	claudeProjectsDir := filepath.Join(home, ".claude", "projects")
+	projectDir := filepath.Join(claudeProjectsDir, strings.ReplaceAll(workDir, "/", "-"))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	// Main session at project root
+	if err := os.WriteFile(filepath.Join(projectDir, "agent-main-session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write main session file: %v", err)
+	}
+	// Sub-agent session in subagents/
+	subagentsDir := filepath.Join(projectDir, "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir subagents dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentsDir, "agent-sub-abc.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write sub-agent session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	// Create main agent with agent- prefix session (should NOT be excluded — B-001 fix)
+	mainAgentID, err := mgr.Create("main-agent", "claude", "claude", []string{"--dangerously-skip-permissions"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create main agent: %v", err)
+	}
+	if err := mgr.UpdateResumeSessionID(mainAgentID, "agent-main-session"); err != nil {
+		t.Fatalf("update main agent resume session: %v", err)
+	}
+
+	// Create sub-agent with sub-agent session (should be excluded)
+	subAgentID, err := mgr.Create("sub-agent", "claude", "claude", []string{"--dangerously-skip-permissions"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create sub-agent: %v", err)
+	}
+	if err := mgr.UpdateResumeSessionID(subAgentID, "agent-sub-abc"); err != nil {
+		t.Fatalf("update sub-agent resume session: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "agent.list", nil)
+	if resp["error"] != nil {
+		t.Fatalf("agent.list error: %v", resp["error"])
+	}
+	b, _ := json.Marshal(resp["result"])
+	var agents []map[string]any
+	if err := json.Unmarshal(b, &agents); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+
+	var foundMain, foundSub bool
+	for _, ag := range agents {
+		id, _ := ag["id"].(string)
+		if id == mainAgentID {
+			foundMain = true
+		}
+		if id == subAgentID {
+			foundSub = true
+		}
+	}
+	if !foundMain {
+		t.Fatalf("expected main agent (agent-main-session) to be present, got %v", agents)
+	}
+	if foundSub {
+		t.Fatalf("expected sub-agent (agent-sub-abc) to be excluded, got %v", agents)
+	}
+}
+
+func TestSessionCatalogExcludesSubAgents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workDir: %v", err)
+	}
+
+	// Set up Claude project directory with main session and sub-agent session
+	claudeProjectsDir := filepath.Join(home, ".claude", "projects")
+	projectDir := filepath.Join(claudeProjectsDir, strings.ReplaceAll(workDir, "/", "-"))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "agent-main-session.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write main session file: %v", err)
+	}
+	subagentsDir := filepath.Join(projectDir, "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatalf("mkdir subagents dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentsDir, "agent-sub-abc.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write sub-agent session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	mainAgentID, err := mgr.Create("main-agent", "claude", "claude", []string{"--dangerously-skip-permissions"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create main agent: %v", err)
+	}
+	if err := mgr.UpdateResumeSessionID(mainAgentID, "agent-main-session"); err != nil {
+		t.Fatalf("update main agent resume session: %v", err)
+	}
+
+	subAgentID, err := mgr.Create("sub-agent", "claude", "claude", []string{"--dangerously-skip-permissions"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create sub-agent: %v", err)
+	}
+	if err := mgr.UpdateResumeSessionID(subAgentID, "agent-sub-abc"); err != nil {
+		t.Fatalf("update sub-agent resume session: %v", err)
+	}
+
+	srv := ws.New(mgr, "testtoken")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "session.catalog", nil)
+	if resp["error"] != nil {
+		t.Fatalf("session.catalog error: %v", resp["error"])
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp["result"])
+	}
+	managed, ok := result["managed"].([]any)
+	if !ok {
+		t.Fatalf("expected managed array, got %T", result["managed"])
+	}
+
+	var foundMain, foundSub bool
+	for _, raw := range managed {
+		entry, _ := raw.(map[string]any)
+		id, _ := entry["id"].(string)
+		if id == mainAgentID {
+			foundMain = true
+		}
+		if id == subAgentID {
+			foundSub = true
+		}
+	}
+	if !foundMain {
+		t.Fatalf("expected main agent in managed list, got %v", managed)
+	}
+	if foundSub {
+		t.Fatalf("expected sub-agent to be excluded from managed list, got %v", managed)
 	}
 }
 

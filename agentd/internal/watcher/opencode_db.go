@@ -85,6 +85,17 @@ func (w *OpenCodeDBWatcher) Start() error {
 	if w.dbPath == "" {
 		return nil
 	}
+	// Seed lastMsgID from the DB so we don't re-process historical messages
+	// when the watcher is restarted for an existing agent.
+	if db, err := w.getDB(); err == nil {
+		var lastID string
+		if err := db.QueryRow(
+			`SELECT id FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1`,
+			w.sessionID,
+		).Scan(&lastID); err == nil && lastID != "" {
+			w.lastMsgID = lastID
+		}
+	}
 	go w.loop()
 	return nil
 }
@@ -100,6 +111,10 @@ func (w *OpenCodeDBWatcher) Stop() {
 		w.dbMu.Unlock()
 	})
 }
+
+// SetSkipExisting is a no-op for OpenCodeDBWatcher; it already seeds lastMsgID
+// in Start() to avoid re-processing historical messages.
+func (w *OpenCodeDBWatcher) SetSkipExisting(bool) {}
 
 func (w *OpenCodeDBWatcher) loop() {
 	ticker := time.NewTicker(3 * time.Second)
