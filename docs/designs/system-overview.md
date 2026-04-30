@@ -259,7 +259,7 @@ App
 
 ## 6. 认证与安全
 
-- **传输安全**：agentgw ↔ agentd 通过 SSH Tunnel 加密；App ↔ tunnelhub ↔ agentgw 通过 REALITY + gRPC-Web over HTTP/2 加密（伪装为 Google 流量，详见 `2026-04-20-anti-detection-grpc-web-reality.md`）
+- **传输安全**：agentgw ↔ agentd 通过 SSH Tunnel 加密；App ↔ tunnelhub ↔ agentgw 通过 REALITY + gRPC-Web over HTTP/2 加密（伪装为 Google 流量，详见 `designs/anti-detection-connectivity.md`）
 - **认证**：静态 token（在 agentd/agentgw 配置文件中设置，App 连接时通过 `Authorization: Bearer` 头携带）
 - **SSH 密钥**：Gateway 使用本机 SSH 密钥连接远端，密钥存储在本机，不传输到 App
 - **REALITY 密钥**：X25519 密钥对由 tunnelhub 自动生成，公钥需安全分发给 agentgw
@@ -306,3 +306,28 @@ App
 4. **agentgw 一键部署**：Deployer + agentd 内嵌
 5. **多 Provider**：OpenCode、Codex、Gemini CLI 支持
 6. **直连模式**：App 直连远端 agentd（Tailscale）
+
+---
+
+## 11. 关键设计决策
+
+- **agentd** is a single static binary with zero runtime dependencies — easy to SCP to remote machines
+- **EventBuffer** uses a circular buffer (head/count indices) for O(1) append, not array shifting
+- **PTY Kill order**: kill process first, then close ptmx fd (avoids SIGHUP zombies)
+- **Agent struct stores cmd/args** so `agent.restart` reuses original launch parameters
+- **agentgw NodeManager.LoadAll()** loads persisted nodes in batch at startup (avoids N redundant file writes)
+- **agentgw event forwarding**: agentd push events get `nodeId` injected before broadcast to App clients
+
+---
+
+## 12. 会话发现流水线
+
+PID-to-session mapping uses a multi-stage pipeline (scanner + watcher share the same logic):
+
+1. **Task fd discovery** — check which `~/.claude/tasks/<sessionID>` dirs the PID has open (via `/proc` or `lsof`). If exactly one, use it directly.
+2. **Candidate list** — always list ALL `.jsonl` files from the project dir, then merge in any task fd sessions not already present. Never use task fd as the exclusive candidate set — the current session may have no task dir yet.
+3. **Time-based filtering** — if tmux pane activity is available, filter candidates by time proximity. Otherwise sort by lastActivity descending.
+4. **Content matching** — capture tmux pane text, extract fingerprints from JSONL files, pick the best match by substring hit count.
+5. **Fallback** — most recently active candidate wins.
+
+Key invariant: the PID mapping file (`sessions/<pid>.json`) is NOT authoritative — it goes stale after `/clear` or `--resume`. Never trust it as the sole source.
