@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -254,7 +255,14 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 
 	// If task fd found unique session, use it
 	if len(taskSessions) == 1 {
-		return taskSessions[0], filepath.Join(projectDir, taskSessions[0]+".jsonl")
+		sessionFile := filepath.Join(projectDir, taskSessions[0]+".jsonl")
+		if _, err := os.Stat(sessionFile); err == nil {
+			return taskSessions[0], sessionFile
+		}
+		// Session file not at computed projectDir; try global fallback to locate it
+		if found := findClaudeSessionFile(home, taskSessions[0], workDir); found != "" {
+			return taskSessions[0], found
+		}
 	}
 
 	// Step 2: Build candidate list.
@@ -286,6 +294,14 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 		}
 	}
 
+	// Step 2b: Global fallback scan.
+	// When /proc/PID/cwd resolves hidden directories without dots (e.g. ".workspace" -> "workspace"),
+	// projectDirName(workDir) won't match the actual directory on disk. Scan all project
+	// directories under ~/.claude/projects and pick the best candidate.
+	if len(candidates) == 0 {
+		candidates = findClaudeSessionInfoGlobalFallback(home, taskSessions)
+	}
+
 	if len(candidates) == 0 {
 		return "", ""
 	}
@@ -313,6 +329,50 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 	}
 
 	return "", ""
+}
+
+// findClaudeSessionInfoGlobalFallback scans all project directories under
+// ~/.claude/projects to find session files when the workDir-based projectDir
+// does not exist (e.g. hidden directory names resolved without dots).
+// If taskSessions is non-empty, it prefers candidates whose session ID is in
+// taskSessions. Otherwise it returns the most recently modified candidate.
+func findClaudeSessionInfoGlobalFallback(home string, taskSessions []string) []SessionCandidate {
+	projectsBase := filepath.Join(home, ".claude", "projects")
+	entries, err := os.ReadDir(projectsBase)
+	if err != nil {
+		return nil
+	}
+
+	taskSet := make(map[string]bool, len(taskSessions))
+	for _, sid := range taskSessions {
+		taskSet[sid] = true
+	}
+
+	var candidates []SessionCandidate
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		projectDir := filepath.Join(projectsBase, entry.Name())
+		for _, c := range listSessionCandidates(projectDir) {
+			if taskSet[c.SessionID] {
+				// Prioritize task-fd sessions by boosting activity time
+				c.LastActivity = time.Now()
+			}
+			candidates = append(candidates, c)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Sort by last activity descending
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].LastActivity.After(candidates[j].LastActivity)
+	})
+
+	return candidates
 }
 
 // findClaudeSessionsFromTasks returns all session IDs found via task fd discovery.

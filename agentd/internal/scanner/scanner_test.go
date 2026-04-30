@@ -15,6 +15,14 @@ func TestProjectDirNameMatchesClaudeNaming(t *testing.T) {
 	}
 }
 
+func TestProjectDirNameDotPrefixDir(t *testing.T) {
+	got := projectDirName("/ephstorage/geo_front/.workspace/argus_post_integration")
+	want := "-ephstorage-geo-front--workspace-argus-post-integration"
+	if got != want {
+		t.Fatalf("expected project dir %q, got %q", want, got)
+	}
+}
+
 func TestFindClaudeSessionInfoPrefersMostActiveOpenTask(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -329,6 +337,119 @@ func TestFindClaudeSessionInfoReturnsEmptyWithNonUUIDResumeNoJSONL(t *testing.T)
 	}
 	if gotSessionFile != "" {
 		t.Fatalf("expected empty session file when no .jsonl exists, got %q", gotSessionFile)
+	}
+}
+
+// TestFindClaudeSessionInfoGlobalFallback tests the global fallback when
+// projectDirName(workDir) does not match the actual directory name on disk
+// (e.g., /proc/PID/cwd resolves ".workspace" as "workspace").
+func TestFindClaudeSessionInfoGlobalFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Simulate workDir as reported by /proc/PID/cwd (dots stripped from hidden dirs)
+	workDir := "/ephstorage/geo_front/workspace/argus_post_integration"
+
+	// The actual project directory on disk retains the dot
+	actualProjectDirName := "-ephstorage-geo-front--workspace-argus-post-integration"
+	actualProjectDir := filepath.Join(home, ".claude", "projects", actualProjectDirName)
+	if err := os.MkdirAll(actualProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a session file in the actual directory
+	baseTime := time.Now()
+	sessionFile := filepath.Join(actualProjectDir, "sess-fallback.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(`{"timestamp":"`+baseTime.Format(time.RFC3339)+`"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sessionFile, baseTime, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// No task fd links (no tasks dir / open handles)
+	ownPID := os.Getpid()
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "sess-fallback" {
+		t.Fatalf("expected session id sess-fallback, got %q", gotSessionID)
+	}
+	if gotSessionFile != sessionFile {
+		t.Fatalf("expected session file %q, got %q", sessionFile, gotSessionFile)
+	}
+}
+
+// TestFindClaudeSessionInfoGlobalFallbackPrefersTaskSession tests that when
+// both a global fallback candidate and a task-fd session exist, the task-fd
+// session is preferred (because it is more specific).
+func TestFindClaudeSessionInfoGlobalFallbackPrefersTaskSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := "/ephstorage/geo_front/workspace/argus_post_integration"
+	actualProjectDirName := "-ephstorage-geo-front--workspace-argus-post-integration"
+	actualProjectDir := filepath.Join(home, ".claude", "projects", actualProjectDirName)
+	if err := os.MkdirAll(actualProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tasksDir := filepath.Join(home, ".claude", "tasks")
+	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	baseTime := time.Now()
+
+	// Session A: from global fallback (older)
+	sessionAFile := filepath.Join(actualProjectDir, "sess-a.jsonl")
+	if err := os.WriteFile(sessionAFile, []byte(`{"timestamp":"`+baseTime.Add(-time.Hour).Format(time.RFC3339)+`"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sessionAFile, baseTime.Add(-time.Hour), baseTime.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Session B: has an open task dir (newer, should be preferred)
+	sessionBFile := filepath.Join(actualProjectDir, "sess-b.jsonl")
+	if err := os.WriteFile(sessionBFile, []byte(`{"timestamp":"`+baseTime.Format(time.RFC3339)+`"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(sessionBFile, baseTime, baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	taskDir := filepath.Join(tasksDir, "sess-b")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, ".highwatermark"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	liveTask := filepath.Join(taskDir, "42.json")
+	if err := os.WriteFile(liveTask, []byte(`{"id":42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(liveTask, baseTime.Add(10*time.Second), baseTime.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	dirHandle, err := os.Open(taskDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dirHandle.Close()
+
+	ownPID := os.Getpid()
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "sess-b" {
+		t.Fatalf("expected session id sess-b (task-fd preferred), got %q", gotSessionID)
+	}
+	if gotSessionFile != sessionBFile {
+		t.Fatalf("expected session file %q, got %q", sessionBFile, gotSessionFile)
 	}
 }
 
