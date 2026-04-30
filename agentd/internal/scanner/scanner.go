@@ -209,6 +209,10 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 	return false
 }
 
+// homeBaseDir is the base directory to scan for other users' home directories.
+// It defaults to "/home" but can be overridden in tests.
+var homeBaseDir = "/home"
+
 func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -227,18 +231,20 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 
 	// When running as root, also scan /home/* for other users' Claude task dirs
 	if len(taskSessions) == 0 {
-		if _, err := os.Stat("/home"); err == nil {
-			entries, err := os.ReadDir("/home")
+		if _, err := os.Stat(homeBaseDir); err == nil {
+			entries, err := os.ReadDir(homeBaseDir)
 			if err == nil {
 				for _, entry := range entries {
 					if !entry.IsDir() {
 						continue
 					}
-					userHome := filepath.Join("/home", entry.Name())
-					projectDir = filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
-					tasksDir = filepath.Join(userHome, ".claude", "tasks")
-					taskSessions = findClaudeSessionsFromTasks(pid, projectDir, tasksDir)
+					userHome := filepath.Join(homeBaseDir, entry.Name())
+					userProjectDir := filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
+					userTasksDir := filepath.Join(userHome, ".claude", "tasks")
+					taskSessions = findClaudeSessionsFromTasks(pid, userProjectDir, userTasksDir)
 					if len(taskSessions) > 0 {
+						projectDir = userProjectDir
+						tasksDir = userTasksDir
 						break
 					}
 				}

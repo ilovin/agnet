@@ -273,6 +273,66 @@ func TestFindClaudeSessionInfoReturnsEmptyWithoutResume(t *testing.T) {
 	}
 }
 
+func TestFindClaudeSessionInfoDoesNotMutateProjectDir(t *testing.T) {
+	// Setup: Create a temp filesystem with two mock user home dirs.
+	// We override homeBaseDir so the root scan loop reads from our temp dir
+	// instead of the real /home.
+	origHomeBaseDir := homeBaseDir
+	defer func() { homeBaseDir = origHomeBaseDir }()
+
+	mockHomeBase := t.TempDir()
+	homeBaseDir = mockHomeBase
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create userA with a session file but no task fd links
+	userAHome := filepath.Join(mockHomeBase, "userA")
+	userAProjectDir := filepath.Join(userAHome, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(userAProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userAProjectDir, "sessionA.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userATasksDir := filepath.Join(userAHome, ".claude", "tasks")
+	if err := os.MkdirAll(userATasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create userB with an empty project dir (no sessions)
+	userBHome := filepath.Join(mockHomeBase, "userB")
+	userBProjectDir := filepath.Join(userBHome, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(userBProjectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userBTasksDir := filepath.Join(userBHome, ".claude", "tasks")
+	if err := os.MkdirAll(userBTasksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set HOME to userA so the initial projectDir points to userA
+	t.Setenv("HOME", userAHome)
+
+	ownPID := os.Getpid()
+
+	// The bug: after the root scan loop, projectDir would point to userB's dir
+	// (the last user in the loop) because it was mutated in-place.
+	// listSessionCandidates would then scan userB's dir (empty) and return empty.
+	// After fix: projectDir should still point to userA's dir, and the session
+	// file should be found.
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotSessionID != "sessionA" {
+		t.Fatalf("expected session id sessionA, got %q", gotSessionID)
+	}
+	wantFile := filepath.Join(userAProjectDir, "sessionA.jsonl")
+	if gotSessionFile != wantFile {
+		t.Fatalf("expected session file %q, got %q", wantFile, gotSessionFile)
+	}
+}
+
 func TestFindClaudeSessionInfoReturnsEmptyWithNonUUIDResumeNoJSONL(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
