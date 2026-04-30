@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:agentapp/models/connection_config.dart';
 import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/models/agent_model.dart';
+import 'package:agentapp/models/message_model.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
 
 void main() {
@@ -260,6 +261,45 @@ void main() {
       expect(managedAgentTitle(agent), equals('phone-talk - 6864'));
       expect(managedAgentSortTitle(agent), equals('phone-talk - 6864'));
     });
+
+    test('sort is stable when managedAgentSortTitle ties (uses id as tie-breaker)', () {
+      final agents = [
+        AgentModel.fromJson({
+          'id': 'z-id',
+          'name': 'same-name',
+          'status': 'idle',
+          'provider': 'claude',
+          'workDir': '/tmp/a',
+          'nodeId': 'n1',
+        }),
+        AgentModel.fromJson({
+          'id': 'a-id',
+          'name': 'same-name',
+          'status': 'idle',
+          'provider': 'claude',
+          'workDir': '/tmp/b',
+          'nodeId': 'n1',
+        }),
+        AgentModel.fromJson({
+          'id': 'm-id',
+          'name': 'same-name',
+          'status': 'idle',
+          'provider': 'claude',
+          'workDir': '/tmp/c',
+          'nodeId': 'n1',
+        }),
+      ];
+
+      agents.sort((a, b) {
+        final at = managedAgentSortTitle(a);
+        final bt = managedAgentSortTitle(b);
+        final cmp = at.compareTo(bt);
+        if (cmp != 0) return cmp;
+        return a.id.compareTo(b.id);
+      });
+
+      expect(agents.map((a) => a.id).toList(), equals(['a-id', 'm-id', 'z-id']));
+    });
   });
 
   test('parses both list and wrapped map response', () {
@@ -276,5 +316,44 @@ void main() {
     expect(fromList.first.pid, equals(1));
     expect(fromMap.length, equals(1));
     expect(fromMap.first.pid, equals(2));
+  });
+
+  group('MessageModel', () {
+    test('fromJson parses timestamp when present', () {
+      final m = MessageModel.fromJson({
+        'nodeId': 'n1',
+        'agentId': 'a1',
+        'role': 'user',
+        'text': 'hello',
+        'seq': 1,
+        'timestamp': 1714464000000,
+      });
+      expect(m.timestamp, equals(1714464000000));
+    });
+
+    test('fromJson leaves timestamp null when absent', () {
+      final m = MessageModel.fromJson({
+        'nodeId': 'n1',
+        'agentId': 'a1',
+        'role': 'assistant',
+        'text': 'hi',
+        'seq': 2,
+      });
+      expect(m.timestamp, isNull);
+    });
+
+    test('copyWith updates timestamp', () {
+      final m = MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.user,
+        text: 'hello',
+        seq: 1,
+        timestamp: 1000,
+      );
+      final m2 = m.copyWith(timestamp: 2000);
+      expect(m2.timestamp, equals(2000));
+      expect(m2.text, equals('hello'));
+    });
   });
 }

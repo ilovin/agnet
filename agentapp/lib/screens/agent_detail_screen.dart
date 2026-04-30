@@ -185,6 +185,7 @@ class ChatMessage {
   final int imageCount;
   final List<Map<String, dynamic>> activities;
   final List<String> images;
+  final int? timestamp;
 
   /// true if this is a tool call (e.g. [Bash: git status])
   bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
@@ -222,6 +223,7 @@ class ChatMessage {
     this.imageCount = 0,
     this.activities = const [],
     this.images = const [],
+    this.timestamp,
   });
 }
 
@@ -247,6 +249,15 @@ bool _isThinkingEvent({
   if (const {'thinking', 'thinking_delta', 'reasoning'}.contains(kind))
     return true;
   return ChatMessage._explicitThinkingPrefix.hasMatch(text);
+}
+
+String _formatMessageTime(int timestampMillis) {
+  final dt = DateTime.fromMillisecondsSinceEpoch(timestampMillis);
+  final now = DateTime.now();
+  if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
+  return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 }
 
 String buildCollapsedPreview(String text, {int maxChars = 80}) {
@@ -397,7 +408,7 @@ bool isNoiseOnlyText(String s) {
 
 Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
   final map = Map<String, dynamic>.from(rawEvent);
-  return {
+  final result = {
     'seq': map['seq'] ?? 0,
     'role': map['role'] ?? 'assistant',
     'text': map['text'] ?? '',
@@ -412,6 +423,10 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
     if (map.containsKey('permissionRequest'))
       'permissionRequest': map['permissionRequest'],
   };
+  if (map['timestamp'] != null) {
+    result['timestamp'] = (map['timestamp'] as num).toInt();
+  }
+  return result;
 }
 
 class ConversationEventCacheEntry {
@@ -585,6 +600,8 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final thinkingBuf = StringBuffer();
   int thinkingSeq = 0;
 
+  int? _currentTimestamp;
+
   void flushMergeBuf() {
     if (mergeBuf.isEmpty) return;
     final merged = mergeBuf.toString().trim();
@@ -597,6 +614,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           seq: mergeBufSeq,
           isRaw: mergeBufRaw,
           kind: mergeBufKind,
+          timestamp: _currentTimestamp,
         ),
       );
     }
@@ -615,6 +633,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           seq: activitySeq,
           kind: 'activity_list',
           activities: items,
+          timestamp: _currentTimestamp,
         ),
       );
     }
@@ -631,6 +650,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           text: thinkingText,
           seq: thinkingSeq,
           kind: 'thinking',
+          timestamp: _currentTimestamp,
         ),
       );
     }
@@ -642,6 +662,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     final role = e['role'] as String? ?? 'assistant';
     final rawText = e['text'] as String? ?? '';
     final kind = e['kind'] as String? ?? '';
+    _currentTimestamp = e['timestamp'] as int?;
 
     // Handle permission prompts - don't add to message list, handled by overlay
     if (kind == 'permission_prompt') {
@@ -675,6 +696,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
             images:
                 (e['images'] as List?)?.map((i) => i.toString()).toList() ??
                 <String>[],
+            timestamp: e['timestamp'] as int?,
           ),
         );
       }
@@ -791,6 +813,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
                 seq: seq,
                 isRaw: false,
                 kind: 'btw',
+                timestamp: e['timestamp'] as int?,
               ),
             );
           }
@@ -813,6 +836,7 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
         seq: seq,
         isRaw: false,
         kind: kind,
+        timestamp: e['timestamp'] as int?,
       ),
     );
     // Mark that we've seen a complete assistant message so the
@@ -957,6 +981,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   bool _stickToBottom = true;
   bool _showJumpToLatest = false;
   bool _isLoadingFreshData = false;
+  bool _showTimestamps = false;
   String? _lastError;
   String? _agentName; // local override for renamed agent
 
@@ -1932,6 +1957,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                   color: _statusColor(agent.status),
                 ),
               ),
+            if (agent != null)
+              Text(
+                _buildMetaLine(agent),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
           ],
         ),
         actions: [
@@ -2010,18 +2043,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 ),
               ),
             ),
-          // Control bar
-          if (agent != null)
-            _ControlBar(
-              agent: agent,
-              nodeId: widget.nodeId,
-              stopping: _stopping,
-              currentMode: activeMode,
-              onControl: _control,
-              onSwitchModel: _switchModel,
-              onSwitchProvider: _switchProvider,
-              onSwitchMode: _switchMode,
-            ),
           // Messages
           Expanded(
             child: Stack(
@@ -2052,8 +2073,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           style: TextStyle(color: Colors.grey),
                         ),
                       )
-                    : SelectionArea(
-                        child: NotificationListener<ScrollNotification>(
+                    : GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: () {
+                          setState(() {
+                            _showTimestamps = !_showTimestamps;
+                          });
+                        },
+                        child: SelectionArea(
+                          child: NotificationListener<ScrollNotification>(
                           onNotification: (notification) {
                             if (notification is ScrollUpdateNotification &&
                                 notification.metrics.pixels <=
@@ -2116,6 +2144,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                               return _MessageBubble(
                                 message: messages[idx],
                                 isLastAssistant: idx == lastAssistantIndex,
+                                showTimestamp: _showTimestamps,
                                 onResolvePermissionPrompt:
                                     messages[idx].isPermissionPrompt
                                     ? _resolvePermissionPrompt
@@ -2128,6 +2157,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           ),
                         ),
                       ),
+                    ),
                 // Refresh button (above jump to bottom)
                 Positioned(
                   right: 12,
@@ -2176,6 +2206,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             pendingImages: _pendingImages,
             onImagesChanged: (imgs) => setState(() => _pendingImages = imgs),
             extraCommands: _dynamicSkills,
+            currentMode: activeMode,
+            stopping: _stopping,
+            nodeId: widget.nodeId,
+            onControl: _control,
+            onSwitchModel: _switchModel,
+            onSwitchProvider: _switchProvider,
+            onSwitchMode: _switchMode,
           ),
         ],
       ),
@@ -2185,6 +2222,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   Color _statusColor(AgentStatus s) => AgentStatusTheme.getColor(s);
 
   String _statusLabel(AgentStatus s) => AgentStatusTheme.getLabel(s);
+
+  String _buildMetaLine(AgentModel agent) {
+    final parts = <String>[
+      if ((agent.pid ?? 0) > 0) '${agent.pid}',
+      if ((agent.sessionId ?? '').isNotEmpty) agent.sessionId!,
+      if (agent.workDir.isNotEmpty) agent.workDir,
+    ];
+    return parts.join(' · ');
+  }
 }
 
 String effectiveModeForAgent(AgentModel agent, {String? pendingMode}) {
@@ -2719,6 +2765,540 @@ class _ControlBarState extends ConsumerState<_ControlBar> {
             visualDensity: VisualDensity.compact,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _AgentConfigSheet extends ConsumerStatefulWidget {
+  final AgentModel agent;
+  final String nodeId;
+  final bool stopping;
+  final String currentMode;
+  final Future<void> Function(String action) onControl;
+  final Future<void> Function(String model) onSwitchModel;
+  final Future<void> Function(String providerId, {VoidCallback? onSwitched})
+      onSwitchProvider;
+  final Future<void> Function(String mode) onSwitchMode;
+
+  const _AgentConfigSheet({
+    required this.agent,
+    required this.nodeId,
+    required this.stopping,
+    required this.currentMode,
+    required this.onControl,
+    required this.onSwitchModel,
+    required this.onSwitchProvider,
+    required this.onSwitchMode,
+  });
+
+  @override
+  ConsumerState<_AgentConfigSheet> createState() => _AgentConfigSheetState();
+}
+
+class _AgentConfigSheetState extends ConsumerState<_AgentConfigSheet> {
+  Future<Map<String, dynamic>>? _providerListFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.agent.provider == 'claude' ||
+        widget.agent.provider == 'opencode') {
+      _fetchProviders();
+    }
+  }
+
+  void _fetchProviders() {
+    final client = ref.read(connectionProvider);
+    if (client == null) return;
+    setState(() {
+      _providerListFuture = (() async {
+        if (widget.agent.provider == 'opencode') {
+          final modelResult = await client.call('opencode.models', {
+            'nodeId': widget.nodeId,
+          });
+          final modelData = modelResult is Map
+              ? Map<String, dynamic>.from(modelResult)
+              : <String, dynamic>{};
+          return {
+            '_opencodeModels': normalizeOpencodeModels(modelData['models']),
+            '_opencodeCurrent': (modelData['current'] ?? '').toString(),
+          };
+        }
+
+        final result = await client.call('provider.list', {
+          'nodeId': widget.nodeId,
+          'agentId': widget.agent.id,
+        });
+        return result is Map
+            ? Map<String, dynamic>.from(result)
+            : <String, dynamic>{};
+      })();
+    });
+  }
+
+  void _showAddProviderDialog(BuildContext context) {
+    final nameCtrl = TextEditingController();
+    final urlCtrl = TextEditingController();
+    final tokenCtrl = TextEditingController();
+    final modelCtrl = TextEditingController();
+    String error = '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('新增 Provider'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '名称 *',
+                    hintText: 'My Provider',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: urlCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'API Base URL',
+                    hintText: 'https://api.anthropic.com',
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: tokenCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Auth Token',
+                    hintText: 'sk-...',
+                    isDense: true,
+                  ),
+                  obscureText: true,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: modelCtrl,
+                  decoration: const InputDecoration(
+                    labelText: '模型',
+                    hintText: 'claude-sonnet-4-6',
+                    isDense: true,
+                  ),
+                ),
+                if (error.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      error,
+                      style: const TextStyle(color: Colors.red, fontSize: 13),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (nameCtrl.text.trim().isEmpty) {
+                  setDialogState(() => error = '名称不能为空');
+                  return;
+                }
+                final client = ref.read(connectionProvider);
+                if (client == null) return;
+                try {
+                  await client.call('provider.add', {
+                    'nodeId': widget.nodeId,
+                    'name': nameCtrl.text.trim(),
+                    'baseUrl': urlCtrl.text.trim(),
+                    'authToken': tokenCtrl.text.trim(),
+                    'model': modelCtrl.text.trim(),
+                  });
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  _fetchProviders();
+                } catch (e) {
+                  setDialogState(() => error = e.toString());
+                }
+              },
+              child: const Text('添加'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConfigSelector(BuildContext context) {
+    if (widget.agent.provider != 'claude' &&
+        widget.agent.provider != 'opencode') {
+      return const SizedBox.shrink();
+    }
+    final scheme = Theme.of(context).colorScheme;
+
+    return FutureBuilder<Map<String, dynamic>>(
+      future: _providerListFuture,
+      builder: (context, snapshot) {
+        final data = snapshot.data ?? {};
+        final providers = (data['providers'] as List?) ?? [];
+        final currentProviderId = data['current'] as String? ?? '';
+        final providerWriteMode = data['providerWriteMode'] as String? ?? '';
+        final providerReadOnlyReason =
+            (data['providerReadOnlyReason'] as String? ?? '').trim();
+        final isClaudeProvider = widget.agent.provider == 'claude';
+        final isOpencodeProvider = widget.agent.provider == 'opencode';
+        final isProviderReadOnly =
+            isClaudeProvider &&
+            (!snapshot.hasData || providerWriteMode == 'read_only');
+
+        String currentProviderName = 'Default';
+        if (isOpencodeProvider) {
+          currentProviderName = currentOpencodeModelLabel(data);
+        } else if (currentProviderId.isNotEmpty) {
+          for (final p in providers) {
+            if ((p['id'] ?? '') == currentProviderId) {
+              currentProviderName = (p['name'] ?? currentProviderId).toString();
+              break;
+            }
+          }
+        }
+
+        Widget triggerChild = Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          margin: const EdgeInsets.only(left: 4),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: scheme.outlineVariant.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isProviderReadOnly ? Icons.lock_outline : Icons.tune,
+                size: 14,
+                color: isProviderReadOnly ? Colors.orange : scheme.primary,
+              ),
+              const SizedBox(width: 4),
+              Text(
+                currentProviderName,
+                style: TextStyle(fontSize: 12, color: scheme.onSurface),
+              ),
+              Icon(
+                Icons.arrow_drop_down,
+                size: 16,
+                color: scheme.onSurfaceVariant,
+              ),
+            ],
+          ),
+        );
+
+        if (isProviderReadOnly) {
+          return Tooltip(
+            message: providerReadOnlyReason.isEmpty
+                ? (snapshot.hasData
+                      ? '当前 Provider 仅支持只读展示'
+                      : '正在加载 Provider 状态')
+                : providerReadOnlyReason,
+            child: Opacity(opacity: 0.8, child: triggerChild),
+          );
+        }
+
+        return PopupMenuButton<String>(
+          tooltip: '配置 Provider 和 模型',
+          onSelected: (value) {
+            if (value.startsWith('__provider__')) {
+              final id = value.substring('__provider__'.length);
+              widget.onSwitchProvider(id, onSwitched: _fetchProviders);
+            } else if (value == '__add_provider__') {
+              _showAddProviderDialog(context);
+            } else if (value.startsWith('__model__')) {
+              final model = value.substring('__model__'.length);
+              widget.onSwitchModel(model).whenComplete(() {
+                if (mounted) _fetchProviders();
+              });
+            }
+          },
+          itemBuilder: (_) {
+            final items = <PopupMenuEntry<String>>[];
+            if (widget.agent.provider == 'claude') {
+              items.add(
+                const PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text(
+                    'Provider',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                  ),
+                ),
+              );
+              if (providers.isEmpty) {
+                items.add(
+                  const PopupMenuItem<String>(
+                    enabled: false,
+                    child: Text(
+                      '暂无可用 Provider',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                );
+              } else {
+                for (final p in providers) {
+                  final id = (p['id'] ?? '').toString();
+                  final name = (p['name'] ?? id).toString();
+                  final isActive = id == currentProviderId;
+                  items.add(
+                    PopupMenuItem<String>(
+                      value: '__provider__$id',
+                      child: Row(
+                        children: [
+                          if (isActive) ...[
+                            const Icon(Icons.check, size: 16),
+                            const SizedBox(width: 4),
+                          ] else
+                            const SizedBox(width: 20),
+                          Text(name, style: const TextStyle(fontSize: 13)),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+              }
+              items.add(const PopupMenuDivider());
+              items.add(
+                const PopupMenuItem<String>(
+                  value: '__add_provider__',
+                  child: Row(
+                    children: [
+                      Icon(Icons.add, size: 16),
+                      SizedBox(width: 6),
+                      Text('新增 Provider', style: TextStyle(fontSize: 13)),
+                    ],
+                  ),
+                ),
+              );
+              return items;
+            }
+
+            items.add(
+              const PopupMenuItem<String>(
+                enabled: false,
+                child: Text(
+                  'Model',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+              ),
+            );
+            if (widget.agent.provider == 'opencode') {
+              final opencodeModels = normalizeOpencodeModels(
+                snapshot.data?['_opencodeModels'],
+              );
+              final currentModelId = currentOpencodeModelId(data);
+              if (opencodeModels.isNotEmpty) {
+                String? lastProvider;
+                for (final m in opencodeModels) {
+                  final prov = m['provider'] ?? '';
+                  if (prov != lastProvider && prov.isNotEmpty) {
+                    if (lastProvider != null)
+                      items.add(const PopupMenuDivider());
+                    items.add(
+                      PopupMenuItem<String>(
+                        enabled: false,
+                        child: Text(
+                          prov,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 11,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                    );
+                    lastProvider = prov;
+                  }
+                  final id = m['id'] ?? '';
+                  final name = m['name'] ?? id;
+                  final isActive = opencodeModelMatches(id, currentModelId);
+                  items.add(
+                    PopupMenuItem<String>(
+                      value: '__model__$id',
+                      child: Row(
+                        children: [
+                          if (isActive) ...[
+                            const Icon(Icons.check, size: 16),
+                            const SizedBox(width: 4),
+                          ] else
+                            const SizedBox(width: 20),
+                          Expanded(
+                            child: Text(
+                              name,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+              } else {
+                items.add(
+                  const PopupMenuItem<String>(
+                    enabled: false,
+                    child: Text(
+                      'No models found',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                );
+              }
+            }
+            return items;
+          },
+          child: triggerChild,
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final modes = modesForProvider(widget.agent.provider);
+    final stopped =
+        widget.agent.status == AgentStatus.stopped ||
+        widget.agent.status == AgentStatus.crashed;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  '配置',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const Spacer(),
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (modes.isNotEmpty) ...[
+              Text(
+                '模式',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              ...modes.map((m) {
+                final active = m.id == widget.currentMode;
+                return ListTile(
+                  dense: true,
+                  leading: Icon(
+                    m.icon,
+                    size: 20,
+                    color: active ? scheme.primary : scheme.onSurfaceVariant,
+                  ),
+                  title: Text(
+                    m.label,
+                    style: TextStyle(
+                      color: active ? scheme.primary : scheme.onSurface,
+                      fontWeight:
+                          active ? FontWeight.w600 : FontWeight.normal,
+                    ),
+                  ),
+                  trailing: active
+                      ? Icon(Icons.check, size: 18, color: scheme.primary)
+                      : null,
+                  onTap: () {
+                    if (!active) {
+                      widget.onSwitchMode(m.id);
+                      Navigator.pop(context);
+                    }
+                  },
+                );
+              }),
+              const Divider(),
+            ],
+            if (widget.agent.provider == 'claude' ||
+                widget.agent.provider == 'opencode') ...[
+              Text(
+                'Provider / Model',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              _buildConfigSelector(context),
+              const Divider(),
+            ],
+            Text(
+              '操作',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (stopped)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.play_arrow),
+                title: const Text('启动'),
+                onTap: () {
+                  widget.onControl('restart');
+                  Navigator.pop(context);
+                },
+              ),
+            if (!stopped)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  Icons.stop,
+                  color: widget.stopping ? scheme.onSurfaceVariant : null,
+                ),
+                title: Text(
+                  widget.stopping ? '停止中…' : '停止',
+                  style: TextStyle(
+                    color: widget.stopping ? scheme.onSurfaceVariant : null,
+                  ),
+                ),
+                enabled: !widget.stopping,
+                onTap: () {
+                  widget.onControl('stop');
+                  Navigator.pop(context);
+                },
+              ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.refresh),
+              title: const Text('重启'),
+              onTap: () {
+                widget.onControl('restart');
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3291,12 +3871,14 @@ class _UserImagesState extends State<_UserImages> {
 class _MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool isLastAssistant;
+  final bool showTimestamp;
   final Future<void> Function()? onResolvePermissionPrompt;
   final VoidCallback? onToggleExpand;
 
   const _MessageBubble({
     required this.message,
     this.isLastAssistant = false,
+    this.showTimestamp = false,
     this.onResolvePermissionPrompt,
     this.onToggleExpand,
   });
@@ -3546,6 +4128,17 @@ class _MessageBubble extends StatelessWidget {
                       textColor: textColor,
                       isRaw: isRaw,
                     ),
+                    if (showTimestamp && message.timestamp != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2, right: 4, left: 4),
+                        child: Text(
+                          _formatMessageTime(message.timestamp!),
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -4333,6 +4926,14 @@ class _InputBar extends StatefulWidget {
   final List<Map<String, String>> pendingImages;
   final ValueChanged<List<Map<String, String>>> onImagesChanged;
   final List<SlashCommand> extraCommands;
+  final String currentMode;
+  final bool stopping;
+  final String nodeId;
+  final Future<void> Function(String action) onControl;
+  final Future<void> Function(String model) onSwitchModel;
+  final Future<void> Function(String providerId, {VoidCallback? onSwitched})
+  onSwitchProvider;
+  final Future<void> Function(String mode) onSwitchMode;
 
   const _InputBar({
     required this.agent,
@@ -4347,6 +4948,13 @@ class _InputBar extends StatefulWidget {
     this.pendingImages = const [],
     required this.onImagesChanged,
     this.extraCommands = const [],
+    required this.currentMode,
+    required this.stopping,
+    required this.nodeId,
+    required this.onControl,
+    required this.onSwitchModel,
+    required this.onSwitchProvider,
+    required this.onSwitchMode,
   });
 
   @override
@@ -4373,6 +4981,50 @@ class _InputBarState extends State<_InputBar> {
       oldWidget.controller.removeListener(_onControllerChanged);
       widget.controller.addListener(_onControllerChanged);
     }
+  }
+
+  Widget _buildModeButton(BuildContext context) {
+    final modes = modesForProvider(widget.agent!.provider);
+    if (modes.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final current = modes.firstWhere(
+      (m) => m.id == widget.currentMode,
+      orElse: () => modes.first,
+    );
+    return TextButton(
+      onPressed: _showConfigSheet,
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        minimumSize: const Size(32, 32),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: Text(
+        current.label,
+        style: TextStyle(
+          fontSize: 12,
+          color: scheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  void _showConfigSheet() {
+    if (widget.agent == null) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AgentConfigSheet(
+        agent: widget.agent!,
+        nodeId: widget.nodeId,
+        stopping: widget.stopping,
+        currentMode: widget.currentMode,
+        onControl: widget.onControl,
+        onSwitchModel: widget.onSwitchModel,
+        onSwitchProvider: widget.onSwitchProvider,
+        onSwitchMode: widget.onSwitchMode,
+      ),
+    );
   }
 
   void _showImagePreview(BuildContext context, Uint8List bytes) {
@@ -4581,12 +5233,11 @@ class _InputBarState extends State<_InputBar> {
       padding: EdgeInsets.only(
         left: 12,
         right: 12,
-        top: 8,
-        bottom: MediaQuery.of(context).padding.bottom + 8,
+        top: 4,
+        bottom: MediaQuery.of(context).padding.bottom + 4,
       ),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
-        border: Border(top: BorderSide(color: Colors.grey.shade300)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -4767,6 +5418,9 @@ class _InputBarState extends State<_InputBar> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              // Mode config button (leftmost)
+              if (widget.agent != null)
+                _buildModeButton(context),
               // Image button (left of text field)
               if (!isReadOnly &&
                   widget.agent?.provider != 'opencode' &&

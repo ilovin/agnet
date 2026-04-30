@@ -906,6 +906,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		"role":       "user",
 		"text":       message,
 		"imageCount": len(imageFiles),
+		"timestamp":  time.Now().UnixMilli(),
 	}
 	if len(imagePaths) > 0 {
 		broadcastData["images"] = imagePaths
@@ -1022,6 +1023,7 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 		"role":       "user",
 		"text":       message,
 		"imageCount": len(imageFiles),
+		"timestamp":  time.Now().UnixMilli(),
 	}
 	if len(imagePaths) > 0 {
 		broadcastData["images"] = imagePaths
@@ -2034,6 +2036,11 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 		params["providerScope"] = provider.ProviderScope
 		params["providerWriteMode"] = provider.ProviderWriteMode
 		params["providerReadOnlyReason"] = provider.ProviderReadOnlyReason
+		var lastMsgTimeMs int64
+		if t, err := h.server.manager.LastConversationEventTime(ag.ID); err == nil && !t.IsZero() {
+			lastMsgTimeMs = t.UnixMilli()
+		}
+		params["lastMessageTime"] = lastMsgTimeMs
 	}
 	return params
 }

@@ -65,6 +65,143 @@ List<String> sessionPreviewLinesFromMessages(
   return buildSessionPreviewLines(recentTexts, maxLines: maxLines);
 }
 
+/// Renders simple inline markdown (bold, italic, code, strikethrough, links)
+/// using Text.rich.  Safe inside ListTile subtitles and tight layouts.
+class _MarkdownText extends StatelessWidget {
+  final String data;
+  final TextStyle style;
+  final int? maxLines;
+  final TextOverflow? overflow;
+
+  const _MarkdownText(
+    this.data, {
+    required this.style,
+    this.maxLines,
+    this.overflow,
+  });
+
+  static final _pattern = RegExp(
+    r'(\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_|`[^`]+`|~~[^~]+~~|\[[^\]]+\]\([^)]+\))',
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final spans = <InlineSpan>[];
+    var lastEnd = 0;
+    for (final match in _pattern.allMatches(data)) {
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(text: data.substring(lastEnd, match.start), style: style));
+      }
+      final raw = match.group(0)!;
+      String content;
+      TextStyle spanStyle;
+      if (raw.startsWith('**') && raw.endsWith('**')) {
+        content = raw.substring(2, raw.length - 2);
+        spanStyle = style.copyWith(fontWeight: FontWeight.bold);
+      } else if (raw.startsWith('~~') && raw.endsWith('~~')) {
+        content = raw.substring(2, raw.length - 2);
+        spanStyle = style.copyWith(decoration: TextDecoration.lineThrough);
+      } else if ((raw.startsWith('*') && raw.endsWith('*')) ||
+          (raw.startsWith('_') && raw.endsWith('_'))) {
+        content = raw.substring(1, raw.length - 1);
+        spanStyle = style.copyWith(fontStyle: FontStyle.italic);
+      } else if (raw.startsWith('`') && raw.endsWith('`')) {
+        content = raw.substring(1, raw.length - 1);
+        spanStyle = style.copyWith(
+          fontFamily: 'monospace',
+          backgroundColor:
+              Theme.of(context).colorScheme.surfaceContainerHighest,
+        );
+      } else if (raw.startsWith('[')) {
+        // link: [text](url)
+        final textEnd = raw.indexOf(']');
+        content = raw.substring(1, textEnd);
+        spanStyle = style.copyWith(
+          color: Theme.of(context).colorScheme.primary,
+          decoration: TextDecoration.underline,
+        );
+      } else {
+        content = raw;
+        spanStyle = style;
+      }
+      spans.add(TextSpan(text: content, style: spanStyle));
+      lastEnd = match.end;
+    }
+    if (lastEnd < data.length) {
+      spans.add(TextSpan(text: data.substring(lastEnd), style: style));
+    }
+    return Text.rich(
+      TextSpan(children: spans),
+      maxLines: maxLines,
+      overflow: overflow,
+      softWrap: true,
+    );
+  }
+}
+
+/// Minimal markdown renderer for preview snippets.
+class _MarkdownPreview extends StatelessWidget {
+  final String data;
+  final Color color;
+
+  const _MarkdownPreview(this.data, {required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return _MarkdownText(
+      data,
+      style: TextStyle(fontSize: 12, color: color),
+      maxLines: 3,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
+class _ResizeHandle extends StatefulWidget {
+  final ValueChanged<double> onDrag;
+
+  const _ResizeHandle({required this.onDrag});
+
+  @override
+  State<_ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<_ResizeHandle> {
+  double _accumulator = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onPanStart: (_) => _accumulator = 0,
+      onPanUpdate: (details) {
+        _accumulator += details.delta.dx;
+        if (_accumulator.abs() >= 4) {
+          widget.onDrag(_accumulator);
+          _accumulator = 0;
+        }
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: Container(
+          width: 8,
+          color: Colors.transparent,
+          child: Center(
+            child: Container(
+              width: 2,
+              height: 40,
+              decoration: BoxDecoration(
+                color: Theme.of(context).dividerColor,
+                borderRadius: BorderRadius.circular(1),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Color providerColor(String provider) {
   switch (provider.toLowerCase()) {
     case 'claude':
@@ -114,29 +251,6 @@ List<Map<String, String>> getDefaultModels(String provider) {
   return defaultModels[provider] ?? defaultModels['claude']!;
 }
 
-enum DashboardLayoutMode { list, grid, wideGrid }
-
-String dashboardLayoutLabel(DashboardLayoutMode mode) {
-  switch (mode) {
-    case DashboardLayoutMode.list:
-      return '列表';
-    case DashboardLayoutMode.grid:
-      return '双列';
-    case DashboardLayoutMode.wideGrid:
-      return '三列';
-  }
-}
-
-IconData dashboardLayoutIcon(DashboardLayoutMode mode) {
-  switch (mode) {
-    case DashboardLayoutMode.list:
-      return Icons.view_agenda_outlined;
-    case DashboardLayoutMode.grid:
-      return Icons.grid_view;
-    case DashboardLayoutMode.wideGrid:
-      return Icons.view_module;
-  }
-}
 
 class SessionCandidate {
   final int? pid;
@@ -357,7 +471,9 @@ List<AgentModel> visibleManagedAgentsForNode(List<AgentModel> agents) {
 
   final visibleAgents = bySignature.values.toList()
     ..sort((a, b) {
-      return managedAgentSortTitle(a).compareTo(managedAgentSortTitle(b));
+      final cmp = managedAgentSortTitle(a).compareTo(managedAgentSortTitle(b));
+      if (cmp != 0) return cmp;
+      return a.id.compareTo(b.id);
     });
   return visibleAgents;
 }
@@ -390,34 +506,13 @@ List<DashboardSessionTarget> buildVisibleDashboardSessions(NodeState state) {
   sessions.sort((a, b) {
     final nodeCmp = a.nodeName.toLowerCase().compareTo(b.nodeName.toLowerCase());
     if (nodeCmp != 0) return nodeCmp;
-    return managedAgentSortTitle(a.agent).compareTo(managedAgentSortTitle(b.agent));
+    final titleCmp = managedAgentSortTitle(a.agent).compareTo(managedAgentSortTitle(b.agent));
+    if (titleCmp != 0) return titleCmp;
+    return a.agent.id.compareTo(b.agent.id);
   });
   return sessions;
 }
 
-enum CanvasPanelSize { compact, regular, expanded }
-
-String canvasPanelSizeLabel(CanvasPanelSize size) {
-  switch (size) {
-    case CanvasPanelSize.compact:
-      return '紧凑';
-    case CanvasPanelSize.regular:
-      return '标准';
-    case CanvasPanelSize.expanded:
-      return '展开';
-  }
-}
-
-CanvasPanelSize nextCanvasPanelSize(CanvasPanelSize size) {
-  switch (size) {
-    case CanvasPanelSize.compact:
-      return CanvasPanelSize.regular;
-    case CanvasPanelSize.regular:
-      return CanvasPanelSize.expanded;
-    case CanvasPanelSize.expanded:
-      return CanvasPanelSize.compact;
-  }
-}
 
 class OpencodeFileCandidate {
   final String id;
@@ -456,14 +551,14 @@ class DashboardScreen extends ConsumerStatefulWidget {
 class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   Timer? _refreshTimer;
   bool _wsConnected = true;
-  bool _showSessionPreview = false;
-  DashboardLayoutMode _layoutMode = DashboardLayoutMode.list;
+  bool _showSessionPreview = true;
   List<String> _canvasPanelOrder = const [];
-  final Map<String, CanvasPanelSize> _canvasPanelSizes = {};
+  final Map<String, int> _canvasPanelFlex = {};
   final Map<String, TextEditingController> _canvasInputControllers = {};
   final Map<String, bool> _canvasSending = {};
   String? _canvasPickerSelectionKey;
   bool _showDetails = false;
+  bool _canvasSelectionMode = false;
   EventCallback? _eventHandler;
   WsClient? _eventClient;
   StreamSubscription<WsConnectionState>? _connSub;
@@ -471,57 +566,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   bool _isLargeScreen(BuildContext context) =>
       MediaQuery.of(context).size.width >= 900;
 
-  int _crossAxisCountForWidth(double width) {
-    if (width >= 1600) {
-      return _layoutMode == DashboardLayoutMode.list
-          ? 1
-          : (_layoutMode == DashboardLayoutMode.grid ? 2 : 3);
-    }
-    if (width >= 1300) {
-      return _layoutMode == DashboardLayoutMode.list
-          ? 1
-          : (_layoutMode == DashboardLayoutMode.grid ? 2 : 3);
-    }
-    if (width >= 1100) {
-      return _layoutMode == DashboardLayoutMode.list ? 1 : 2;
-    }
-    return 1;
-  }
-
-  Future<void> _pickLayoutMode() async {
-    final selected = await showModalBottomSheet<DashboardLayoutMode>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: DashboardLayoutMode.values
-              .map(
-                (mode) => ListTile(
-                  leading: Icon(dashboardLayoutIcon(mode)),
-                  title: Text(dashboardLayoutLabel(mode)),
-                  trailing: mode == _layoutMode
-                      ? Icon(
-                          Icons.check,
-                          color: Theme.of(ctx).colorScheme.primary,
-                        )
-                      : null,
-                  onTap: () => Navigator.pop(ctx, mode),
-                ),
-              )
-              .toList(),
-        ),
-      ),
-    );
-    if (!mounted || selected == null || selected == _layoutMode) return;
-    setState(() {
-      _layoutMode = selected;
-    });
-  }
-
   Future<void> _prefetchVisibleAgentPreviews() async {
-    final shouldLoadPreview =
-        _showSessionPreview || _layoutMode != DashboardLayoutMode.list;
+    final shouldLoadPreview = _showSessionPreview;
     if (!shouldLoadPreview) return;
     final client = ref.read(connectionProvider);
     if (client == null) return;
@@ -988,20 +1034,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     );
   }
 
-  CanvasPanelSize _canvasSizeFor(String panelKey) {
-    return _canvasPanelSizes[panelKey] ?? CanvasPanelSize.regular;
-  }
-
-  int _canvasSpanFor(CanvasPanelSize size, int columns) {
-    if (columns <= 1) return 1;
-    switch (size) {
-      case CanvasPanelSize.compact:
-        return 1;
-      case CanvasPanelSize.regular:
-        return columns >= 2 ? 2 : 1;
-      case CanvasPanelSize.expanded:
-        return columns;
-    }
+  int _canvasFlexFor(String panelKey) {
+    return _canvasPanelFlex[panelKey] ?? 1;
   }
 
   Future<void> _addSessionToCanvas(DashboardSessionTarget target) async {
@@ -1009,7 +1043,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     if (_canvasPanelOrder.contains(panelKey)) return;
     setState(() {
       _canvasPanelOrder = [..._canvasPanelOrder, panelKey];
-      _canvasPanelSizes.putIfAbsent(panelKey, () => CanvasPanelSize.regular);
+      _canvasPanelFlex.putIfAbsent(panelKey, () => 1);
     });
 
     final client = ref.read(connectionProvider);
@@ -1022,7 +1056,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     setState(() {
       _canvasPanelOrder =
           _canvasPanelOrder.where((key) => key != panelKey).toList();
-      _canvasPanelSizes.remove(panelKey);
+      _canvasPanelFlex.remove(panelKey);
       _canvasSending.remove(panelKey);
       if (_canvasPickerSelectionKey == panelKey) {
         _canvasPickerSelectionKey = null;
@@ -1151,15 +1185,32 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     }
   }
 
-  Widget _buildDashboardListPane(List<NodeModel> nodes) {
+  Widget _buildDashboardListPane(
+    List<NodeModel> nodes,
+    Set<String> canvasPanelKeys,
+    Map<String, DashboardSessionTarget> sessionByKey,
+  ) {
     return ListView.builder(
       itemCount: nodes.length,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(8),
       itemBuilder: (_, i) => NodeCard(
         node: nodes[i],
         showSessionPreview: _showSessionPreview,
         isLargeScreen: true,
         showDetails: _showDetails,
+        canvasSelectionMode: _canvasSelectionMode,
+        canvasPanelKeys: canvasPanelKeys,
+        onToggleCanvas: (agent) {
+          final key = '${nodes[i].id}:${agent.id}';
+          if (_canvasPanelOrder.contains(key)) {
+            _removeCanvasPanel(key);
+          } else {
+            final target = sessionByKey[key];
+            if (target != null) {
+              _addSessionToCanvas(target);
+            }
+          }
+        },
       ),
     );
   }
@@ -1180,70 +1231,41 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       });
     }
 
-    final addable = sessions
-        .where((s) => !activePanelKeys.contains(s.key))
-        .toList(growable: false);
-    final selectedPicker =
-        (_canvasPickerSelectionKey != null &&
-            addable.any((s) => s.key == _canvasPickerSelectionKey))
-        ? _canvasPickerSelectionKey
-        : (addable.isNotEmpty ? addable.first.key : null);
-
     return Padding(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(6),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '详情画布',
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
           Row(
             children: [
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  initialValue: selectedPicker,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                    labelText: '从可见会话添加到画布',
-                  ),
-                  items: addable
-                      .map(
-                        (session) => DropdownMenuItem(
-                          value: session.key,
-                          child: Text(
-                            '${session.nodeName} · ${managedAgentTitle(session.agent)}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: addable.isEmpty
-                      ? null
-                      : (value) {
-                          setState(() {
-                            _canvasPickerSelectionKey = value;
-                          });
-                        },
+              Text(
+                '详情画布',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
                 ),
               ),
+              if (_canvasSelectionMode) ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    '点击左侧 + 添加会话，- 移除会话',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ] else
+                const Spacer(),
               const SizedBox(width: 8),
               FilledButton.icon(
-                onPressed: selectedPicker == null
-                    ? null
-                    : () {
-                        final target = sessionByKey[selectedPicker];
-                        if (target != null) {
-                          _addSessionToCanvas(target);
-                        }
-                      },
-                icon: const Icon(Icons.add),
-                label: const Text('添加'),
+                onPressed: () {
+                  setState(() {
+                    _canvasSelectionMode = !_canvasSelectionMode;
+                  });
+                },
+                icon: Icon(_canvasSelectionMode ? Icons.check : Icons.add),
+                label: Text(_canvasSelectionMode ? '完成' : '添加'),
               ),
             ],
           ),
@@ -1257,74 +1279,74 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       style: TextStyle(color: Colors.grey),
                     ),
                   )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final spacing = 12.0;
-                      final columns = _crossAxisCountForWidth(
-                        constraints.maxWidth,
-                      );
-                      final baseWidth =
-                          (constraints.maxWidth - spacing * (columns - 1)) /
-                          columns;
-
-                      return SingleChildScrollView(
-                        child: Wrap(
-                          spacing: spacing,
-                          runSpacing: spacing,
-                          children: activePanelKeys.map((panelKey) {
-                            final target = sessionByKey[panelKey]!;
-                            final size = _canvasSizeFor(panelKey);
-                            final span = _canvasSpanFor(size, columns);
-                            final panelWidth =
-                                baseWidth * span + spacing * (span - 1);
-                            final logoKey =
-                                '${target.nodeId}:${sessionIdentityKey(
-                              provider: target.agent.provider,
-                              sessionId: target.agent.sessionId,
-                              pid: target.agent.pid,
-                            )}';
-                            final logo = ref
-                                .watch(sessionLogoProvider.notifier)
-                                .iconFor(logoKey);
-                            return SizedBox(
-                              width: panelWidth,
-                              child: _CanvasSessionPanel(
-                                panelKey: panelKey,
-                                target: target,
-                                size: size,
-                                messages:
-                                    ref.watch(conversationProvider)[
-                                        (target.nodeId, target.agent.id)] ??
-                                    const [],
-                                unreadCount:
-                                    ref.watch(unreadProvider)[
-                                        (target.nodeId, target.agent.id)] ??
-                                    0,
-                                controller: _canvasControllerFor(panelKey),
-                                sending: _canvasSending[panelKey] ?? false,
-                                onSizeChanged: (next) {
-                                  setState(() {
-                                    _canvasPanelSizes[panelKey] = next;
-                                  });
-                                },
-                                onSend: () => _sendCanvasReply(target),
-                                onOpenDetail: () {
-                                  context.push(
-                                    '/agent/${target.nodeId}/${target.agent.id}',
-                                  );
-                                },
-                                onRemove: () => _removeCanvasPanel(panelKey),
-                                logo: logo,
-                                onLogoTap: () => _showCanvasLogoPicker(
-                                  logoKey,
-                                  logo,
-                                ),
+                : Row(
+                    children: () {
+                      final children = <Widget>[];
+                      for (int i = 0; i < activePanelKeys.length; i++) {
+                        final panelKey = activePanelKeys[i];
+                        final target = sessionByKey[panelKey]!;
+                        final logoKey =
+                            '${target.nodeId}:${sessionIdentityKey(
+                          provider: target.agent.provider,
+                          sessionId: target.agent.sessionId,
+                          pid: target.agent.pid,
+                          agentId: target.agent.id,
+                        )}';
+                        final logo = ref
+                            .watch(sessionLogoProvider.notifier)
+                            .iconFor(logoKey);
+                        children.add(
+                          Expanded(
+                            flex: _canvasFlexFor(panelKey),
+                            child: _CanvasSessionPanel(
+                              panelKey: panelKey,
+                              target: target,
+                              messages:
+                                  ref.watch(conversationProvider)[
+                                      (target.nodeId, target.agent.id)] ??
+                                  const [],
+                              controller: _canvasControllerFor(panelKey),
+                              sending: _canvasSending[panelKey] ?? false,
+                              onSend: () => _sendCanvasReply(target),
+                              onOpenDetail: () {
+                                context.push(
+                                  '/agent/${target.nodeId}/${target.agent.id}',
+                                );
+                              },
+                              onRemove: () => _removeCanvasPanel(panelKey),
+                              logo: logo,
+                              onLogoTap: () => _showCanvasLogoPicker(
+                                logoKey,
+                                logo,
                               ),
-                            );
-                          }).toList(),
-                        ),
-                      );
-                    },
+                            ),
+                          ),
+                        );
+                        if (i < activePanelKeys.length - 1) {
+                          children.add(
+                            _ResizeHandle(
+                              onDrag: (dx) {
+                                setState(() {
+                                  final leftKey = activePanelKeys[i];
+                                  final rightKey = activePanelKeys[i + 1];
+                                  final leftFlex = _canvasFlexFor(leftKey);
+                                  final rightFlex = _canvasFlexFor(rightKey);
+                                  final delta = (dx / 40).round();
+                                  if (delta == 0) return;
+                                  final newLeft =
+                                      (leftFlex + delta).clamp(1, 20);
+                                  final newRight =
+                                      (rightFlex - delta).clamp(1, 20);
+                                  _canvasPanelFlex[leftKey] = newLeft;
+                                  _canvasPanelFlex[rightKey] = newRight;
+                                });
+                              },
+                            ),
+                          );
+                        }
+                      }
+                      return children;
+                    }(),
                   ),
           ),
         ],
@@ -1362,8 +1384,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        toolbarHeight:
-            (64 * MediaQuery.textScalerOf(context).scale(1.0)).clamp(64.0, 96.0),
+        toolbarHeight: 56,
         leading: IconButton(
           icon: const Icon(Icons.dashboard),
           tooltip: '仪表盘',
@@ -1441,12 +1462,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               }
             },
           ),
-          if (_isLargeScreen(context))
-            IconButton(
-              icon: Icon(dashboardLayoutIcon(_layoutMode)),
-              tooltip: '画布布局：${dashboardLayoutLabel(_layoutMode)}',
-              onPressed: _pickLayoutMode,
-            ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () => context.push('/settings'),
@@ -1461,7 +1476,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 if (!largeScreen) {
                   return ListView.builder(
                     itemCount: nodes.length,
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(8),
                     itemBuilder: (_, i) => NodeCard(
                       node: nodes[i],
                       showSessionPreview: _showSessionPreview,
@@ -1475,9 +1490,14 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                   for (final session in sessions) session.key: session,
                 };
 
+                final canvasPanelKeys = Set<String>.from(_canvasPanelOrder);
+
                 return Row(
                   children: [
-                    Expanded(flex: 5, child: _buildDashboardListPane(nodes)),
+                    Expanded(
+                      flex: 5,
+                      child: _buildDashboardListPane(nodes, canvasPanelKeys, sessionByKey),
+                    ),
                     const VerticalDivider(width: 1),
                     Expanded(
                       flex: 6,
@@ -1494,12 +1514,9 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 class _CanvasSessionPanel extends StatelessWidget {
   final String panelKey;
   final DashboardSessionTarget target;
-  final CanvasPanelSize size;
   final List<MessageModel> messages;
-  final int unreadCount;
   final TextEditingController controller;
   final bool sending;
-  final ValueChanged<CanvasPanelSize> onSizeChanged;
   final VoidCallback onSend;
   final VoidCallback onOpenDetail;
   final VoidCallback onRemove;
@@ -1509,12 +1526,9 @@ class _CanvasSessionPanel extends StatelessWidget {
   const _CanvasSessionPanel({
     required this.panelKey,
     required this.target,
-    required this.size,
     required this.messages,
-    required this.unreadCount,
     required this.controller,
     required this.sending,
-    required this.onSizeChanged,
     required this.onSend,
     required this.onOpenDetail,
     required this.onRemove,
@@ -1522,27 +1536,6 @@ class _CanvasSessionPanel extends StatelessWidget {
     this.onLogoTap,
   });
 
-  double _previewHeightFor(CanvasPanelSize panelSize) {
-    switch (panelSize) {
-      case CanvasPanelSize.compact:
-        return 120;
-      case CanvasPanelSize.regular:
-        return 170;
-      case CanvasPanelSize.expanded:
-        return 230;
-    }
-  }
-
-  int _maxLinesFor(CanvasPanelSize panelSize) {
-    switch (panelSize) {
-      case CanvasPanelSize.compact:
-        return 4;
-      case CanvasPanelSize.regular:
-        return 6;
-      case CanvasPanelSize.expanded:
-        return 9;
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1553,25 +1546,15 @@ class _CanvasSessionPanel extends StatelessWidget {
         shortSessionId(target.agent.sessionId),
       AgentStatusTheme.getLabel(target.agent.status),
     ];
-    final previewTexts = messages
-        .where((m) => m.text.trim().isNotEmpty)
-        .map((m) {
-          final role = m.role == MessageRole.user ? '你' : 'AI';
-          return '$role: ${m.text}';
-        })
-        .toList();
-    final lines = buildSessionPreviewLines(
-      previewTexts,
-      maxLines: _maxLinesFor(size),
-      maxCharsPerLine: 120,
-    );
+    final displayMessages =
+        messages.where((m) => m.text.trim().isNotEmpty).toList();
 
     final inputEnabled = !sending && !target.agent.isReadOnly;
 
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1579,17 +1562,17 @@ class _CanvasSessionPanel extends StatelessWidget {
               children: [
                 InkWell(
                   onTap: onLogoTap,
-                  borderRadius: BorderRadius.circular(20),
+                  borderRadius: BorderRadius.circular(16),
                   child: Padding(
-                    padding: const EdgeInsets.all(4),
+                    padding: const EdgeInsets.all(2),
                     child: Icon(
                       logo,
                       color: providerColor(target.agent.provider),
-                      size: 20,
+                      size: 16,
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1612,69 +1595,32 @@ class _CanvasSessionPanel extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (unreadCount > 0)
-                  Container(
-                    margin: const EdgeInsets.only(right: 4),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.red,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      '未读 $unreadCount',
-                      style: const TextStyle(color: Colors.white, fontSize: 11),
-                    ),
-                  ),
-                PopupMenuButton<CanvasPanelSize>(
-                  tooltip: '面板尺寸',
-                  icon: const Icon(Icons.aspect_ratio, size: 18),
-                  onSelected: onSizeChanged,
-                  itemBuilder: (context) => CanvasPanelSize.values
-                      .map(
-                        (value) => PopupMenuItem<CanvasPanelSize>(
-                          value: value,
-                          child: Row(
-                            children: [
-                              Text(canvasPanelSizeLabel(value)),
-                              if (value == size) ...[
-                                const SizedBox(width: 8),
-                                Icon(
-                                  Icons.check,
-                                  size: 16,
-                                  color: Theme.of(context).colorScheme.primary,
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      )
-                      .toList(),
-                ),
                 IconButton(
                   tooltip: '打开详情',
-                  icon: const Icon(Icons.open_in_new, size: 18),
+                  icon: const Icon(Icons.open_in_new, size: 16),
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
                   onPressed: onOpenDetail,
                 ),
                 IconButton(
                   tooltip: '移除面板',
-                  icon: const Icon(Icons.close, size: 18),
+                  icon: const Icon(Icons.close, size: 16),
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  padding: EdgeInsets.zero,
                   onPressed: onRemove,
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Container(
-              width: double.infinity,
-              height: _previewHeightFor(size),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: lines.isEmpty
+            const SizedBox(height: 4),
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: displayMessages.isEmpty
                   ? Center(
                       child: Text(
                         '暂无会话内容',
@@ -1684,17 +1630,51 @@ class _CanvasSessionPanel extends StatelessWidget {
                       ),
                     )
                   : ListView.builder(
-                      itemCount: lines.length,
-                      itemBuilder: (context, index) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Text(
-                          lines[index],
-                          style: const TextStyle(fontSize: 13),
-                        ),
-                      ),
+                      reverse: true,
+                      itemCount: displayMessages.length,
+                      itemBuilder: (context, index) {
+                        final msg = displayMessages[displayMessages.length - 1 - index];
+                        final isUser = msg.role == MessageRole.user;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isUser ? '你: ' : 'AI: ',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                  color: isUser
+                                      ? Theme.of(
+                                        context,
+                                      ).colorScheme.primary
+                                      : Theme.of(
+                                        context,
+                                      ).colorScheme.onSurface,
+                                ),
+                              ),
+                              Expanded(
+                                child: _MarkdownText(
+                                  msg.text,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color:
+                                        Theme.of(
+                                          context,
+                                        ).colorScheme.onSurface,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
+              ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             Row(
               children: [
                 Expanded(
@@ -1739,12 +1719,18 @@ class NodeCard extends ConsumerStatefulWidget {
   final bool showSessionPreview;
   final bool isLargeScreen;
   final bool showDetails;
+  final bool canvasSelectionMode;
+  final Set<String> canvasPanelKeys;
+  final ValueChanged<AgentModel>? onToggleCanvas;
   const NodeCard({
     super.key,
     required this.node,
     this.showSessionPreview = false,
     this.isLargeScreen = false,
     this.showDetails = false,
+    this.canvasSelectionMode = false,
+    this.canvasPanelKeys = const {},
+    this.onToggleCanvas,
   });
 
   @override
@@ -1830,30 +1816,27 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     final summaryChips = _buildSummaryChips(context, visibleAgents);
 
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           ListTile(
-            leading: Icon(nodeIcon, color: _statusColor),
+            dense: true,
+            minLeadingWidth: 0,
+            leading: Icon(nodeIcon, color: _statusColor, size: 20),
             title: Text(
               nodeDisplay,
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
-                ),
-                if (widget.isLargeScreen &&
-                    widget.showDetails &&
-                    summaryChips.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Wrap(spacing: 6, runSpacing: 6, children: summaryChips),
-                ],
-              ],
-            ),
+            subtitle: widget.isLargeScreen && widget.showDetails && summaryChips.isNotEmpty
+                ? Wrap(spacing: 6, runSpacing: 6, children: summaryChips)
+                : Text(
+                    '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1868,21 +1851,30 @@ class _NodeCardState extends ConsumerState<NodeCard> {
           ),
           if (visibleAgents.isNotEmpty) const Divider(height: 1),
           ...visibleAgents.map(
-            (a) => AgentRow(
-              agent: a,
-              nodeId: widget.node.id,
-              showPreview: widget.showSessionPreview,
-              isLargeScreen: widget.isLargeScreen,
-              showDetails: widget.showDetails,
-            ),
+            (a) {
+              final key = '${widget.node.id}:${a.id}';
+              return AgentRow(
+                key: ValueKey(key),
+                agent: a,
+                nodeId: widget.node.id,
+                showPreview: widget.showSessionPreview,
+                isLargeScreen: widget.isLargeScreen,
+                showDetails: widget.showDetails,
+                canvasSelectionMode: widget.canvasSelectionMode,
+                isInCanvas: widget.canvasPanelKeys.contains(key),
+                onToggleCanvas: widget.onToggleCanvas != null
+                    ? () => widget.onToggleCanvas!(a)
+                    : null,
+              );
+            },
           ),
           if (visibleAgents.isEmpty)
             const Padding(
-              padding: EdgeInsets.all(16),
+              padding: EdgeInsets.all(12),
               child: Text('暂无活跃会话', style: TextStyle(color: Colors.grey)),
             ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Wrap(
               spacing: 8,
               runSpacing: 4,
@@ -2241,7 +2233,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       list.sort((a, b) {
         final at = managedAgentSortTitle(a);
         final bt = managedAgentSortTitle(b);
-        return at.compareTo(bt);
+        final cmp = at.compareTo(bt);
+        if (cmp != 0) return cmp;
+        return a.id.compareTo(b.id);
       });
       return list;
     }
@@ -2339,7 +2333,11 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       list.sort((a, b) {
         final at = _sessionCandidateSortTitle(a).toLowerCase();
         final bt = _sessionCandidateSortTitle(b).toLowerCase();
-        return at.compareTo(bt);
+        final cmp = at.compareTo(bt);
+        if (cmp != 0) return cmp;
+        final sidCmp = (a.sessionId ?? '').compareTo(b.sessionId ?? '');
+        if (sidCmp != 0) return sidCmp;
+        return (a.pid ?? 0).compareTo(b.pid ?? 0);
       });
       return list;
     }
@@ -2377,15 +2375,19 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       bool runAutoAttach = false,
     }) async {
       try {
+        print('[SessionManager] fetchCatalog called for node=${widget.node.id}, runAutoAttach=$runAutoAttach');
         final result = await client.call('session.catalog', {
           'nodeId': widget.node.id,
         });
+        print('[SessionManager] fetchCatalog result type=${result.runtimeType}');
         final map = result is Map
             ? Map<String, dynamic>.from(result)
             : <String, dynamic>{};
 
+        final rawManaged = (map['managed'] as List?) ?? const [];
+        print('[SessionManager] fetchCatalog raw managed count=${rawManaged.length}');
         final fetchedManaged = normalizeManaged(
-          ((map['managed'] as List?) ?? const [])
+          rawManaged
               .whereType<Map>()
               .map(
                 (e) => AgentModel.fromJson({
@@ -2395,11 +2397,13 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               )
               .toList(),
         );
+        print('[SessionManager] fetchCatalog normalized managed count=${fetchedManaged.length}');
 
         final fetchedSessions = await visibleSessions(
           parseSessionCandidates(map),
           fetchedManaged,
         );
+        print('[SessionManager] fetchCatalog visible sessions count=${fetchedSessions.length}');
 
         if (!ctx.mounted) return;
 
@@ -2440,30 +2444,37 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     }
 
     try {
+      print('[SessionManager] calling session.catalog for node=${widget.node.id}');
       final result = await client.call('session.catalog', {
         'nodeId': widget.node.id,
       });
+      print('[SessionManager] result type=${result.runtimeType}');
       final map = result is Map
           ? Map<String, dynamic>.from(result)
           : <String, dynamic>{};
-      managedAgents = normalizeManaged(
-        ((map['managed'] as List?) ?? const [])
-            .whereType<Map>()
-            .map(
-              (e) => AgentModel.fromJson({
-                ...Map<String, dynamic>.from(e),
-                'nodeId': widget.node.id,
-              }),
-            )
-            .toList(),
-      );
+      final rawManaged = (map['managed'] as List?) ?? const [];
+      print('[SessionManager] raw managed count=${rawManaged.length}');
+      final parsed = rawManaged
+          .whereType<Map>()
+          .map(
+            (e) => AgentModel.fromJson({
+              ...Map<String, dynamic>.from(e),
+              'nodeId': widget.node.id,
+            }),
+          )
+          .toList();
+      print('[SessionManager] parsed agent count=${parsed.length}');
+      managedAgents = normalizeManaged(parsed);
+      print('[SessionManager] normalized managed count=${managedAgents.length}');
       sessions = await visibleSessions(
         parseSessionCandidates(map),
         managedAgents,
       );
+      print('[SessionManager] visible sessions count=${sessions.length}');
       opencodeFiles = const [];
-    } catch (e) {
-      debugPrint('session manager init error: $e');
+    } catch (e, st) {
+      print('[SessionManager] init error: $e');
+      print('[SessionManager] stack: $st');
     }
 
     if (!context.mounted) return;
@@ -2730,6 +2741,9 @@ class AgentRow extends ConsumerStatefulWidget {
   final bool showPreview;
   final bool isLargeScreen;
   final bool showDetails;
+  final bool canvasSelectionMode;
+  final bool isInCanvas;
+  final VoidCallback? onToggleCanvas;
   const AgentRow({
     super.key,
     required this.agent,
@@ -2737,6 +2751,9 @@ class AgentRow extends ConsumerStatefulWidget {
     this.showPreview = false,
     this.isLargeScreen = false,
     this.showDetails = false,
+    this.canvasSelectionMode = false,
+    this.isInCanvas = false,
+    this.onToggleCanvas,
   });
 
   @override
@@ -2749,14 +2766,8 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
-  Widget _buildSubtitle(BuildContext context) {
+  Widget _buildStatusTime(BuildContext context) {
     final agent = widget.agent;
-    final prefixParts = <String>[
-      if ((agent.pid ?? 0) > 0) '${agent.pid}',
-      if ((agent.sessionId ?? '').trim().isNotEmpty)
-        shortSessionId(agent.sessionId),
-    ];
-    final prefix = prefixParts.join('.');
     final statusText =
         _statusLabel + (agent.status == AgentStatus.crashed ? '.异常' : '');
     final timeText = agent.lastMessageTime != null
@@ -2766,13 +2777,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       TextSpan(
         style: const TextStyle(fontSize: 12),
         children: [
-          if (prefix.isNotEmpty)
-            TextSpan(
-              text: '$prefix.',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
           TextSpan(
             text: statusText,
             style: TextStyle(fontWeight: FontWeight.w600, color: _statusColor),
@@ -2786,6 +2790,24 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildTitleRow(BuildContext context, String displayTitle) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Text(
+            displayTitle,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+        ),
+        const SizedBox(width: 8),
+        _buildStatusTime(context),
+      ],
     );
   }
 
@@ -3061,8 +3083,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 const [],
           )
         : const <String>[];
-    final unreadCount =
-        ref.watch(unreadProvider)[(widget.nodeId, agent.id)] ?? 0;
     final metaBadges = widget.isLargeScreen && widget.showDetails
         ? _buildMetaBadges(agent)
         : const <String>[];
@@ -3071,48 +3091,54 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       provider: agent.provider,
       sessionId: agent.sessionId,
       pid: agent.pid,
+      agentId: agent.id,
     )}';
     final sessionLogo = ref.watch(sessionLogoProvider.notifier).iconFor(sessionKey);
 
-    return ListTile(
+    final tile = ListTile(
       key: _tileKey,
       dense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 2),
-      leading: InkWell(
-        onTap: () {
-          final t = agent.lastMessageTime;
-          if (t != null) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('最后消息：${_formatRelativeTime(t)}'),
-                duration: const Duration(seconds: 2),
-              ),
-            );
-          }
-        },
-        onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
-        borderRadius: BorderRadius.circular(20),
-        child: Padding(
-          padding: const EdgeInsets.all(4),
-          child: Icon(sessionLogo, color: providerColor(agent.provider), size: 22),
-        ),
-      ),
-      title: Text(displayTitle, maxLines: 2, overflow: TextOverflow.ellipsis),
-      trailing: unreadCount > 0
-          ? Container(
-              width: 10,
-              height: 10,
-              decoration: const BoxDecoration(
-                color: Colors.red,
-                shape: BoxShape.circle,
+      minLeadingWidth: 0,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      leading: widget.canvasSelectionMode
+          ? InkWell(
+              onTap: widget.onToggleCanvas,
+              borderRadius: BorderRadius.circular(16),
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(
+                  widget.isInCanvas ? Icons.remove_circle : Icons.add_circle,
+                  color: widget.isInCanvas
+                      ? Theme.of(context).colorScheme.error
+                      : Theme.of(context).colorScheme.primary,
+                  size: 18,
+                ),
               ),
             )
-          : null,
+          : InkWell(
+              onTap: () {
+                final t = agent.lastMessageTime;
+                if (t != null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('最后消息：${_formatRelativeTime(t)}'),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                }
+              },
+              onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
+              borderRadius: BorderRadius.circular(16),
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(sessionLogo, color: providerColor(agent.provider), size: 18),
+              ),
+            ),
+      title: _buildTitleRow(context, displayTitle),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _buildSubtitle(context),
           if (metaBadges.isNotEmpty) ...[
             const SizedBox(height: 4),
             Wrap(
@@ -3145,22 +3171,40 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           ],
           if (previewLines.isNotEmpty) ...[
             const SizedBox(height: 4),
-            ...previewLines.map(
-              (line) => Text(
-                line,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
+            _MarkdownPreview(
+              previewLines.join('\n'),
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ],
         ],
       ),
-      onTap: () => context.push('/agent/${widget.nodeId}/${agent.id}'),
-      onLongPress: _showAgentActions,
+      onTap: widget.canvasSelectionMode
+          ? null
+          : () => context.push('/agent/${widget.nodeId}/${agent.id}'),
+      onLongPress: widget.canvasSelectionMode ? null : _showAgentActions,
+    );
+
+    if (widget.canvasSelectionMode) {
+      return tile;
+    }
+
+    return Dismissible(
+      key: ValueKey('${widget.nodeId}:${agent.id}'),
+      direction: DismissDirection.startToEnd,
+      confirmDismiss: (_) async {
+        context.push('/agent/${widget.nodeId}/${agent.id}');
+        return false;
+      },
+      background: Container(
+        color: Theme.of(context).colorScheme.primaryContainer,
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 24),
+        child: Icon(
+          Icons.arrow_forward,
+          color: Theme.of(context).colorScheme.onPrimaryContainer,
+        ),
+      ),
+      child: tile,
     );
   }
 }
@@ -3179,7 +3223,9 @@ String _agentSubtitleText(AgentModel agent) {
 }
 
 String _agentDisplayTitle(AgentModel agent) {
-  return managedAgentTitle(agent);
+  final name = agent.name.trim();
+  if (name.isNotEmpty) return name;
+  return _agentFallbackTitle(agent);
 }
 
 /// Returns a human-readable relative time string for a Unix-ms timestamp.
@@ -3199,13 +3245,7 @@ String _formatRelativeTime(int unixMs) {
 
 String managedAgentTitle(AgentModel agent) {
   final name = agent.name.trim();
-  final sessionReason = agent.sessionStateReason?.trim() ?? '';
-  if (name.isNotEmpty) {
-    if (sessionReason.isNotEmpty && name == sessionReason) {
-      return _agentFallbackTitle(agent);
-    }
-    return name;
-  }
+  if (name.isNotEmpty) return name;
   return _agentFallbackTitle(agent);
 }
 

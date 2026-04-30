@@ -7,6 +7,7 @@ class MessageModel {
   final String text;
   final int seq;
   final String msgId;
+  final int? timestamp;
 
   const MessageModel({
     required this.nodeId,
@@ -15,6 +16,7 @@ class MessageModel {
     required this.text,
     required this.seq,
     this.msgId = '',
+    this.timestamp,
   });
 
   factory MessageModel.fromJson(Map<String, dynamic> json) => MessageModel(
@@ -24,6 +26,7 @@ class MessageModel {
         text: json['text'] as String? ?? '',
         seq: (json['seq'] as num?)?.toInt() ?? 0,
         msgId: json['msg_id'] as String? ?? '',
+        timestamp: (json['timestamp'] as num?)?.toInt(),
       );
 
   MessageModel copyWith({
@@ -33,6 +36,7 @@ class MessageModel {
     String? text,
     int? seq,
     String? msgId,
+    int? timestamp,
   }) =>
       MessageModel(
         nodeId: nodeId ?? this.nodeId,
@@ -41,5 +45,6 @@ class MessageModel {
         text: text ?? this.text,
         seq: seq ?? this.seq,
         msgId: msgId ?? this.msgId,
+        timestamp: timestamp ?? this.timestamp,
       );
 }

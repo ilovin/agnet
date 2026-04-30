@@ -1,8 +1,13 @@
 package ws
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/phone-talk/agentd/internal/agent"
+	"github.com/phone-talk/agentd/internal/scanner"
+	"github.com/phone-talk/agentd/internal/store"
 )
 
 func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
@@ -191,5 +196,65 @@ func TestSessionCatalogIncludesEmptySessionIDClaude(t *testing.T) {
 	}
 	if result["provider"] != "claude" {
 		t.Fatalf("expected claude provider, got %q", result["provider"])
+	}
+}
+
+// TestStatusChangedParamsIncludesLastMessageTime verifies that statusChangedParams
+// includes the lastMessageTime field when the agent has conversation history.
+func TestStatusChangedParamsIncludesLastMessageTime(t *testing.T) {
+	// 1. Setup: create a temp directory with a .jsonl file containing messages
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+
+	// Write Claude JSONL lines: assistant message + user message
+	content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello from assistant"}]}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello from user"}]}}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	// 2. Create a real Manager with a temp SQLite store
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	// 3. Attach a fake Claude process (use own PID so validateProcess passes)
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	// 4. Create a WS handler with the manager via a test Server
+	srv := New(mgr, "testtoken")
+	h := testHandler(srv)
+
+	// 5. Call statusChangedParams for the attached agent
+	params := h.statusChangedParams(ag.ID, "idle")
+
+	// 6. Assert: lastMessageTime must be present and > 0
+	lastMsgTime, ok := params["lastMessageTime"]
+	if !ok {
+		t.Fatalf("expected lastMessageTime in statusChangedParams, got keys: %v", params)
+	}
+	var lastMsgTimeMs int64
+	switch v := lastMsgTime.(type) {
+	case int64:
+		lastMsgTimeMs = v
+	case float64:
+		lastMsgTimeMs = int64(v)
+	default:
+		t.Fatalf("expected lastMessageTime to be numeric, got %T", lastMsgTime)
+	}
+	if lastMsgTimeMs <= 0 {
+		t.Fatalf("expected lastMessageTime > 0, got %d", lastMsgTimeMs)
 	}
 }
