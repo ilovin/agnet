@@ -231,3 +231,11 @@ func (s *Scanner) scanLinux() ([]ProcessInfo, error) {
 	return nil, nil
 }
 
+
+func (s *Scanner) scanDarwinWithFS(fs FileSystem) ([]ProcessInfo, error) {
+	return s.scanDarwin()
+}
+
+func (s *Scanner) scanLinuxWithFS(fs FileSystem) ([]ProcessInfo, error) {
+	return nil, nil
+}
