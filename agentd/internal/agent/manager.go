@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +77,9 @@ type Manager struct {
 	onStatusChange func(agentID string, data map[string]any) // broadcast hook for status changes
 	sessionParents map[string]string                         // childAgentID -> parentAgentID for session continuity
 	scanExisting   func() ([]scanner.ProcessInfo, error)
+	events         *EventManager
+	parser         *StreamParser
+	processes      *ProcessManager
 }
 
 type DerivedAgentState struct {
@@ -93,11 +95,16 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 		store:          s,
 		dataDir:        dataDir,
 		sessionParents: make(map[string]string),
+		events:         NewEventManager(s),
+		parser:         NewStreamParser(),
 	}
 	m.scanExisting = func() ([]scanner.ProcessInfo, error) {
 		s := scanner.New()
 		return s.Scan()
 	}
+	m.processes = NewProcessManager(s, m.parser, dataDir)
+	m.processes.SetHandleStreamJSONEvent(m.handleStreamJSONEvent)
+	m.processes.SetMakeWatcherCallback(m.makeWatcherCallback)
 	return m
 }
 
@@ -218,108 +225,30 @@ func (m *Manager) SetOnStatusChange(fn func(agentID string, data map[string]any)
 }
 
 func (m *Manager) appendAndPersistEvent(agentID string, ag *Agent, data map[string]any) uint64 {
-	if _, ok := data["timestamp"]; !ok {
-		data["timestamp"] = time.Now().UnixMilli()
-	}
-	seq := ag.AppendEvent(data)
-	if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
-		log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
-	}
-	return seq
+	return m.events.AppendAndPersistEvent(agentID, ag, data)
 }
 
 // updateOrAppendEvent handles streaming message updates: if data contains a
 // msg_id matching an existing event, it updates in place (buffer + store) and
 // returns (existingSeq, true). Otherwise it appends a new event.
 func (m *Manager) updateOrAppendEvent(agentID string, ag *Agent, data map[string]any) (uint64, bool) {
-	msgID, _ := data["msg_id"].(string)
-	seq, updated := ag.EventBuf().UpdateOrAppend(msgID, data)
-	if updated {
-		data["seq"] = seq
-		if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
-			log.Printf("update conversation event agent=%s seq=%d: %v", agentID, seq, err)
-		}
-	} else {
-		if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
-			log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
-		}
-	}
-	return seq, updated
+	return m.events.UpdateOrAppendEvent(agentID, ag, data)
 }
 
 func maybeExtractSessionIDFromRaw(text string) string {
-	if text == "" {
-		return ""
-	}
-	var event map[string]any
-	if err := json.Unmarshal([]byte(text), &event); err != nil {
-		return ""
-	}
-	candidates := []any{
-		event["session_id"],
-		event["sessionId"],
-	}
-	if msg, ok := event["message"].(map[string]any); ok {
-		candidates = append(candidates, msg["session_id"], msg["sessionId"])
-	}
-	if result, ok := event["result"].(map[string]any); ok {
-		candidates = append(candidates, result["session_id"], result["sessionId"])
-	}
-	for _, c := range candidates {
-		if s, ok := c.(string); ok {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				return s
-			}
-		}
-	}
-	return ""
+	return defaultResolver.MaybeExtractSessionIDFromRaw(text)
 }
 
-// cleanPermissionText removes ANSI sequences and normalizes permission prompt text.
 func cleanPermissionText(text string) string {
-	// Remove ANSI escape sequences
-	result := text
-	// CSI sequences
-	result = regexp.MustCompile(`\x1B\[[0-9;]*[a-zA-Z]`).ReplaceAllString(result, "")
-	// OSC sequences
-	result = regexp.MustCompile(`\x1B\][^\x07]*\x07`).ReplaceAllString(result, "")
-	// Box drawing and UI symbols
-	result = regexp.MustCompile(`[⏵❯⏸◉◆│─┌┐└┘❯▶▸▷⏹]`).ReplaceAllString(result, " ")
-	// Normalize whitespace
-	result = regexp.MustCompile(`\s+`).ReplaceAllString(result, " ")
-	return strings.TrimSpace(result)
+	return defaultResolver.CleanPermissionText(text)
 }
 
 func detectPermissionPrompt(text string) bool {
-	// First clean the text for more reliable detection
-	cleaned := cleanPermissionText(text)
-	lower := strings.ToLower(cleaned)
-
-	// Match fragmented text patterns
-	// "bypasspermissionson", "asspermissionson", etc.
-	if strings.Contains(lower, "bypass") && strings.Contains(lower, "permission") {
-		return true
-	}
-	if strings.Contains(lower, "permission") && strings.Contains(lower, "shift") {
-		return true
-	}
-	if strings.Contains(lower, "shift+tab") && strings.Contains(lower, "cycle") {
-		return true
-	}
-
-	// Legacy patterns for original/complete text
-	if strings.Contains(text, "⏵⏵") && strings.Contains(lower, "bypass") {
-		return true
-	}
-	if strings.Contains(text, "❯") && strings.Contains(lower, "shift+tab") {
-		return true
-	}
-	if strings.Contains(lower, "ctrl+g") && strings.Contains(lower, "vim") {
-		return true
-	}
-	return false
+	return defaultResolver.DetectPermissionPrompt(text)
 }
+
+// defaultResolver is a package-level PermissionResolver for standalone functions.
+var defaultResolver = NewPermissionResolver()
 
 func (m *Manager) RecordConversationEvent(agentID string, data map[string]any) (uint64, error) {
 	ag := m.Get(agentID)
@@ -431,200 +360,25 @@ func (m *Manager) readPTYForPermissionPrompts(agentID string, ag *Agent, provide
 	}
 }
 
-// tryParseStreamJSON attempts to parse a line as stream-json format
-type streamJSONEvent struct {
-	Type      string          `json:"type"`
-	Role      string          `json:"role,omitempty"`
-	Message   json.RawMessage `json:"message,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	Output    json.RawMessage `json:"output,omitempty"`
-	Error     string          `json:"error,omitempty"`
-	Timestamp string          `json:"timestamp,omitempty"`
-	SessionID string          `json:"session_id,omitempty"`
-	Raw       map[string]any  `json:"-"` // Original raw data for accessing extra fields
-}
+// streamJSONEvent is an alias for backward compatibility within this package.
+type streamJSONEvent = StreamJSONEvent
 
 func (m *Manager) tryParseStreamJSON(text string) *streamJSONEvent {
-	trimmed := strings.TrimSpace(text)
-	if !strings.HasPrefix(trimmed, "{") {
-		return nil
-	}
-
-	var rawMap map[string]any
-	if err := json.Unmarshal([]byte(trimmed), &rawMap); err != nil {
-		return nil
-	}
-
-	var ev streamJSONEvent
-	if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
-		return nil
-	}
-	ev.Raw = rawMap
-
-	// Validate it's a known stream-json event type
-	switch ev.Type {
-	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request", "stream_event", "system":
-		return &ev
-	default:
-		return nil
-	}
+	return m.parser.TryParseStreamJSON(text)
 }
 
 // buildToolResultSummary extracts a concise summary from a tool result output.
 // toolName is optional (may be empty if not available in the event).
 func buildToolResultSummary(toolName string, output []byte) string {
-	text := strings.TrimSpace(string(output))
-	if text == "" {
-		return "(no output)"
-	}
-	// Strip surrounding JSON string quotes if present
-	if len(text) >= 2 && text[0] == '"' {
-		var s string
-		if err := json.Unmarshal(output, &s); err == nil {
-			text = strings.TrimSpace(s)
-		}
-	}
-
-	lines := strings.Split(text, "\n")
-	nonEmpty := make([]string, 0, len(lines))
-	for _, l := range lines {
-		if strings.TrimSpace(l) != "" {
-			nonEmpty = append(nonEmpty, l)
-		}
-	}
-
-	switch toolName {
-	case "Bash":
-		// Show first 5 non-empty lines
-		preview := nonEmpty
-		if len(preview) > 5 {
-			preview = preview[:5]
-			return strings.Join(preview, "\n") + fmt.Sprintf("\n... (%d lines total)", len(nonEmpty))
-		}
-		return strings.Join(preview, "\n")
-	case "Grep":
-		return fmt.Sprintf("%d matches", len(nonEmpty))
-	case "Read":
-		return fmt.Sprintf("%d lines", len(nonEmpty))
-	case "Write", "Edit":
-		return "done"
-	}
-
-	// Generic: first 3 lines, max 300 chars
-	preview := nonEmpty
-	if len(preview) > 3 {
-		preview = preview[:3]
-	}
-	result := strings.Join(preview, "\n")
-	if len(result) > 300 {
-		result = result[:300] + "..."
-	}
-	if len(nonEmpty) > 3 {
-		result += fmt.Sprintf("\n... (%d lines total)", len(nonEmpty))
-	}
-	return result
+	return defaultParser.BuildToolResultSummary(toolName, output)
 }
 
 func buildToolInputSummary(toolName string, input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var params map[string]any
-	if err := json.Unmarshal(input, &params); err != nil {
-		return ""
-	}
-
-	switch toolName {
-	case "Bash":
-		if cmd, ok := params["command"].(string); ok {
-			if len(cmd) > 100 {
-				cmd = cmd[:100] + "..."
-			}
-			return cmd
-		}
-	case "Read":
-		if path, ok := params["file_path"].(string); ok {
-			return path
-		}
-	case "Write":
-		if path, ok := params["file_path"].(string); ok {
-			return path
-		}
-	case "Edit":
-		if path, ok := params["file_path"].(string); ok {
-			return path
-		}
-	case "Grep":
-		if pattern, ok := params["pattern"].(string); ok {
-			return "pattern: " + pattern
-		}
-	case "Glob":
-		if pattern, ok := params["pattern"].(string); ok {
-			return pattern
-		}
-	case "Agent":
-		if desc, ok := params["description"].(string); ok && desc != "" {
-			return desc
-		}
-		if prompt, ok := params["prompt"].(string); ok && prompt != "" {
-			if len(prompt) > 80 {
-				prompt = prompt[:80] + "..."
-			}
-			return prompt
-		}
-	case "SendMessage":
-		to, _ := params["to"].(string)
-		summary, _ := params["summary"].(string)
-		if summary != "" && to != "" {
-			return fmt.Sprintf("→ %s: %s", to, summary)
-		}
-		if to != "" {
-			return "→ " + to
-		}
-	case "TaskCreate":
-		if subject, ok := params["subject"].(string); ok && subject != "" {
-			return subject
-		}
-	case "TaskUpdate":
-		taskId, _ := params["taskId"].(string)
-		status, _ := params["status"].(string)
-		if taskId != "" && status != "" {
-			return fmt.Sprintf("#%s → %s", taskId, status)
-		}
-		if status != "" {
-			return status
-		}
-	case "TaskList":
-		return "查看任务列表"
-	case "TodoWrite":
-		return "更新任务"
-	case "WebSearch":
-		if query, ok := params["query"].(string); ok && query != "" {
-			return query
-		}
-	case "WebFetch":
-		if url, ok := params["url"].(string); ok && url != "" {
-			return url
-		}
-	case "NotebookEdit":
-		if path, ok := params["notebook_path"].(string); ok && path != "" {
-			return path
-		}
-	}
-
-	// Generic fallback: show first string value
-	for _, v := range params {
-		if s, ok := v.(string); ok && len(s) > 0 {
-			if len(s) > 80 {
-				s = s[:80] + "..."
-			}
-			return s
-		}
-	}
-	return ""
+	return defaultParser.BuildToolInputSummary(toolName, input)
 }
+
+// defaultParser is a package-level StreamParser for use by standalone functions.
+var defaultParser = NewStreamParser()
 
 func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSONEvent) {
 	var data map[string]any
@@ -1536,68 +1290,23 @@ func (m *Manager) Get(id string) *Agent {
 }
 
 func (m *Manager) LoadPersistedEventsSince(agentID string, afterSeq uint64, limit int) ([]eventbuf.Event, error) {
-	records, err := m.store.ListConversationEventsSince(agentID, afterSeq, limit)
-	if err != nil {
-		return nil, err
-	}
-	events := make([]eventbuf.Event, 0, len(records))
-	for _, r := range records {
-		data := map[string]any{
-			"role":      r.Role,
-			"text":      r.Text,
-			"raw":       r.Raw,
-			"kind":      r.Kind,
-			"timestamp": parseEventRowTimestamp(r.CreatedAt),
-		}
-		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
-	}
-	return events, nil
+	return m.events.LoadPersistedEventsSince(agentID, afterSeq, limit)
 }
 
 func (m *Manager) LoadPersistedEventsBefore(agentID string, beforeSeq uint64, limit int) ([]eventbuf.Event, error) {
-	records, err := m.store.ListConversationEventsBefore(agentID, beforeSeq, limit)
-	if err != nil {
-		return nil, err
-	}
-	events := make([]eventbuf.Event, 0, len(records))
-	for _, r := range records {
-		data := map[string]any{
-			"role":      r.Role,
-			"text":      r.Text,
-			"raw":       r.Raw,
-			"kind":      r.Kind,
-			"timestamp": parseEventRowTimestamp(r.CreatedAt),
-		}
-		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
-	}
-	return events, nil
+	return m.events.LoadPersistedEventsBefore(agentID, beforeSeq, limit)
 }
 
 func (m *Manager) LoadPersistedEventsLatest(agentID string, limit int) ([]eventbuf.Event, error) {
-	records, err := m.store.ListConversationEventsLatest(agentID, limit)
-	if err != nil {
-		return nil, err
-	}
-	events := make([]eventbuf.Event, 0, len(records))
-	for _, r := range records {
-		data := map[string]any{
-			"role":      r.Role,
-			"text":      r.Text,
-			"raw":       r.Raw,
-			"kind":      r.Kind,
-			"timestamp": parseEventRowTimestamp(r.CreatedAt),
-		}
-		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
-	}
-	return events, nil
+	return m.events.LoadPersistedEventsLatest(agentID, limit)
 }
 
 func (m *Manager) LastPersistedSeq(agentID string) (uint64, error) {
-	return m.store.LastConversationSeq(agentID)
+	return m.events.LastPersistedSeq(agentID)
 }
 
 func (m *Manager) LastConversationEventTime(agentID string) (time.Time, error) {
-	return m.store.LastConversationEventTime(agentID)
+	return m.events.LastConversationEventTime(agentID)
 }
 
 func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
