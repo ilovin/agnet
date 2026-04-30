@@ -449,6 +449,63 @@ func TestAutoAttachExistingSkipsAmbiguousCandidates(t *testing.T) {
 	}
 }
 
+func TestAttachClaudeLoadsJSONLHistory(t *testing.T) {
+	m := newTestManager(t)
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+
+	// Write some claude .jsonl lines (assistant message, user message)
+	content := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello from assistant"}]}}` + "\n" +
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello from user"}]}}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(content), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     tmpDir,
+		SessionFile: sessionFile,
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	// Verify history was loaded into store
+	seq, err := m.LastPersistedSeq(ag.ID)
+	if err != nil {
+		t.Fatalf("LastPersistedSeq failed: %v", err)
+	}
+	if seq == 0 {
+		t.Fatalf("expected history to be loaded from .jsonl, got seq=0")
+	}
+
+	// Verify LastConversationEventTime is set
+	lastTime, err := m.LastConversationEventTime(ag.ID)
+	if err != nil {
+		t.Fatalf("LastConversationEventTime failed: %v", err)
+	}
+	if lastTime.IsZero() {
+		t.Fatalf("expected LastConversationEventTime to be set, got zero")
+	}
+
+	// Verify we can load persisted events
+	events, err := m.LoadPersistedEventsLatest(ag.ID, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 persisted events, got %d", len(events))
+	}
+	if events[0].Data["role"] != "assistant" {
+		t.Errorf("expected first event role=assistant, got %q", events[0].Data["role"])
+	}
+	if events[1].Data["role"] != "user" {
+		t.Errorf("expected second event role=user, got %q", events[1].Data["role"])
+	}
+}
+
 func TestEventBufferExists(t *testing.T) {
 	m := newTestManager(t)
 	id, _ := m.Create("buf-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)

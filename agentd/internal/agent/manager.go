@@ -1986,6 +1986,24 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 	}
 
+	// Load historical events for Claude sessions from JSONL file
+	if info.Provider == "claude" && sessionFile != "" {
+		historyEvents, err := watcher.LoadClaudeJSONLHistory(sessionFile)
+		if err != nil {
+			log.Printf("[Attach] Warning: failed to load Claude history for %s: %v", id, err)
+		} else if len(historyEvents) > 0 {
+			log.Printf("[Attach] Loaded %d historical events for Claude agent %s", len(historyEvents), id)
+			for _, ev := range historyEvents {
+				data := map[string]any{
+					"role": ev.Role,
+					"text": ev.Text,
+					"raw":  false,
+				}
+				m.appendAndPersistEvent(id, ag, data)
+			}
+		}
+	}
+
 	// Start the appropriate watcher (skip for display-only agents)
 	if !isDisplayOnly {
 		cb := m.makeWatcherCallback(id, ag)

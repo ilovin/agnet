@@ -765,6 +765,28 @@ func buildToolSummary(name string, input map[string]interface{}) string {
 	}
 }
 
+// LoadClaudeJSONLHistory reads all conversation events from a .jsonl file.
+// Each line is a JSON object. Returns events for lines that represent
+// user or assistant messages.
+func LoadClaudeJSONLHistory(path string) ([]ConversationEvent, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
+	var events []ConversationEvent
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if ev, ok := parseLine(line); ok {
+			events = append(events, ev)
+		}
+	}
+	return events, scanner.Err()
+}
+
 func parseLocalCommandContent(content string) (ConversationEvent, bool) {
 	stdoutStart := strings.Index(content, "<local-command-stdout>")
 	if stdoutStart >= 0 {
