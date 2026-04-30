@@ -1831,15 +1831,20 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	// Find session file for watching
 	sessionFile := info.FindSessionFile()
 	log.Printf("[Attach] PID %d: FindSessionFile returned: %s", info.PID, sessionFile)
-	if sessionFile == "" {
-		return nil, fmt.Errorf("no stable session file found for process %d", info.PID)
-	}
 
 	// Extract session ID from filename
-	parts := strings.Split(sessionFile, "/")
-	fileName := parts[len(parts)-1]
-	// Handle both .json (OpenCode) and .jsonl (Claude) extensions
-	sessionID := strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
+	var sessionID string
+	if sessionFile != "" {
+		parts := strings.Split(sessionFile, "/")
+		fileName := parts[len(parts)-1]
+		// Handle both .json (OpenCode) and .jsonl (Claude) extensions
+		sessionID = strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
+	}
+
+	// For claude processes without a session file, create a display-only agent
+	// so they still appear in agent.list. No watcher is started since there's
+	// nothing to watch.
+	isDisplayOnly := sessionFile == "" && info.Provider == "claude"
 
 	applyAttachMetadata := func(ag *Agent) {
 		// Don't downgrade from tmux to watcher: when multiple processes
@@ -1922,7 +1927,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			existing.Watcher().Stop()
 			existing.setWatcher(nil)
 		}
-		if sessionFile != "" || info.Provider == "opencode" {
+		if !isDisplayOnly && (sessionFile != "" || info.Provider == "opencode") {
 			cb := m.makeWatcherCallback(existing.ID, existing)
 			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)
 			w.SetSkipExisting(true)
@@ -1981,15 +1986,19 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 	}
 
-	// Start the appropriate watcher
-	cb := m.makeWatcherCallback(id, ag)
-	w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, id)
-	w.SetSkipExisting(true)
-	if err := w.Start(); err != nil {
-		log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
+	// Start the appropriate watcher (skip for display-only agents)
+	if !isDisplayOnly {
+		cb := m.makeWatcherCallback(id, ag)
+		w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, id)
+		w.SetSkipExisting(true)
+		if err := w.Start(); err != nil {
+			log.Printf("[Attach] Warning: watcher start failed for %s: %v", id, err)
+		} else {
+			ag.setWatcher(w)
+			log.Printf("[Attach] Started watcher for agent %s", id)
+		}
 	} else {
-		ag.setWatcher(w)
-		log.Printf("[Attach] Started watcher for agent %s", id)
+		log.Printf("[Attach] Display-only agent %s (PID %d) created without watcher", id, info.PID)
 	}
 
 	return ag, nil

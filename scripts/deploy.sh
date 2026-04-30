@@ -432,6 +432,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         web)
             build_web
+            # Sync static files to agentgw runtime directory
+            gw_static="$HOME/.agentgw/static"
+            rm -rf "$gw_static"
+            mkdir -p "$gw_static"
+            cp -R "$WEB_STATIC_DIR/." "$gw_static/"
+            echo "[deploy] Web static synced to $gw_static"
             ;;
         mobile)
             deploy_mobile

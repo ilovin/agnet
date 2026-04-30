@@ -34,6 +34,7 @@ GW_LINUX_BIN="$OUT_DIR_LINUX/agentgw"
 APK_OUTPUT="$OUT_DIR_ANDROID/agentapp.apk"
 IPA_OUTPUT="$OUT_DIR_IOS/agentapp.ipa"
 WEB_STATIC_DIR="$OUT_DIR/static"
+WEB_HASH_FILE="$OUT_DIR/static.buildhash"
 BUILD_VERSION="${BUILD_VERSION:-}"
 
 mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
@@ -78,7 +79,7 @@ for root in paths:
         continue
     if root.is_dir():
         for path in root.rglob('*'):
-            if path.is_file() and path.suffix in {'.go'}:
+            if path.is_file() and path.suffix in {'.go', '.dart'}:
                 files.append(path)
 for path in sorted(set(files), key=lambda p: str(p)):
     rel = str(path).replace('\\', '/')
@@ -243,25 +244,22 @@ build_ipa() {
 }
 
 build_web() {
-    local needs_build=false
-    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/lib -type f -name '*.dart'; then
-        needs_build=true
-    fi
-    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/pubspec.yaml; then
-        needs_build=true
-    fi
-    if ! up_to_date "$WEB_STATIC_DIR/index.html" agentapp/pubspec.lock; then
-        needs_build=true
-    fi
-    if [[ "$needs_build" == false ]]; then
-        echo "[build] Web static up-to-date, skipping"
-        return 0
+    local expected_hash actual_hash
+    if [[ -f "$WEB_HASH_FILE" && -f "$WEB_STATIC_DIR/index.html" ]]; then
+        expected_hash="$(<"$WEB_HASH_FILE")"
+        actual_hash="$(compute_source_hash agentapp/lib agentapp/pubspec.yaml agentapp/pubspec.lock | shasum -a 256 | awk '{print $1}')"
+        if [[ "$expected_hash" == "$actual_hash" ]]; then
+            echo "[build] Web static up-to-date, skipping"
+            return 0
+        fi
     fi
     echo "[build] Building Flutter Web..."
-    (cd "$AGENTAPP_DIR" && flutter build web --release --no-tree-shake-icons)
+    rm -rf "$AGENTAPP_DIR/build/web"
+    (cd "$AGENTAPP_DIR" && flutter build web --release --no-tree-shake-icons --no-version-check)
     rm -rf "$WEB_STATIC_DIR"
     cp -r "$AGENTAPP_DIR/build/web" "$WEB_STATIC_DIR"
     link_legacy "$WEB_STATIC_DIR" "$AGENTGW_DIR/static"
+    compute_source_hash agentapp/lib agentapp/pubspec.yaml agentapp/pubspec.lock | shasum -a 256 | awk '{print $1}' > "$WEB_HASH_FILE"
     echo "[build] Web static copied to $WEB_STATIC_DIR"
 }
 

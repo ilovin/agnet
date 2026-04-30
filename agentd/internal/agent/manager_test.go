@@ -331,6 +331,104 @@ func TestAutoAttachExistingIncludesDisplayCandidates(t *testing.T) {
 	}
 }
 
+func TestAttachClaudeWithoutSessionFileCreatesDisplayAgent(t *testing.T) {
+	m := newTestManager(t)
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: "", // no session file
+		SessionID:   "",
+	})
+	if err != nil {
+		t.Fatalf("Attach failed for claude without session file: %v", err)
+	}
+	if ag.Provider != "claude" {
+		t.Fatalf("expected provider claude, got %q", ag.Provider)
+	}
+	if ag.PID != ownPID {
+		t.Fatalf("expected PID %d, got %d", ownPID, ag.PID)
+	}
+}
+
+func TestAttachClaudeWithoutSessionFileAppearsInList(t *testing.T) {
+	m := newTestManager(t)
+
+	ownPID := os.Getpid()
+	_, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: "",
+		SessionID:   "",
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent in list, got %d", len(agents))
+	}
+	if agents[0].Provider != "claude" {
+		t.Fatalf("expected claude agent, got %q", agents[0].Provider)
+	}
+}
+
+func TestAttachClaudeWithoutSessionFileNoWatcher(t *testing.T) {
+	m := newTestManager(t)
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: "",
+		SessionID:   "",
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+	if ag.Watcher() != nil {
+		t.Fatalf("expected no watcher for display-only agent, got %v", ag.Watcher())
+	}
+}
+
+func TestAutoAttachExistingWithEmptySessionFileCreatesDisplayAgent(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+
+	ownPID := os.Getpid()
+	// Override scanExisting to return a claude process with NO session file at all
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:         ownPID,
+			Provider:    "claude",
+			WorkDir:     repoDir,
+			SessionFile: "", // truly empty -> no session file found
+			SessionID:   "",
+		}}, nil
+	})
+
+	m.AutoAttachExisting()
+
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 display-only agent after auto-attach, got %d", len(agents))
+	}
+	if agents[0].Provider != "claude" {
+		t.Fatalf("expected claude agent, got %q", agents[0].Provider)
+	}
+	if agents[0].PID != ownPID {
+		t.Fatalf("expected PID %d, got %d", ownPID, agents[0].PID)
+	}
+	if agents[0].Watcher() != nil {
+		t.Fatalf("expected no watcher for display-only agent, got %v", agents[0].Watcher())
+	}
+}
+
 func TestAutoAttachExistingSkipsAmbiguousCandidates(t *testing.T) {
 	m := newTestManager(t)
 
