@@ -69,17 +69,18 @@ func isAttachedAutoName(name string, pid int, sessionID, provider, workDir strin
 }
 
 type Manager struct {
-	mu             sync.RWMutex
-	agents         map[string]*Agent
-	store          *store.Store
-	dataDir        string
-	onOutput       func(agentID string, data map[string]any) // broadcast hook for messages
-	onStatusChange func(agentID string, data map[string]any) // broadcast hook for status changes
-	sessionParents map[string]string                         // childAgentID -> parentAgentID for session continuity
-	scanExisting   func() ([]scanner.ProcessInfo, error)
-	events         *EventManager
-	parser         *StreamParser
-	processes      *ProcessManager
+	mu                sync.RWMutex
+	agents            map[string]*Agent
+	store             *store.Store
+	dataDir           string
+	onOutput          func(agentID string, data map[string]any) // broadcast hook for messages
+	onStatusChange    func(agentID string, data map[string]any) // broadcast hook for status changes
+	sessionParents    map[string]string                         // childAgentID -> parentAgentID for session continuity
+	scanExisting      func() ([]scanner.ProcessInfo, error)
+	sessionFileFinder func(scanner.ProcessInfo) string          // test hook to override session file discovery
+	events            *EventManager
+	parser            *StreamParser
+	processes         *ProcessManager
 }
 
 type DerivedAgentState struct {
@@ -1275,6 +1276,14 @@ func (m *Manager) SetScanExisting(fn func() ([]scanner.ProcessInfo, error)) {
 	m.scanExisting = fn
 }
 
+// SetFindSessionFile overrides the default session file discovery for testing.
+// When set, Attach uses this function instead of info.FindSessionFile().
+func (m *Manager) SetFindSessionFile(fn func(scanner.ProcessInfo) string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionFileFinder = fn
+}
+
 // DataDir returns the data directory used for persistent storage.
 func (m *Manager) DataDir() string {
 	m.mu.RLock()
@@ -1583,7 +1592,14 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	}
 
 	// Find session file for watching
-	sessionFile := info.FindSessionFile()
+	var sessionFile string
+	m.mu.RLock()
+	if m.sessionFileFinder != nil {
+		sessionFile = m.sessionFileFinder(info)
+	} else {
+		sessionFile = info.FindSessionFile()
+	}
+	m.mu.RUnlock()
 	log.Printf("[Attach] PID %d: FindSessionFile returned: %s", info.PID, sessionFile)
 
 	// Extract session ID from filename

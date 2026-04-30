@@ -20,7 +20,12 @@ func newTestManager(t *testing.T) *agent.Manager {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return agent.NewManager(s, t.TempDir())
+	m := agent.NewManager(s, t.TempDir())
+	// Isolate tests from real Claude session files on the host.
+	m.SetFindSessionFile(func(info scanner.ProcessInfo) string {
+		return info.SessionFile
+	})
+	return m
 }
 
 func TestCreateAndListAgent(t *testing.T) {
