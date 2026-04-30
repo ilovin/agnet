@@ -519,3 +519,91 @@ func TestEventBufferExists(t *testing.T) {
 	}
 	_ = buf.(*eventbuf.EventBuffer)
 }
+
+func TestRecordConversationEventIncludesTimestamp(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("ts-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+
+	before := time.Now().UnixMilli()
+	seq, err := m.RecordConversationEvent(id, map[string]any{
+		"role": "user",
+		"text": "hello",
+		"raw":  false,
+		"kind": "user",
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationEvent failed: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+	evts := ag.EventBuf().Since(seq - 1)
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event since seq-1, got %d", len(evts))
+	}
+	ts, ok := evts[0].Data["timestamp"].(int64)
+	if !ok {
+		t.Fatalf("expected timestamp int64 in event data, got %T %v", evts[0].Data["timestamp"], evts[0].Data["timestamp"])
+	}
+	if ts < before || ts > after {
+		t.Errorf("timestamp %d out of range [%d, %d]", ts, before, after)
+	}
+}
+
+func TestLoadPersistedEventsIncludesTimestamp(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("ts-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+
+	before := time.Now().UnixMilli()
+	_, err := m.RecordConversationEvent(id, map[string]any{
+		"role": "user",
+		"text": "hello",
+		"raw":  false,
+		"kind": "user",
+	})
+	if err != nil {
+		t.Fatalf("RecordConversationEvent failed: %v", err)
+	}
+	after := time.Now().UnixMilli()
+
+	events, err := m.LoadPersistedEventsLatest(id, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	ts, ok := events[0].Data["timestamp"].(int64)
+	if !ok {
+		t.Fatalf("expected timestamp int64 in loaded event, got %T %v", events[0].Data["timestamp"], events[0].Data["timestamp"])
+	}
+	if ts < before || ts > after {
+		t.Errorf("timestamp %d out of range [%d, %d]", ts, before, after)
+	}
+}
+
+func TestRestartInPlaceCustomAgentStatusIdle(t *testing.T) {
+	m := newTestManager(t)
+	id, err := m.Create("restart-agent", "custom", "sleep", []string{"60"}, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	ag := m.Get(id)
+	if ag.Status() != agent.StatusIdle {
+		t.Fatalf("expected idle before restart, got %v", ag.Status())
+	}
+
+	if err := m.RestartInPlace(id, "custom", "sleep", []string{"60"}, nil); err != nil {
+		t.Fatalf("RestartInPlace failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if ag.Status() != agent.StatusIdle {
+		t.Errorf("expected idle after restart, got %v", ag.Status())
+	}
+}

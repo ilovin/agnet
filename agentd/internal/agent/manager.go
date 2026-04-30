@@ -218,6 +218,9 @@ func (m *Manager) SetOnStatusChange(fn func(agentID string, data map[string]any)
 }
 
 func (m *Manager) appendAndPersistEvent(agentID string, ag *Agent, data map[string]any) uint64 {
+	if _, ok := data["timestamp"]; !ok {
+		data["timestamp"] = time.Now().UnixMilli()
+	}
 	seq := ag.AppendEvent(data)
 	if err := m.store.SaveConversationEvent(agentID, seq, data); err != nil {
 		log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
@@ -694,6 +697,13 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			"raw":  false,
 			"kind": kind,
 		}
+		if ev.Timestamp != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			} else if parsed, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			}
+		}
 
 		// Update status based on content
 		if role == "assistant" {
@@ -715,6 +725,13 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			"kind":     "tool_use",
 			"toolName": ev.Name,
 		}
+		if ev.Timestamp != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			} else if parsed, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			}
+		}
 		ag.setStatus(StatusWorking)
 
 	case "tool_result":
@@ -727,6 +744,13 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			"kind":     "tool_result",
 			"result":   true,
 			"toolName": toolName,
+		}
+		if ev.Timestamp != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			} else if parsed, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
+				data["timestamp"] = parsed.UnixMilli()
+			}
 		}
 
 	case "result":
@@ -1346,8 +1370,12 @@ func (m *Manager) RestartInPlace(id, provider, cmd string, args []string, env []
 	}
 
 	ag.kill()
-	ag.setProcess(nil)
-	ag.setWatcher(nil)
+	// Wait for old process to fully exit before spawning new one.
+	// Do NOT clear ag.process here — old goroutines check ag.Process() == p
+	// in their deferred cleanup; clearing it orphans them.
+	if p := ag.Process(); p != nil {
+		_ = p.Wait()
+	}
 	ag.setStatus(StatusStarting)
 
 	ag.mu.Lock()
@@ -1501,10 +1529,11 @@ func (m *Manager) LoadPersistedEventsSince(agentID string, afterSeq uint64, limi
 	events := make([]eventbuf.Event, 0, len(records))
 	for _, r := range records {
 		data := map[string]any{
-			"role": r.Role,
-			"text": r.Text,
-			"raw":  r.Raw,
-			"kind": r.Kind,
+			"role":      r.Role,
+			"text":      r.Text,
+			"raw":       r.Raw,
+			"kind":      r.Kind,
+			"timestamp": parseEventRowTimestamp(r.CreatedAt),
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -1519,10 +1548,11 @@ func (m *Manager) LoadPersistedEventsBefore(agentID string, beforeSeq uint64, li
 	events := make([]eventbuf.Event, 0, len(records))
 	for _, r := range records {
 		data := map[string]any{
-			"role": r.Role,
-			"text": r.Text,
-			"raw":  r.Raw,
-			"kind": r.Kind,
+			"role":      r.Role,
+			"text":      r.Text,
+			"raw":       r.Raw,
+			"kind":      r.Kind,
+			"timestamp": parseEventRowTimestamp(r.CreatedAt),
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -1537,10 +1567,11 @@ func (m *Manager) LoadPersistedEventsLatest(agentID string, limit int) ([]eventb
 	events := make([]eventbuf.Event, 0, len(records))
 	for _, r := range records {
 		data := map[string]any{
-			"role": r.Role,
-			"text": r.Text,
-			"raw":  r.Raw,
-			"kind": r.Kind,
+			"role":      r.Role,
+			"text":      r.Text,
+			"raw":       r.Raw,
+			"kind":      r.Kind,
+			"timestamp": parseEventRowTimestamp(r.CreatedAt),
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
@@ -2304,4 +2335,18 @@ func (m *Manager) PeriodicScanAndAttach() {
 			}
 		}
 	}
+}
+
+func parseEventRowTimestamp(createdAt string) int64 {
+	if createdAt == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			return 0
+		}
+	}
+	return t.UnixMilli()
 }
