@@ -1329,7 +1329,7 @@ func (m *Manager) findSessionFile(pid int, workDir string) string {
 		}
 
 		// Step 2: Fallback - look for JSONL created after this agent started (within the last 5 min)
-		dirName := strings.ReplaceAll(workDir, "/", "-")
+		dirName := projectDirName(workDir)
 		if dirName == "" || dirName == "-" {
 			dirName = "-"
 		}
@@ -1361,6 +1361,20 @@ func (m *Manager) findSessionFile(pid int, workDir string) string {
 	}
 
 	return ""
+}
+
+// projectDirName mirrors scanner.projectDirName to ensure consistent directory
+// name calculation when locating session files under ~/.claude/projects/.
+func projectDirName(workDir string) string {
+	s := strings.ReplaceAll(strings.TrimRight(workDir, "/"), "/", "-")
+	s = strings.ReplaceAll(s, ".", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	return s
+}
+
+// FindSessionFileProjectDirName exposes projectDirName for testing.
+func (m *Manager) FindSessionFileProjectDirName(workDir string) string {
+	return projectDirName(workDir)
 }
 
 func (m *Manager) RestartInPlace(id, provider, cmd string, args []string, env []string) error {

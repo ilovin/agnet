@@ -585,6 +585,26 @@ func TestLoadPersistedEventsIncludesTimestamp(t *testing.T) {
 	}
 }
 
+func TestFindSessionFileUsesProjectDirName(t *testing.T) {
+	m := newTestManager(t)
+
+	// projectDirName("/a/b/.c/d_e") should be "-a-b--c-d-e"
+	// not "-a-b-.c-d_e" (the old buggy behavior)
+	got := m.FindSessionFileProjectDirName("/a/b/.c/d_e")
+	want := "-a-b--c-d-e"
+	if got != want {
+		t.Fatalf("projectDirName mismatch: got %q, want %q", got, want)
+	}
+
+	// Edge cases
+	if m.FindSessionFileProjectDirName("/foo/bar") != "-foo-bar" {
+		t.Fatalf("unexpected projectDirName for /foo/bar")
+	}
+	if m.FindSessionFileProjectDirName("/foo.bar/baz_qux") != "-foo-bar-baz-qux" {
+		t.Fatalf("unexpected projectDirName for /foo.bar/baz_qux")
+	}
+}
+
 func TestRestartInPlaceCustomAgentStatusIdle(t *testing.T) {
 	m := newTestManager(t)
 	id, err := m.Create("restart-agent", "custom", "sleep", []string{"60"}, t.TempDir(), nil)

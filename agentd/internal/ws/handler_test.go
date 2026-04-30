@@ -235,7 +235,7 @@ func TestStatusChangedParamsIncludesLastMessageTime(t *testing.T) {
 
 	// 4. Create a WS handler with the manager via a test Server
 	srv := New(mgr, "testtoken")
-	h := testHandler(srv)
+	h := &handler{server: srv}
 
 	// 5. Call statusChangedParams for the attached agent
 	params := h.statusChangedParams(ag.ID, "idle")
