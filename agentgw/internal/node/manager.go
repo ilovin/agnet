@@ -10,61 +10,43 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/phone-talk/agentgw/internal/deployer"
 	"github.com/phone-talk/agentgw/internal/nodecfg"
-	"github.com/phone-talk/agentgw/internal/proxy"
-	"github.com/phone-talk/agentgw/internal/tunnel"
 	gossh "golang.org/x/crypto/ssh"
 )
 
-// resolveSSHKeyPath returns the first existing SSH private key from common locations.
-func resolveSSHKeyPath(explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, ".ssh", "id_ed25519"),
-		filepath.Join(home, ".ssh", "id_rsa"),
-		filepath.Join(home, ".ssh", "id_ecdsa"),
-	}
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return candidates[0] // fallback, will fail later with a clear error
-}
-
-// EventCallback is called when a node's agentd pushes an event.
-type EventCallback func(nodeID string, event map[string]any)
-
 // Manager tracks all configured nodes and their runtime state.
+// It is a thin coordinator that delegates to Registry, TunnelManager, and ProxyManager.
 type Manager struct {
 	mu        sync.RWMutex
-	nodes     map[string]*Node
 	store     *nodecfg.Store
 	agentdBin []byte
-	onEvent   EventCallback
 	restartFn func(*Node, string) error
+
+	registry  *Registry
+	tunnelMgr *TunnelManager
+	proxyMgr  *ProxyManager
 }
 
 // NewManager creates a Manager backed by the given store.
 // agentdBin is the embedded agentd binary (may be nil in tests).
 func NewManager(store *nodecfg.Store, agentdBin []byte) *Manager {
-	return &Manager{
-		nodes:     make(map[string]*Node),
+	m := &Manager{
 		store:     store,
 		agentdBin: agentdBin,
+		registry:  NewRegistry(),
+		tunnelMgr: NewTunnelManager(),
+		proxyMgr:  NewProxyManager(),
 	}
+	m.proxyMgr.OnDisconnect(func(nodeID string) {
+		m.handleProxyDisconnect(nodeID)
+	})
+	return m
 }
 
 // OnEvent registers a callback for agentd push events (nodeId is injected into params).
 func (m *Manager) OnEvent(cb EventCallback) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.onEvent = cb
+	m.proxyMgr.OnEvent(cb)
 }
 
 // SetRestartFunc overrides the restart implementation for tests.
@@ -83,51 +65,20 @@ func (m *Manager) SetAgentdBinary(binary []byte) {
 
 // LoadAll populates nodes from persisted config without writing back to disk.
 func (m *Manager) LoadAll(entries []nodecfg.NodeEntry) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, entry := range entries {
-		if entry.ID == "" {
-			entry.ID = uuid.New().String()
-		}
-		m.nodes[entry.ID] = &Node{
-			ID:         entry.ID,
-			Name:       entry.Name,
-			Host:       entry.Host,
-			SSHPort:    entry.SSHPort,
-			AgentdPort: entry.AgentdPort,
-			Token:      entry.Token,
-			SSHKeyPath: entry.SSHKeyPath,
-			SSHAlias:   entry.SSHAlias,
-			status:     StatusDisconnected,
-		}
-	}
+	m.registry.LoadAll(entries)
 }
 
 // Add creates a new node entry (not yet connected) and persists it.
 func (m *Manager) Add(entry nodecfg.NodeEntry) (string, error) {
-	if entry.ID == "" {
-		entry.ID = uuid.New().String()
+	id, err := m.registry.Add(entry)
+	if err != nil {
+		return "", err
 	}
-	n := &Node{
-		ID:         entry.ID,
-		Name:       entry.Name,
-		Host:       entry.Host,
-		SSHPort:    entry.SSHPort,
-		AgentdPort: entry.AgentdPort,
-		Token:      entry.Token,
-		SSHKeyPath: entry.SSHKeyPath,
-		SSHAlias:   entry.SSHAlias,
-		status:     StatusDisconnected,
-	}
-	m.mu.Lock()
-	m.nodes[n.ID] = n
-	m.mu.Unlock()
-
-	entries := m.toEntries()
+	entries := m.registry.ToEntries()
 	if err := m.store.Save(entries); err != nil {
-		return n.ID, fmt.Errorf("save nodes: %w", err)
+		return id, fmt.Errorf("save nodes: %w", err)
 	}
-	return n.ID, nil
+	return id, nil
 }
 
 // Connect establishes an SSH tunnel + WS proxy to a node's agentd.
@@ -137,89 +88,23 @@ func (m *Manager) Connect(id string) error {
 	if n == nil {
 		return fmt.Errorf("node %q not found", id)
 	}
-	if existing := n.GetProxy(); existing != nil {
-		_ = existing.Close()
-		n.SetProxy(nil)
-	}
-	if existingTunnel := n.GetTunnel(); existingTunnel != nil {
-		_ = existingTunnel.Close()
-		n.SetTunnel(nil)
-	}
+
+	// Clean up existing connections
+	m.proxyMgr.Disconnect(n)
+	m.tunnelMgr.Disconnect(n)
 
 	n.SetStatus(StatusConnecting)
 
-	var wsURL string
-
-	// For localhost, connect directly without SSH tunnel
-	if n.Host == "localhost" || n.Host == "127.0.0.1" {
-		wsURL = fmt.Sprintf("ws://%s:%d/ws", n.Host, n.AgentdPort)
-	} else {
-		tunCfg := tunnel.Config{
-			SSHHost:    n.Host,
-			SSHPort:    n.SSHPort,
-			RemoteHost: "127.0.0.1",
-			RemotePort: n.AgentdPort,
-			SSHKeyPath: n.SSHKeyPath,
-			SSHAlias:   n.SSHAlias,
-		}
-
-		// If SSHAlias is set, use it; otherwise use key-based auth
-		if tunCfg.SSHAlias == "" {
-			tunCfg.SSHKeyPath = resolveSSHKeyPath(tunCfg.SSHKeyPath)
-		}
-
-		tun, err := tunnel.New(tunCfg)
-		if err != nil {
-			n.SetStatus(StatusError)
-			return fmt.Errorf("ssh tunnel: %w", err)
-		}
-
-		localPort, err := tun.LocalPort()
-		if err != nil {
-			tun.Close()
-			n.SetStatus(StatusError)
-			return fmt.Errorf("local port: %w", err)
-		}
-		n.SetTunnel(tun)
-
-		wsURL = fmt.Sprintf("ws://127.0.0.1:%d/ws", localPort)
-	}
-
-	// Enable auto-reconnect for resilient connections
-	p, err := proxy.NewWithReconnect(wsURL, n.Token, true)
+	wsURL, err := m.tunnelMgr.Connect(n)
 	if err != nil {
-		if tun := n.GetTunnel(); tun != nil {
-			_ = tun.Close()
-			n.SetTunnel(nil)
-		}
-		n.SetStatus(StatusError)
-		return fmt.Errorf("ws proxy: %w", err)
+		return err
 	}
 
-	m.mu.RLock()
-	cb := m.onEvent
-	m.mu.RUnlock()
-	if cb != nil {
-		p.OnEvent(func(ev map[string]any) {
-			if ev == nil {
-				ev = make(map[string]any)
-			}
-			params, ok := ev["params"].(map[string]any)
-			if !ok {
-				params = make(map[string]any)
-				ev["params"] = params
-			}
-			params["nodeId"] = n.ID
-			cb(n.ID, ev)
-		})
+	if err := m.proxyMgr.Connect(n, wsURL); err != nil {
+		m.tunnelMgr.Disconnect(n)
+		return err
 	}
-	p.OnDisconnect(func() {
-		m.handleProxyDisconnect(n, p)
-	})
 
-	n.SetProxy(p)
-	n.SetStatus(StatusConnected)
-	log.Printf("node %q connected (%s)", n.Name, wsURL)
 	return nil
 }
 
@@ -347,14 +232,8 @@ func (m *Manager) Restart(id string, remoteDir string) error {
 		n.SetStatus(StatusDeploying)
 	}
 
-	if p := n.GetProxy(); p != nil {
-		_ = p.Close()
-		n.SetProxy(nil)
-	}
-	if tun := n.GetTunnel(); tun != nil {
-		_ = tun.Close()
-		n.SetTunnel(nil)
-	}
+	m.proxyMgr.Disconnect(n)
+	m.tunnelMgr.Disconnect(n)
 
 	m.mu.RLock()
 	restartFn := m.restartFn
@@ -392,51 +271,33 @@ func (m *Manager) Restart(id string, remoteDir string) error {
 
 // Rename updates the display name of a node and persists the change.
 func (m *Manager) Rename(id, name string) error {
-	m.mu.Lock()
-	n, ok := m.nodes[id]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("node %q not found", id)
+	if err := m.registry.Rename(id, name); err != nil {
+		return err
 	}
-	n.Name = name
-	m.mu.Unlock()
-	return m.store.Save(m.toEntries())
+	return m.store.Save(m.registry.ToEntries())
 }
 
 // Remove disconnects and deletes a node, then persists the updated list.
 func (m *Manager) Remove(id string) error {
-	m.mu.Lock()
-	n, ok := m.nodes[id]
-	if ok {
-		if p := n.GetProxy(); p != nil {
-			p.Close()
-		}
-		if tun := n.GetTunnel(); tun != nil {
-			tun.Close()
-		}
-		delete(m.nodes, id)
+	n := m.registry.Get(id)
+	if n != nil {
+		m.proxyMgr.Disconnect(n)
+		m.tunnelMgr.Disconnect(n)
 	}
-	m.mu.Unlock()
-
-	return m.store.Save(m.toEntries())
+	if err := m.registry.Remove(id); err != nil {
+		return err
+	}
+	return m.store.Save(m.registry.ToEntries())
 }
 
 // Get returns a node by ID or nil if not found.
 func (m *Manager) Get(id string) *Node {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.nodes[id]
+	return m.registry.Get(id)
 }
 
 // List returns a snapshot slice of all nodes.
 func (m *Manager) List() []*Node {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]*Node, 0, len(m.nodes))
-	for _, n := range m.nodes {
-		out = append(out, n)
-	}
-	return out
+	return m.registry.List()
 }
 
 // ForwardCall sends a JSON-RPC call to a specific node's agentd via its proxy.
@@ -445,31 +306,19 @@ func (m *Manager) ForwardCall(nodeID, method string, params map[string]any, time
 	if n == nil {
 		return nil, fmt.Errorf("node %q not found", nodeID)
 	}
-	p := n.GetProxy()
-	if p == nil {
-		return nil, fmt.Errorf("node %q not connected", nodeID)
-	}
-	return p.Call(method, params, timeout)
+	return m.proxyMgr.ForwardCall(n, method, params, timeout)
 }
 
-func (m *Manager) handleProxyDisconnect(n *Node, disconnected *proxy.Proxy) {
-	n.mu.Lock()
-	if n.proxy != disconnected {
-		n.mu.Unlock()
+func (m *Manager) handleProxyDisconnect(nodeID string) {
+	n := m.registry.Get(nodeID)
+	if n == nil {
 		return
 	}
-	n.proxy = nil
-	oldTunnel := n.tunnel
-	n.tunnel = nil
-	n.status = StatusDisconnected
-	n.mu.Unlock()
 
-	if oldTunnel != nil {
-		_ = oldTunnel.Close()
-	}
+	m.tunnelMgr.Disconnect(n)
 
 	m.mu.RLock()
-	cb := m.onEvent
+	cb := m.proxyMgr.onEvent
 	m.mu.RUnlock()
 	if cb != nil {
 		cb(n.ID, map[string]any{
@@ -481,26 +330,6 @@ func (m *Manager) handleProxyDisconnect(n *Node, disconnected *proxy.Proxy) {
 			},
 		})
 	}
-}
-
-// toEntries converts the in-memory node map to a slice for persistence.
-func (m *Manager) toEntries() []nodecfg.NodeEntry {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]nodecfg.NodeEntry, 0, len(m.nodes))
-	for _, n := range m.nodes {
-		out = append(out, nodecfg.NodeEntry{
-			ID:         n.ID,
-			Name:       n.Name,
-			Host:       n.Host,
-			SSHPort:    n.SSHPort,
-			AgentdPort: n.AgentdPort,
-			SSHKeyPath: n.SSHKeyPath,
-			Token:      n.Token,
-			SSHAlias:   n.SSHAlias,
-		})
-	}
-	return out
 }
 
 func restartRemoteNode(n *Node, remoteDir string) error {

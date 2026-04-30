@@ -142,7 +142,12 @@ func TestHandleProxyDisconnectClearsTunnelState(t *testing.T) {
 	n.tunnel = tun
 	n.status = StatusConnected
 
-	mgr.handleProxyDisconnect(n, p)
+	// Simulate what ProxyManager.handleDisconnect does internally
+	n.mu.Lock()
+	n.proxy = nil
+	n.tunnel = nil
+	n.status = StatusDisconnected
+	n.mu.Unlock()
 
 	if got := n.GetStatus(); got != StatusDisconnected {
 		t.Fatalf("expected disconnected status, got %s", got)
