@@ -33,10 +33,14 @@ func PlanSteps(remoteDir string, binaryData []byte) []Step {
 // PlanStepsWithToken returns deploy steps including an agentd config with the given token.
 func PlanStepsWithToken(remoteDir string, binaryData []byte, token string) []Step {
 	binPath := filepath.Join(remoteDir, "agentd")
+	binNewPath := filepath.Join(remoteDir, "agentd.new")
 	quotedRemoteDir := shellCommandPath(remoteDir)
 	quotedBinPath := shellCommandPath(binPath)
+	quotedBinNewPath := shellCommandPath(binNewPath)
 	steps := []Step{
 		{Kind: "mkdir", Path: remoteDir, Command: "mkdir -p " + quotedRemoteDir},
+		{Kind: "exec", Command: "pkill -f 'agentd start' 2>/dev/null || true"},
+		{Kind: "exec", Command: "sleep 2"},
 	}
 	if token != "" {
 		configPath := filepath.Join(remoteDir, "config.json")
@@ -44,10 +48,10 @@ func PlanStepsWithToken(remoteDir string, binaryData []byte, token string) []Ste
 		steps = append(steps, Step{Kind: "upload", Path: configPath, Data: []byte(configContent)})
 	}
 	steps = append(steps, []Step{
-		{Kind: "upload", Path: binPath, Data: binaryData},
+		{Kind: "upload", Path: binNewPath, Data: binaryData},
+		{Kind: "exec", Command: "mv -f " + quotedBinNewPath + " " + quotedBinPath},
 		{Kind: "exec", Command: "chmod +x " + quotedBinPath},
 		{Kind: "exec", Command: quotedBinPath + " version || true"},
-		{Kind: "exec", Command: "pkill -f 'agentd start' 2>/dev/null || true; sleep 1"},
 		{Kind: "exec", Command: startDetachedCommand(binPath)},
 	}...)
 	return steps
