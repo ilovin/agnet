@@ -570,17 +570,9 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	attachableProcesses := toAnySlice(attachable["processes"])
 	filteredAttachable := make([]any, 0, len(attachableProcesses))
 	for _, raw := range attachableProcesses {
-		entry, ok := raw.(map[string]any)
+		_, ok := raw.(map[string]any)
 		if !ok {
 			continue
-		}
-		provider, _ := entry["provider"].(string)
-		if strings.EqualFold(provider, "claude") {
-			sessionID := catalogSessionID(entry)
-			if sessionID == "" {
-				log.Printf("[session.catalog] hiding ambiguous live claude candidate: pid=%v workDir=%v", entry["pid"], entry["workDir"])
-				continue
-			}
 		}
 		filteredAttachable = append(filteredAttachable, raw)
 	}

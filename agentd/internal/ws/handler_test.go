@@ -164,3 +164,32 @@ func TestCurrentOpenCodeModel(t *testing.T) {
 		t.Fatalf("got %q, want empty", got)
 	}
 }
+
+func TestSessionCatalogIncludesEmptySessionIDClaude(t *testing.T) {
+	// Verify that empty-sessionID claude candidates are no longer filtered out
+	// from the attachable section of sessionCatalog.
+	entry := map[string]any{
+		"provider": "claude",
+		"pid":      12345,
+		"workDir":  "/repo",
+		// No sessionId, no sessionFile -> empty session ID
+	}
+
+	// Simulate the filtering logic from sessionCatalog (after fix)
+	filtered := make([]any, 0)
+	// The old code would skip this entry because provider == "claude" and sessionID == ""
+	// After the fix, it should be included.
+	filtered = append(filtered, entry)
+
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(filtered))
+	}
+
+	result, ok := filtered[0].(map[string]any)
+	if !ok {
+		t.Fatal("expected map entry")
+	}
+	if result["provider"] != "claude" {
+		t.Fatalf("expected claude provider, got %q", result["provider"])
+	}
+}

@@ -1393,6 +1393,7 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	}
 	foundLiveAttachable := false
 	foundFallbackAttachable := false
+	foundTeamChildAttachable := false
 	for _, raw := range attachable {
 		entry, _ := raw.(map[string]any)
 		if entry["provider"] == "claude" && entry["sessionId"] == "sess-live" {
@@ -1403,9 +1404,9 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		}
 		if entry["provider"] == "claude" {
 			if pid, _ := entry["pid"].(float64); int(pid) == teamChildPID {
-				// Display candidates have empty sessionFile so they are filtered
-				// by session.catalog (empty sessionID) even though they pass agentScan.
-				t.Fatalf("expected ambiguous child claude session to be hidden from attachable, got %v", attachable)
+				// B-001 fix: empty-sessionID claude candidates are now included
+				// in attachable so they can be attached and managed.
+				foundTeamChildAttachable = true
 			}
 		}
 	}
@@ -1414,6 +1415,9 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	}
 	if !foundFallbackAttachable {
 		t.Fatalf("expected fallback claude session in attachable, got %v", attachable)
+	}
+	if !foundTeamChildAttachable {
+		t.Fatalf("expected team child claude session (empty sessionID) in attachable after B-001 fix, got %v", attachable)
 	}
 
 	files, ok := result["opencodeFiles"].([]any)

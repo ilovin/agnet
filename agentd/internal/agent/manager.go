@@ -1806,7 +1806,7 @@ func (m *Manager) AutoAttachExisting() {
 	}
 	for _, proc := range procs {
 		candidate := m.ClassifyAttachCandidate(proc)
-		if candidate.Decision != AttachDecisionAuto {
+		if candidate.Decision != AttachDecisionAuto && candidate.Decision != AttachDecisionDisplay {
 			log.Printf("[AutoAttach] Skipping %s pid %d: %s", proc.Provider, proc.PID, candidate.Reason)
 			continue
 		}

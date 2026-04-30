@@ -297,6 +297,60 @@ func TestAttachSamePIDSwitchesSessionUpdatesAutoName(t *testing.T) {
 	}
 }
 
+func TestAutoAttachExistingIncludesDisplayCandidates(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	sessionFile := filepath.Join(repoDir, "sess-empty.jsonl")
+	if err := os.WriteFile(sessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+	// Override scanExisting to return a claude process with empty SessionID
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:         ownPID,
+			Provider:    "claude",
+			WorkDir:     repoDir,
+			SessionFile: sessionFile,
+			SessionID:   "", // empty session ID -> Display decision
+		}}, nil
+	})
+
+	m.AutoAttachExisting()
+
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent after auto-attach, got %d", len(agents))
+	}
+	if agents[0].Provider != "claude" {
+		t.Fatalf("expected claude agent, got %q", agents[0].Provider)
+	}
+	if agents[0].PID != ownPID {
+		t.Fatalf("expected PID %d, got %d", ownPID, agents[0].PID)
+	}
+}
+
+func TestAutoAttachExistingSkipsAmbiguousCandidates(t *testing.T) {
+	m := newTestManager(t)
+
+	// Override scanExisting to return a process with missing PID (Skip decision)
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:      0,
+			Provider: "claude",
+			WorkDir:  "/repo",
+		}}, nil
+	})
+
+	m.AutoAttachExisting()
+
+	agents := m.List()
+	if len(agents) != 0 {
+		t.Fatalf("expected 0 agents, got %d", len(agents))
+	}
+}
+
 func TestEventBufferExists(t *testing.T) {
 	m := newTestManager(t)
 	id, _ := m.Create("buf-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
