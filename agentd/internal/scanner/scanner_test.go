@@ -1,7 +1,6 @@
 package scanner
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,11 +31,6 @@ func TestFindClaudeSessionInfoPrefersMostActiveOpenTask(t *testing.T) {
 	if err := os.MkdirAll(tasksDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	sessions := []string{"sess-old", "sess-live"}
 	baseTime := time.Now()
 	var openDirs []*os.File
@@ -77,9 +71,6 @@ func TestFindClaudeSessionInfoPrefersMostActiveOpenTask(t *testing.T) {
 	}()
 
 	ownPID := os.Getpid()
-	if err := os.WriteFile(filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID)), []byte(`{"sessionId":"sess-old"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
 	if gotSessionID != "sess-live" {
@@ -218,19 +209,10 @@ func TestFindClaudeSessionInfoReturnsEmptyWhenNoJSONL(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	ownPID := os.Getpid()
-	// Write PID mapping file with a valid session ID
-	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
-	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sess-from-pid"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
-	// No .jsonl file exists in projectDir - should return empty, not use PID mapping fallback
+	// No .jsonl file exists in projectDir - should return empty
 	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
 	if gotSessionID != "" {
 		t.Fatalf("expected empty session id when no .jsonl exists, got %q", gotSessionID)
@@ -252,18 +234,10 @@ func TestFindClaudeSessionInfoReturnsEmptyWithoutResume(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	ownPID := os.Getpid()
-	// PID mapping exists but no .jsonl (claude started without --resume)
-	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
-	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"fresh-session"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
+	// No .jsonl file exists and no task fd links (claude started without --resume)
 	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
 	if gotSessionID != "" {
 		t.Fatalf("expected empty session ID when no .jsonl exists, got %q", gotSessionID)
@@ -345,18 +319,10 @@ func TestFindClaudeSessionInfoReturnsEmptyWithNonUUIDResumeNoJSONL(t *testing.T)
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sessionsDir := filepath.Join(home, ".claude", "sessions")
-	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	ownPID := os.Getpid()
-	// Non-UUID session name like "sample-level-packing-alignment"
-	pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", ownPID))
-	if err := os.WriteFile(pidFile, []byte(`{"sessionId":"sample-level-packing-alignment"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
+	// Non-UUID session name but no .jsonl file - should still return empty
 	gotSessionID, gotSessionFile := findClaudeSessionInfo(ownPID, workDir, "")
 	if gotSessionID != "" {
 		t.Fatalf("expected empty session ID when no .jsonl exists, got %q", gotSessionID)

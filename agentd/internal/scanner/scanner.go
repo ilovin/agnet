@@ -307,20 +307,8 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 		return matched.SessionID, matched.JSONLPath
 	}
 
-	// Fallback: most active candidate. If task fd found nothing at all,
-	// use the PID mapping file as a hint to avoid multiple processes in
-	// the same project all binding to the same arbitrary session.
+	// Fallback: return the most active candidate
 	if len(candidates) > 0 {
-		if len(taskSessions) == 0 {
-			pidSessionID := readClaudeSessionID(home, pid)
-			if pidSessionID != "" {
-				for _, c := range candidates {
-					if c.SessionID == pidSessionID {
-						return c.SessionID, c.JSONLPath
-					}
-				}
-			}
-		}
 		return candidates[0].SessionID, candidates[0].JSONLPath
 	}
 
@@ -409,21 +397,6 @@ func latestClaudeTaskActivity(taskDir string) time.Time {
 		}
 	}
 	return latest
-}
-
-func readClaudeSessionID(home string, pid int) string {
-	pidFile := filepath.Join(home, ".claude", "sessions", fmt.Sprintf("%d.json", pid))
-	data, err := os.ReadFile(pidFile)
-	if err != nil {
-		return ""
-	}
-	var pidInfo struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(data, &pidInfo); err != nil {
-		return ""
-	}
-	return pidInfo.SessionID
 }
 
 func isClaudeProcess(pid int) bool {
