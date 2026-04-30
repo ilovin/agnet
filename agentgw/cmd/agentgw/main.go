@@ -325,11 +325,28 @@ func rotateToken(existingToken string) {
 }
 
 // staticHandler wraps a http.FileServer and serves static files.
+// For SPA (Single Page Application) support, non-existent paths fall back to index.html.
 func staticHandler(root string) http.Handler {
 	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "/" || path == "/index.html" {
+			indexPath := filepath.Join(root, "index.html")
+			if data, err := os.ReadFile(indexPath); err == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Write(data)
+				return
+			}
+		}
+		// SPA fallback: serve index.html for non-existent paths (Flutter Web deep links)
+		cleanPath := filepath.Clean(path)
+		if cleanPath == "." || cleanPath == "/" {
+			cleanPath = "index.html"
+		} else if strings.HasPrefix(cleanPath, "/") {
+			cleanPath = cleanPath[1:]
+		}
+		filePath := filepath.Join(root, cleanPath)
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
 			indexPath := filepath.Join(root, "index.html")
 			if data, err := os.ReadFile(indexPath); err == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
