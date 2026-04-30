@@ -64,6 +64,8 @@
       .catch(() => {});
 
     // Force local CanvasKit assets so restricted networks do not depend on gstatic.
+    // Use the legacy window.flutterConfiguration style; integration_test on web
+    // uses debug builds where this is still accepted.
     window.flutterConfiguration = {
       canvasKitBaseUrl: 'canvaskit/',
     };

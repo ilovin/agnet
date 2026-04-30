@@ -221,6 +221,9 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
       }
     } on PlatformException catch (e) {
       debugPrint('getLaunchExtras error: ${e.message}');
+    } on MissingPluginException catch (e) {
+      // Web platform does not implement this method channel
+      debugPrint('getLaunchExtras not available on this platform: ${e.message}');
     }
   }
 

@@ -2141,7 +2141,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                       ? 1
                                       : 0) -
                                   (_loadingOlder ? 1 : 0);
-                              return _MessageBubble(
+                              return MessageBubble(
                                 message: messages[idx],
                                 isLastAssistant: idx == lastAssistantIndex,
                                 showTimestamp: _showTimestamps,
@@ -3868,14 +3868,14 @@ class _UserImagesState extends State<_UserImages> {
   }
 }
 
-class _MessageBubble extends StatelessWidget {
+class MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool isLastAssistant;
   final bool showTimestamp;
   final Future<void> Function()? onResolvePermissionPrompt;
   final VoidCallback? onToggleExpand;
 
-  const _MessageBubble({
+  const MessageBubble({
     required this.message,
     this.isLastAssistant = false,
     this.showTimestamp = false,

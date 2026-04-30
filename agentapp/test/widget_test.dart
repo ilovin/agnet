@@ -1071,7 +1071,7 @@ void main() {
   });
 
   // Timestamp toggle tests
-  testWidgets('_MessageBubble hides timestamp by default', (WidgetTester tester) async {
+  testWidgets('MessageBubble hides timestamp by default', (WidgetTester tester) async {
     final message = ChatMessage(
       role: 'assistant',
       text: 'Hello world',
@@ -1080,41 +1080,45 @@ void main() {
     );
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _MessageBubble(message: message),
-        ),
-      ),
-    );
-
-    // Timestamp should not be visible by default
-    expect(find.text('12:00'), findsNothing);
-  });
-
-  testWidgets('_MessageBubble shows timestamp when showTimestamp is true', (WidgetTester tester) async {
-    final message = ChatMessage(
-      role: 'assistant',
-      text: 'Hello world',
-      seq: 1,
-      timestamp: 1714464000000,
-    );
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _MessageBubble(
-            message: message,
-            showTimestamp: true,
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageBubble(message: message),
           ),
         ),
       ),
     );
 
-    // Timestamp should be visible
-    expect(find.text('12:00'), findsOneWidget);
+    // Timestamp should not be visible by default
+    expect(find.text('16:00'), findsNothing);
   });
 
-  testWidgets('_MessageBubble never shows timestamp when null', (WidgetTester tester) async {
+  testWidgets('MessageBubble shows timestamp when showTimestamp is true', (WidgetTester tester) async {
+    final message = ChatMessage(
+      role: 'assistant',
+      text: 'Hello world',
+      seq: 1,
+      timestamp: 1714464000000,
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageBubble(
+              message: message,
+              showTimestamp: true,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // Timestamp should be visible (4/30 16:00 in local timezone, not today)
+    expect(find.text('4/30 16:00'), findsOneWidget);
+  });
+
+  testWidgets('MessageBubble never shows timestamp when null', (WidgetTester tester) async {
     final message = ChatMessage(
       role: 'assistant',
       text: 'Hello world',
@@ -1123,17 +1127,19 @@ void main() {
     );
 
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: _MessageBubble(
-            message: message,
-            showTimestamp: true,
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: MessageBubble(
+              message: message,
+              showTimestamp: true,
+            ),
           ),
         ),
       ),
     );
 
     // No timestamp text should appear
-    expect(find.text('12:00'), findsNothing);
+    expect(find.text('16:00'), findsNothing);
   });
 }

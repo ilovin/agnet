@@ -115,6 +115,9 @@ class NodesNotifier extends StateNotifier<NodeState> {
       providerWriteMode: params['providerWriteMode'] as String?,
       providerReadOnlyReason: params['providerReadOnlyReason'] as String?,
       permissionMode: params['permissionMode'] as String?,
+      lastMessageTime: params.containsKey('lastMessageTime')
+          ? (params['lastMessageTime'] as num?)?.toInt()
+          : current.lastMessageTime,
     );
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = agentList;
