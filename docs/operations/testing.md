@@ -15,6 +15,7 @@ The project provides `scripts/test.sh` as the unified entry point for running te
 | Subcommand | Description |
 |------------|-------------|
 | `unit`     | Run all Go unit tests (non-integration) across `agentd/` and `agentgw/` |
+| `e2e`      | Run E2E session lifecycle integration tests (TEST-003) |
 | `flutter`  | Run Flutter unit tests (default) or integration tests in Chrome (`-d chrome`) |
 | `smoke`    | Run deployment smoke tests (build + local deploy + health checks) |
 | `help`     | Show usage information |
@@ -24,6 +25,9 @@ The project provides `scripts/test.sh` as the unified entry point for running te
 ```bash
 # Run all Go unit tests
 ./scripts/test.sh unit
+
+# Run E2E integration tests
+./scripts/test.sh e2e
 
 # Run Flutter unit tests
 ./scripts/test.sh flutter
@@ -39,6 +43,12 @@ The project provides `scripts/test.sh` as the unified entry point for running te
 
 - `unit`: Runs `go test ./...` in both `agentd/` and `agentgw/` directories.
   - Excludes integration tests (files tagged with `//go:build integration`).
+  - Prints a consolidated pass/fail summary with per-module results.
+- `e2e`: Runs the E2E session lifecycle integration tests (TEST-003).
+  - Starts real agentd and agentgw processes on ephemeral ports.
+  - Tests the complete session lifecycle: create -> connect -> message -> close.
+  - Also verifies the lifecycle works through the agentgw proxy path.
+  - Requires the agentd binary to be built (`scripts/build.sh agentd`).
   - Prints a consolidated pass/fail summary with per-module results.
 - `flutter`: Runs `flutter test` in `agentapp/`.
   - With `-d chrome`, runs integration tests against an **already running** Flutter web app.
@@ -61,6 +71,55 @@ Wait for the app to fully start and for the VM service URL to be printed (e.g., 
 ```
 
 If no running Flutter web app is detected, the script prints a helpful message with the exact command to start it.
+
+---
+
+## E2E Integration Tests (TEST-003)
+
+### Purpose
+
+E2E integration tests verify the complete session lifecycle across agentd and agentgw, building on the cross-component handshake tested by TEST-002.
+
+### What E2E Tests Cover
+
+| Phase | Agentd Test (`TestSessionLifecycle`) | Agentgw Test (`TestEndToEndSessionLifecycle`) |
+|-------|--------------------------------------|-----------------------------------------------|
+| **Create** | Create agent via direct WS to agentd | Create agent via agentgw proxy |
+| **List** | Verify agent appears in `agent.list` | Verify agent appears in `agent.list` via proxy |
+| **Message** | Send `conversation.send` and verify history | Send `conversation.send` via proxy and verify history |
+| **Stop** | `agent.stop` and verify status = stopped | `agent.stop` via proxy and verify status = stopped |
+| **Remove** | `agent.remove` and verify agent gone | `agent.remove` via proxy and verify agent gone |
+
+### Running E2E Tests
+
+```bash
+# Run E2E integration tests (auto-builds agentd binary if missing)
+./scripts/test.sh e2e
+
+# Or run directly with go test
+# Agentd side:
+cd agentd && go test -tags=integration -v -run 'TestSessionLifecycle|TestEndToEnd' ./...
+
+# Agentgw side:
+cd agentgw && go test -tags=integration -v -run 'TestAgentgwAgentdHandshake|TestEndToEndSessionLifecycle' ./...
+```
+
+### Behavior
+
+- **Process management**: Starts real `agentd` binary on an ephemeral port with a temp SQLite DB and data dir. Starts `agentgw` on another ephemeral port. Both are killed and cleaned up after the test.
+- **Node registration**: Registers agentd as a node via `node.add` over WebSocket, matching TEST-002's pattern.
+- **Proxy verification**: All agent lifecycle operations are tested both directly against agentd and through the agentgw proxy path.
+- **Deterministic**: Each test uses isolated temp directories and fresh processes; no shared state between runs.
+
+### Prerequisites
+
+- Go toolchain installed
+- `agentd` binary built (the `e2e` script auto-builds if missing)
+
+### Exit Codes
+
+- `0`: All E2E tests passed
+- `1`: One or more E2E tests failed
 
 ---
 

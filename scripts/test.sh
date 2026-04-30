@@ -6,6 +6,7 @@
 #
 # SUBCOMMANDS:
 #   unit     Run all Go unit tests (non-integration) across agentd/ and agentgw/
+#   e2e      Run E2E integration tests (agentd + agentgw session lifecycle)
 #   flutter  Run Flutter tests (unit or integration)
 #   smoke    Run deployment smoke tests (build + local deploy + health checks)
 #   help     Show this help message
@@ -31,6 +32,7 @@ Unified test entry point for the Agent Manager project.
 
 SUBCOMMANDS:
   unit     Run all Go unit tests (non-integration) across agentd/ and agentgw/
+  e2e      Run E2E session lifecycle integration tests (TEST-003)
   flutter  Run Flutter tests (unit or integration)
   smoke    Run deployment smoke tests (build + local deploy + health checks)
   help     Show this help message
@@ -38,6 +40,9 @@ SUBCOMMANDS:
 EXAMPLES:
   # Run all Go unit tests
   ./scripts/test.sh unit
+
+  # Run E2E integration tests
+  ./scripts/test.sh e2e
 
   # Run Flutter unit tests
   ./scripts/test.sh flutter
@@ -53,6 +58,7 @@ EXAMPLES:
 
 NOTES:
   - Integration tests (tagged with //go:build integration) are excluded from 'unit'.
+  - The 'e2e' subcommand requires the agentd binary to be built first.
   - The script exits with a non-zero status if any test fails.
   - A consolidated pass/fail summary is printed at the end.
 EOF
@@ -109,6 +115,82 @@ run_unit_tests() {
     return 0
   else
     echo -e "${RED}Some tests failed.${NC}"
+    return 1
+  fi
+}
+
+run_e2e_tests() {
+  local agentd_ok=0 agentgw_ok=0
+  local agentd_output="" agentgw_output=""
+
+  echo "[test] Running E2E integration tests (TEST-003)..."
+  echo ""
+
+  # Check that agentd binary exists
+  local agentd_bin=""
+  for candidate in "$AGENTD_DIR/agentd" "$AGENTD_DIR/agentd-darwin" "$AGENTD_DIR/agentd-linux"; do
+    if [[ -x "$candidate" ]]; then
+      agentd_bin="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$agentd_bin" ]]; then
+    echo -e "${YELLOW}[test] agentd binary not found. Building first...${NC}"
+    if ./scripts/build.sh agentd; then
+      echo -e "${GREEN}[test] agentd built successfully${NC}"
+    else
+      echo -e "${RED}[test] agentd build failed${NC}"
+      return 1
+    fi
+  else
+    echo "[test] Found agentd binary: $agentd_bin"
+  fi
+
+  # Run agentd integration tests
+  echo "[test] agentd: go test -tags=integration ./..."
+  if agentd_output=$(cd "$AGENTD_DIR" && go test -tags=integration -v -run 'TestSessionLifecycle|TestEndToEnd' ./... 2>&1); then
+    agentd_ok=1
+    echo -e "${GREEN}[test] agentd integration: PASS${NC}"
+  else
+    echo -e "${RED}[test] agentd integration: FAIL${NC}"
+    echo "$agentd_output"
+  fi
+  echo ""
+
+  # Run agentgw integration tests
+  echo "[test] agentgw: go test -tags=integration ./..."
+  if agentgw_output=$(cd "$AGENTGW_DIR" && go test -tags=integration -v -run 'TestAgentgwAgentdHandshake|TestEndToEndSessionLifecycle' ./... 2>&1); then
+    agentgw_ok=1
+    echo -e "${GREEN}[test] agentgw integration: PASS${NC}"
+  else
+    echo -e "${RED}[test] agentgw integration: FAIL${NC}"
+    echo "$agentgw_output"
+  fi
+  echo ""
+
+  # Consolidated summary
+  echo "========================================"
+  echo "         E2E TEST SUMMARY"
+  echo "========================================"
+  if [[ $agentd_ok -eq 1 ]]; then
+    echo -e "  agentd  : ${GREEN}PASS${NC}"
+  else
+    echo -e "  agentd  : ${RED}FAIL${NC}"
+  fi
+
+  if [[ $agentgw_ok -eq 1 ]]; then
+    echo -e "  agentgw : ${GREEN}PASS${NC}"
+  else
+    echo -e "  agentgw : ${RED}FAIL${NC}"
+  fi
+  echo "========================================"
+
+  if [[ $agentd_ok -eq 1 && $agentgw_ok -eq 1 ]]; then
+    echo -e "${GREEN}All E2E tests passed.${NC}"
+    return 0
+  else
+    echo -e "${RED}Some E2E tests failed.${NC}"
     return 1
   fi
 }
@@ -431,6 +513,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       ;;
     unit)
       run_unit_tests
+      ;;
+    e2e)
+      run_e2e_tests
       ;;
     flutter)
       shift || true
