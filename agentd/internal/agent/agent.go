@@ -82,6 +82,11 @@ func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {
 	}
 }
 
+// NewTestAgent creates an agent for testing purposes (exported for test packages).
+func NewTestAgent(name, provider string) *Agent {
+	return newAgent(newUUID(), name, provider, "/tmp", "echo", []string{"hello"})
+}
+
 func (a *Agent) Status() Status {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
