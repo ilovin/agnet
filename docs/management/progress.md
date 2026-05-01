@@ -42,12 +42,14 @@
 | **ARCH-007** | — | Developer | dev agent | **已合并** | 2026-04-30 | NodeManager拆分: merged to main at commit `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
 | **Test isolation fix** | — | Developer | dev agent | **Completed** | 2026-04-30 | Merged to main at commit `93a7aeb` |
 | **i-012** | — | Developer | dev agent | **Completed** | 2026-05-01 | `/clear` in tmux mode breaks interaction + session switch re-tracking; 6 files changed; Go tests + 117 Flutter tests pass |
+| **i-012-followup** | — | Developer | — | **Open** | 2026-05-01 | `currentBound()` blocks watcher session switch after tmux `/clear`; root cause identified |
 
 ## 4) Blockers & Risks
 | ID | Type | Description | Owner | Mitigation | Status |
 |---|---|---|---|---|---|
 | C-01 (dashboard) | Blocker | Event listener duplicate registration in dashboard :592/:653 | reviewer-1 | Extract unified listener, dispose subscription | **Fixed** (T-017) |
 | i-012 | Blocker | `/clear` in tmux mode breaks interaction + session switch re-tracking | dev agent | Add `conversation.clear` RPC + intercept `/clear` in app + clear on session switch | **Fixed** |
+| i-012-followup | Blocker | `currentBound()` in `refreshSessionFile` blocks session switch after tmux `/clear` | dev agent | Fix `currentBound()` to allow switch when old file is filtered out | **Open** |
 | RISK-01 | Risk | dev-1 has multiple tasks; now serialized by priority | team-lead | P0→P1→P2 order enforced | Mitigated |
 | RISK-02 | Risk | 61 pre-existing flutter analyze issues | team-lead | Not blocking, but noise masks real issues | Accepted |
 | RISK-03 | Risk | unread_provider lacks msg_id dedup | team-lead | Created T-013 for independent fix | Fixed |

@@ -532,6 +532,59 @@ func TestClaudeWatcherSkipExisting(t *testing.T) {
 	}
 }
 
+func TestClaudeWatcherRefreshSwitchesAfterClear(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	oldSess := filepath.Join(projectDir, "sess-old.jsonl")
+	newSess := filepath.Join(projectDir, "sess-new.jsonl")
+
+	oldTime := time.Now().Add(-10 * time.Minute)
+	if err := os.WriteFile(oldSess, []byte(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"old"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write old session: %v", err)
+	}
+	if err := os.Chtimes(oldSess, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old: %v", err)
+	}
+
+	newTime := time.Now()
+	newLine := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}` + "\n"
+	if err := os.WriteFile(newSess, []byte(newLine), 0o644); err != nil {
+		t.Fatalf("write new session: %v", err)
+	}
+	if err := os.Chtimes(newSess, newTime, newTime); err != nil {
+		t.Fatalf("chtimes new: %v", err)
+	}
+
+	origGetPaneActivity := getPaneActivityFunc
+	getPaneActivityFunc = func(string) *time.Time {
+		t := time.Now()
+		return &t
+	}
+	defer func() { getPaneActivityFunc = origGetPaneActivity }()
+
+	w := NewClaudeWatcher(oldSess, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetTmuxTarget("mock:0.0")
+	w.SetPID(999999)
+	w.lastSwitchAt = time.Time{}
+
+	w.refreshSessionFile()
+
+	if w.path != newSess {
+		t.Fatalf("expected watcher to switch from %s to %s, got %s", oldSess, newSess, w.path)
+	}
+}
+
 func TestClaudeWatcherNoRefreshOnFirstPoll(t *testing.T) {
 	dir := t.TempDir()
 	sessionFile := filepath.Join(dir, "single.jsonl")

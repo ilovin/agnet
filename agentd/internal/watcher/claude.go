@@ -206,18 +206,23 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		return
 	}
 
-	// Helper: check if current binding is still among candidates OR still exists on disk.
-	// The current file may live outside the project dir (e.g. an externally-provided
-	// session file from Attach). As long as it exists, don't switch away from it.
+	// Helper: check if current binding is still valid.
+	// 1. If current file is in candidates → still valid (still a candidate).
+	// 2. If current file is NOT in candidates AND len(candidates) == 0 → check
+	//    os.Stat; if exists AND modified within last 2 minutes → valid (protect
+	//    externally-provided files that are still active).
+	// 3. Otherwise → not valid (allow switching to a more active candidate).
 	currentBound := func() bool {
 		for _, c := range candidates {
 			if c.jsonlPath == w.path {
 				return true
 			}
 		}
-		if w.path != "" {
-			if _, err := os.Stat(w.path); err == nil {
-				return true
+		if w.path != "" && len(candidates) == 0 {
+			if fi, err := os.Stat(w.path); err == nil {
+				if time.Since(fi.ModTime()) < 2*time.Minute {
+					return true
+				}
 			}
 		}
 		return false
@@ -231,7 +236,7 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	}
 
 	// Step 3: Time-based filtering (optional)
-	paneActivity := getPaneActivity(w.tmuxTarget)
+	paneActivity := getPaneActivityFunc(w.tmuxTarget)
 	candidates = filterCandidatesByPaneActivity(candidates, paneActivity, 5*time.Minute)
 
 	if len(candidates) == 1 {
@@ -356,7 +361,7 @@ func getLastActivityTimeFromJSONL(jsonlPath string) time.Time {
 }
 
 // getPaneActivity returns the last activity time of a tmux pane, or nil if unavailable.
-func getPaneActivity(tmuxTarget string) *time.Time {
+var getPaneActivityFunc = func(tmuxTarget string) *time.Time {
 	if tmuxTarget == "" {
 		return nil
 	}
@@ -618,7 +623,7 @@ func extractFingerprintsFromJSONL(jsonlPath string, maxFPs int) []string {
 
 func (w *ClaudeWatcher) switchToFile(newPath string) {
 	w.mu.Lock()
-	if time.Since(w.lastSwitchAt) < 30*time.Second {
+	if time.Since(w.lastSwitchAt) < 10*time.Second {
 		w.mu.Unlock()
 		return
 	}
