@@ -4,6 +4,7 @@ package scanner
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -12,11 +13,7 @@ import (
 
 // scanLinux scans for processes on Linux using /proc.
 func (s *Scanner) scanLinux() ([]ProcessInfo, error) {
-	return s.scanLinuxWithFS(RealFileSystem{})
-}
-
-func (s *Scanner) scanLinuxWithFS(fs FileSystem) ([]ProcessInfo, error) {
-	entries, err := fs.ReadDir("/proc")
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil, err
 	}
@@ -31,24 +28,20 @@ func (s *Scanner) scanLinuxWithFS(fs FileSystem) ([]ProcessInfo, error) {
 			continue // not a PID directory
 		}
 
-		info, ok := s.scanProcessWithFS(fs, pid)
+		info, ok := s.scanProcess(pid)
 		if ok {
 			found = append(found, info)
 		}
 	}
 
-	return finalizeProcessScanWithFS(fs, found), nil
+	return finalizeProcessScan(found), nil
 }
 
 // scanProcess checks if a process is a Claude or OpenCode agent.
 func (s *Scanner) scanProcess(pid int) (ProcessInfo, bool) {
-	return s.scanProcessWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) scanProcessWithFS(fs FileSystem, pid int) (ProcessInfo, bool) {
 	// Read command line
 	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
-	data, err := fs.ReadFile(cmdlinePath)
+	data, err := os.ReadFile(cmdlinePath)
 	if err != nil {
 		return ProcessInfo{}, false
 	}
@@ -75,28 +68,28 @@ func (s *Scanner) scanProcessWithFS(fs FileSystem, pid int) (ProcessInfo, bool) 
 
 	// Get working directory
 	cwdPath := fmt.Sprintf("/proc/%d/cwd", pid)
-	workDir, err := fs.Readlink(cwdPath)
+	workDir, err := os.Readlink(cwdPath)
 	if err != nil {
 		workDir = "/"
 	}
 
 	// Filter out agentd's own children (they're already managed)
-	ppid := s.getPPIDWithFS(fs, pid)
-	if ppid > 0 && s.isAgentdWithFS(fs, ppid) {
+	ppid := s.getPPID(pid)
+	if ppid > 0 && s.isAgentd(ppid) {
 		return ProcessInfo{}, false // skip agentd's children
 	}
 
 	// Get controlling terminal
-	terminal := s.getTerminalWithFS(fs, pid)
-	tmuxTarget, tmuxSession := s.detectLinuxTmuxFromTTYWithFS(fs, terminal)
+	terminal := s.getTerminal(pid)
+	tmuxTarget, tmuxSession := s.detectLinuxTmuxFromTTY(terminal)
 
 	// Detect tmux/screen session
 	session := tmuxSession
 	if session == "" {
-		session = s.detectTmuxSessionWithFS(fs, pid)
+		session = s.detectTmuxSession(pid)
 	}
 	if session == "" {
-		session = s.detectScreenSessionWithFS(fs, pid)
+		session = s.detectScreenSession(pid)
 	}
 
 	return ProcessInfo{
@@ -116,12 +109,8 @@ func (s *Scanner) scanProcessWithFS(fs FileSystem, pid int) (ProcessInfo, bool) 
 
 // getPPID returns the parent process ID.
 func (s *Scanner) getPPID(pid int) int {
-	return s.getPPIDWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) getPPIDWithFS(fs FileSystem, pid int) int {
 	statusPath := fmt.Sprintf("/proc/%d/status", pid)
-	data, err := fs.ReadFile(statusPath)
+	data, err := os.ReadFile(statusPath)
 	if err != nil {
 		return 0
 	}
@@ -138,12 +127,8 @@ func (s *Scanner) getPPIDWithFS(fs FileSystem, pid int) int {
 
 // isAgentd checks if a process is agentd.
 func (s *Scanner) isAgentd(pid int) bool {
-	return s.isAgentdWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) isAgentdWithFS(fs FileSystem, pid int) bool {
 	exePath := fmt.Sprintf("/proc/%d/exe", pid)
-	target, err := fs.Readlink(exePath)
+	target, err := os.Readlink(exePath)
 	if err != nil {
 		return false
 	}
@@ -152,12 +137,8 @@ func (s *Scanner) isAgentdWithFS(fs FileSystem, pid int) bool {
 
 // detectTmuxSession checks if process is running in a tmux session.
 func (s *Scanner) detectTmuxSession(pid int) string {
-	return s.detectTmuxSessionWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) detectTmuxSessionWithFS(fs FileSystem, pid int) string {
 	environPath := fmt.Sprintf("/proc/%d/environ", pid)
-	data, err := fs.ReadFile(environPath)
+	data, err := os.ReadFile(environPath)
 	if err != nil {
 		return ""
 	}
@@ -171,7 +152,7 @@ func (s *Scanner) detectTmuxSessionWithFS(fs FileSystem, pid int) string {
 			parts := strings.Split(tmuxVal, ",")
 			if len(parts) >= 1 {
 				// Try to get session name from tmux
-				return s.getTmuxSessionNameWithFS(fs, pid)
+				return s.getTmuxSessionName(pid)
 			}
 		}
 	}
@@ -180,25 +161,21 @@ func (s *Scanner) detectTmuxSessionWithFS(fs FileSystem, pid int) string {
 
 // getTmuxSessionName gets the tmux session name for a process.
 func (s *Scanner) getTmuxSessionName(pid int) string {
-	return s.getTmuxSessionNameWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) getTmuxSessionNameWithFS(fs FileSystem, pid int) string {
 	// Look for tmux client process in the process tree
 	for ppid := pid; ppid > 1; {
-		ppid = s.getPPIDWithFS(fs, ppid)
+		ppid = s.getPPID(ppid)
 		if ppid <= 1 {
 			break
 		}
 		cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", ppid)
-		data, err := fs.ReadFile(cmdlinePath)
+		data, err := os.ReadFile(cmdlinePath)
 		if err != nil {
 			continue
 		}
 		cmd := string(data)
 		if strings.Contains(cmd, "tmux:") && strings.Contains(cmd, "client") {
 			// This is a tmux client, try to find session from its parent
-			return s.findTmuxSessionFromServerWithFS(fs, ppid)
+			return s.findTmuxSessionFromServer(ppid)
 		}
 	}
 	return ""
@@ -206,10 +183,6 @@ func (s *Scanner) getTmuxSessionNameWithFS(fs FileSystem, pid int) string {
 
 // findTmuxSessionFromServer finds tmux session name from tmux server process.
 func (s *Scanner) findTmuxSessionFromServer(tmuxPid int) string {
-	return s.findTmuxSessionFromServerWithFS(RealFileSystem{}, tmuxPid)
-}
-
-func (s *Scanner) findTmuxSessionFromServerWithFS(fs FileSystem, tmuxPid int) string {
 	// This is complex - would need to parse tmux socket or use tmux command
 	// For now, return a placeholder that indicates tmux is being used
 	return "tmux-attached"
@@ -217,12 +190,8 @@ func (s *Scanner) findTmuxSessionFromServerWithFS(fs FileSystem, tmuxPid int) st
 
 // detectScreenSession checks if process is running in a screen session.
 func (s *Scanner) detectScreenSession(pid int) string {
-	return s.detectScreenSessionWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) detectScreenSessionWithFS(fs FileSystem, pid int) string {
 	environPath := fmt.Sprintf("/proc/%d/environ", pid)
-	data, err := fs.ReadFile(environPath)
+	data, err := os.ReadFile(environPath)
 	if err != nil {
 		return ""
 	}
@@ -244,12 +213,8 @@ func (s *Scanner) detectScreenSessionWithFS(fs FileSystem, pid int) string {
 
 // getTerminal returns the controlling terminal device.
 func (s *Scanner) getTerminal(pid int) string {
-	return s.getTerminalWithFS(RealFileSystem{}, pid)
-}
-
-func (s *Scanner) getTerminalWithFS(fs FileSystem, pid int) string {
 	fdPath := fmt.Sprintf("/proc/%d/fd/0", pid)
-	tty, err := fs.Readlink(fdPath)
+	tty, err := os.Readlink(fdPath)
 	if err != nil {
 		return ""
 	}
@@ -257,10 +222,6 @@ func (s *Scanner) getTerminalWithFS(fs FileSystem, pid int) string {
 }
 
 func (s *Scanner) detectLinuxTmuxFromTTY(terminal string) (target string, session string) {
-	return s.detectLinuxTmuxFromTTYWithFS(RealFileSystem{}, terminal)
-}
-
-func (s *Scanner) detectLinuxTmuxFromTTYWithFS(fs FileSystem, terminal string) (target string, session string) {
 	wantTTY := normalizeTTY(terminal)
 	if wantTTY == "" {
 		return "", ""
@@ -299,9 +260,5 @@ func (s *Scanner) detectLinuxTmuxFromTTYWithFS(fs FileSystem, terminal string) (
 
 // stub for Darwin compatibility - never called on Linux
 func (s *Scanner) scanDarwin() ([]ProcessInfo, error) {
-	return nil, nil
-}
-
-func (s *Scanner) scanDarwinWithFS(fs FileSystem) ([]ProcessInfo, error) {
 	return nil, nil
 }

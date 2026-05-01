@@ -166,6 +166,7 @@ USERS="alice:token1;bob:token2" ./scripts/tunnelhub.sh start --cloudflared
 ### MUST
 
 - Follow **test-driven development (TDD)** for all non-trivial changes.
+  - TDD commit rhythm: each refactoring or feature must be delivered as a sequence of independently buildable commits in the order **test (red) → implementation (green) → cleanup/refactor**. A single large commit mixing tests and implementation is not acceptable.
 - After **every development step or code change**, run the relevant tests before continuing.
 - Minimum test expectation per change:
   - backend changes: targeted Go unit tests
@@ -239,6 +240,7 @@ A task is accepted only when all items below are satisfied:
 4. For UI-related work, real Chrome interaction validation in the existing tab is completed and recorded.
 5. Risks/blockers/follow-ups are documented in `progress.md`.
 6. Requirement-to-delivery status is updated in both the relevant `requirements/r-XXX-*.md` and `progress.md`.
+7. **After merge to main**: task status in `progress.md` and the task list are updated immediately (no lag between merge and dashboard sync).
 
 ### SHOULD
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -123,17 +124,12 @@ func New() *Scanner {
 
 // Scan discovers all running Claude and OpenCode processes.
 func (s *Scanner) Scan() ([]ProcessInfo, error) {
-	return s.ScanWithFS(RealFileSystem{})
-}
-
-// ScanWithFS discovers all running Claude and OpenCode processes using the provided FileSystem.
-func (s *Scanner) ScanWithFS(fs FileSystem) ([]ProcessInfo, error) {
 	// Check if /proc exists (Linux)
-	if _, err := fs.Stat("/proc"); err == nil {
-		return s.scanLinuxWithFS(fs)
+	if _, err := os.Stat("/proc"); err == nil {
+		return s.scanLinux()
 	}
 	// Fallback to Darwin (macOS) implementation
-	return s.scanDarwinWithFS(fs)
+	return s.scanDarwin()
 }
 
 
@@ -159,22 +155,18 @@ func (p *ProcessInfo) IsAttachable() bool {
 }
 
 func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
-	return finalizeProcessScanWithFS(RealFileSystem{}, processes)
-}
-
-func finalizeProcessScanWithFS(fs FileSystem, processes []ProcessInfo) []ProcessInfo {
 	parents := filterParentAgents(processes)
 	out := make([]ProcessInfo, 0, len(parents))
 	for _, proc := range parents {
 		if proc.Provider == "claude" {
 			// Try to find session info, but don't skip if not found
 			// Process may still be attachable even without session file
-			sessionID, sessionFile := findClaudeSessionInfoWithFS(fs, proc.PID, proc.WorkDir, proc.TmuxTarget)
+			sessionID, sessionFile := findClaudeSessionInfo(proc.PID, proc.WorkDir, proc.TmuxTarget)
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		} else if proc.Provider == "opencode" {
 			// Try to find OpenCode session info
-			sessionID, sessionFile := findOpenCodeSessionInfoWithFS(fs, proc.PID, proc.WorkDir)
+			sessionID, sessionFile := findOpenCodeSessionInfo(proc.PID, proc.WorkDir)
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		}
@@ -223,16 +215,12 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 var homeBaseDir = "/home"
 
 func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, string) {
-	return findClaudeSessionInfoWithFS(RealFileSystem{}, pid, workDir, tmuxTarget)
-}
-
-func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTarget string) (string, string) {
-	home, err := fs.UserHomeDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ""
 	}
 
-	if !isClaudeProcessWithFS(fs, pid) {
+	if !isClaudeProcess(pid) {
 		return "", ""
 	}
 
@@ -240,12 +228,12 @@ func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTar
 	tasksDir := filepath.Join(home, ".claude", "tasks")
 
 	// Step 1: Task fd discovery
-	taskSessions := findClaudeSessionsFromTasksWithFS(fs, pid, projectDir, tasksDir)
+	taskSessions := findClaudeSessionsFromTasks(pid, projectDir, tasksDir)
 
 	// When running as root, also scan /home/* for other users' Claude task dirs
 	if len(taskSessions) == 0 {
-		if _, err := fs.Stat(homeBaseDir); err == nil {
-			entries, err := fs.ReadDir(homeBaseDir)
+		if _, err := os.Stat(homeBaseDir); err == nil {
+			entries, err := os.ReadDir(homeBaseDir)
 			if err == nil {
 				for _, entry := range entries {
 					if !entry.IsDir() {
@@ -254,7 +242,7 @@ func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTar
 					userHome := filepath.Join(homeBaseDir, entry.Name())
 					userProjectDir := filepath.Join(userHome, ".claude", "projects", projectDirName(workDir))
 					userTasksDir := filepath.Join(userHome, ".claude", "tasks")
-					taskSessions = findClaudeSessionsFromTasksWithFS(fs, pid, userProjectDir, userTasksDir)
+					taskSessions = findClaudeSessionsFromTasks(pid, userProjectDir, userTasksDir)
 					if len(taskSessions) > 0 {
 						projectDir = userProjectDir
 						tasksDir = userTasksDir
@@ -281,7 +269,7 @@ func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTar
 	// Always include the top N most-recently-modified .jsonl files from the project dir,
 	// because the current session may not have a task dir yet (e.g. no tasks spawned).
 	// Task fd sessions are merged in to ensure they're considered too.
-	candidates := listSessionCandidatesWithFS(fs, projectDir)
+	candidates := listSessionCandidates(projectDir)
 	if len(taskSessions) > 0 {
 		taskSet := make(map[string]bool, len(taskSessions))
 		for _, sid := range taskSessions {
@@ -296,11 +284,11 @@ func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTar
 		// Add any task-fd sessions whose .jsonl wasn't in the dir listing
 		for sid := range taskSet {
 			jsonlPath := filepath.Join(projectDir, sid+".jsonl")
-			if _, err := fs.Stat(jsonlPath); err == nil {
+			if _, err := os.Stat(jsonlPath); err == nil {
 				candidates = append(candidates, SessionCandidate{
 					SessionID:    sid,
 					JSONLPath:    jsonlPath,
-					LastActivity: getLastActivityTimeWithFS(fs, jsonlPath),
+					LastActivity: getLastActivityTime(jsonlPath),
 				})
 			}
 		}
@@ -331,7 +319,7 @@ func findClaudeSessionInfoWithFS(fs FileSystem, pid int, workDir string, tmuxTar
 	}
 
 	// Step 4: Content matching
-	if matched := contentMatchSessionWithFS(fs, tmuxTarget, candidates, 5); matched != nil {
+	if matched := contentMatchSession(tmuxTarget, candidates, 5); matched != nil {
 		return matched.SessionID, matched.JSONLPath
 	}
 
@@ -389,19 +377,15 @@ func findClaudeSessionInfoGlobalFallback(home string, taskSessions []string) []S
 
 // findClaudeSessionsFromTasks returns all session IDs found via task fd discovery.
 func findClaudeSessionsFromTasks(pid int, projectDir, tasksDir string) []string {
-	return findClaudeSessionsFromTasksWithFS(RealFileSystem{}, pid, projectDir, tasksDir)
-}
-
-func findClaudeSessionsFromTasksWithFS(fs FileSystem, pid int, projectDir, tasksDir string) []string {
 	if pid <= 0 || projectDir == "" || tasksDir == "" {
 		return nil
 	}
 	sessionIDs := make(map[string]struct{})
 
 	procFdDir := fmt.Sprintf("/proc/%d/fd", pid)
-	if fdEntries, err := fs.ReadDir(procFdDir); err == nil {
+	if fdEntries, err := os.ReadDir(procFdDir); err == nil {
 		for _, fd := range fdEntries {
-			link, err := fs.Readlink(filepath.Join(procFdDir, fd.Name()))
+			link, err := os.Readlink(filepath.Join(procFdDir, fd.Name()))
 			if err != nil {
 				continue
 			}
@@ -411,7 +395,8 @@ func findClaudeSessionsFromTasksWithFS(fs FileSystem, pid int, projectDir, tasks
 		}
 	} else {
 		// macOS: use lsof
-		output, err := fs.Exec("lsof", "-p", strconv.Itoa(pid), "-Fn")
+		cmd := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn")
+		output, err := cmd.Output()
 		if err == nil {
 			for _, line := range strings.Split(string(output), "\n") {
 				if len(line) < 2 || line[0] != 'n' {
@@ -475,12 +460,8 @@ func latestClaudeTaskActivity(taskDir string) time.Time {
 }
 
 func isClaudeProcess(pid int) bool {
-	return isClaudeProcessWithFS(RealFileSystem{}, pid)
-}
-
-func isClaudeProcessWithFS(fs FileSystem, pid int) bool {
 	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
-	data, err := fs.ReadFile(cmdlinePath)
+	data, err := os.ReadFile(cmdlinePath)
 	if err != nil {
 		// On non-Linux systems (e.g., macOS), /proc doesn't exist.
 		// Skip validation on these platforms as PID reuse is less of a concern.
@@ -524,11 +505,7 @@ func findClaudeSessionFile(home, sessionID, workDir string) string {
 }
 
 func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {
-	return findOpenCodeSessionInfoWithFS(RealFileSystem{}, pid, workDir)
-}
-
-func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (string, string) {
-	home, err := fs.UserHomeDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ""
 	}
@@ -543,8 +520,8 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 
 	// On Linux, also scan all user home directories under /home
 	// This allows agentd running as root to find sessions from all users
-	if _, err := fs.Stat("/home"); err == nil {
-		entries, err := fs.ReadDir("/home")
+	if _, err := os.Stat("/home"); err == nil {
+		entries, err := os.ReadDir("/home")
 		if err == nil {
 			for _, entry := range entries {
 				if !entry.IsDir() {
@@ -569,7 +546,7 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 	// OpenCode stores sessions with workDir in the file content
 	if workDir != "" {
 		for _, sessionDir := range sessionDirs {
-			entries, err := fs.ReadDir(sessionDir)
+			entries, err := os.ReadDir(sessionDir)
 			if err != nil {
 				continue
 			}
@@ -587,9 +564,9 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 				sessionID := strings.TrimSuffix(name, ".json")
 
 				// Read session file and check if workDir matches
-				if match, err := matchSessionWorkDirWithFS(fs, sessionFile, workDir); err == nil && match {
+				if match, err := matchSessionWorkDir(sessionFile, workDir); err == nil && match {
 					// Verify the process is still running and is opencode
-					if pid > 0 && !isOpenCodeProcessWithFS(fs, pid) {
+					if pid > 0 && !isOpenCodeProcess(pid) {
 						continue
 					}
 					log.Printf("[OpenCode] Found session by workDir match: %s", sessionID)
@@ -601,13 +578,13 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 
 	// Second: if PID is provided, try to validate process and find its session
 	if pid > 0 {
-		if isOpenCodeProcessWithFS(fs, pid) {
+		if isOpenCodeProcess(pid) {
 			// Find the most recently modified session file
 			var latestFile string
 			var latestTime time.Time
 
 			for _, sessionDir := range sessionDirs {
-				entries, err := fs.ReadDir(sessionDir)
+				entries, err := os.ReadDir(sessionDir)
 				if err != nil {
 					continue
 				}
@@ -647,7 +624,7 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 	var latestTime time.Time
 
 	for _, sessionDir := range sessionDirs {
-		entries, err := fs.ReadDir(sessionDir)
+		entries, err := os.ReadDir(sessionDir)
 		if err != nil {
 			continue
 		}
@@ -690,11 +667,7 @@ func findOpenCodeSessionInfoWithFS(fs FileSystem, pid int, workDir string) (stri
 
 // matchSessionWorkDir reads a session file and checks if its workDir matches
 func matchSessionWorkDir(sessionFile, workDir string) (bool, error) {
-	return matchSessionWorkDirWithFS(RealFileSystem{}, sessionFile, workDir)
-}
-
-func matchSessionWorkDirWithFS(fs FileSystem, sessionFile, workDir string) (bool, error) {
-	data, err := fs.ReadFile(sessionFile)
+	data, err := os.ReadFile(sessionFile)
 	if err != nil {
 		return false, err
 	}
@@ -710,12 +683,8 @@ func matchSessionWorkDirWithFS(fs FileSystem, sessionFile, workDir string) (bool
 }
 
 func isOpenCodeProcess(pid int) bool {
-	return isOpenCodeProcessWithFS(RealFileSystem{}, pid)
-}
-
-func isOpenCodeProcessWithFS(fs FileSystem, pid int) bool {
 	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
-	data, err := fs.ReadFile(cmdlinePath)
+	data, err := os.ReadFile(cmdlinePath)
 	if err != nil {
 		// On non-Linux systems (e.g., macOS), /proc doesn't exist.
 		// Skip validation on these platforms as PID reuse is less of a concern.

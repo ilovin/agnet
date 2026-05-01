@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -20,11 +21,7 @@ type SessionCandidate struct {
 // getLastActivityTime reads the last few lines of a JSONL file and extracts
 // the timestamp of the most recent message. Falls back to file mtime.
 func getLastActivityTime(jsonlPath string) time.Time {
-	return getLastActivityTimeWithFS(RealFileSystem{}, jsonlPath)
-}
-
-func getLastActivityTimeWithFS(fs FileSystem, jsonlPath string) time.Time {
-	f, err := fs.Open(jsonlPath)
+	f, err := os.Open(jsonlPath)
 	if err != nil {
 		return time.Time{}
 	}
@@ -95,11 +92,7 @@ func getPaneLastActivity(tmuxTarget string) *time.Time {
 // listSessionCandidates lists all .jsonl files in projectDir with their activity times.
 // Files inside subagents/ directories are excluded (team-mode sub-agent sessions).
 func listSessionCandidates(projectDir string) []SessionCandidate {
-	return listSessionCandidatesWithFS(RealFileSystem{}, projectDir)
-}
-
-func listSessionCandidatesWithFS(fs FileSystem, projectDir string) []SessionCandidate {
-	entries, err := fs.ReadDir(projectDir)
+	entries, err := os.ReadDir(projectDir)
 	if err != nil {
 		return nil
 	}
@@ -115,7 +108,7 @@ func listSessionCandidatesWithFS(fs FileSystem, projectDir string) []SessionCand
 		candidates = append(candidates, SessionCandidate{
 			SessionID:    strings.TrimSuffix(entry.Name(), ".jsonl"),
 			JSONLPath:    jsonlPath,
-			LastActivity: getLastActivityTimeWithFS(fs, jsonlPath),
+			LastActivity: getLastActivityTime(jsonlPath),
 		})
 	}
 	return candidates

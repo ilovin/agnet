@@ -3,6 +3,7 @@ package scanner
 import (
 	"encoding/json"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -34,11 +35,7 @@ func cleanTUIText(raw string) string {
 // and user messages. Pure tool_use messages (no text block) are skipped.
 // Stops when maxFPs fingerprints are collected.
 func extractFingerprints(jsonlPath string, maxFPs int) []string {
-	return extractFingerprintsWithFS(RealFileSystem{}, jsonlPath, maxFPs)
-}
-
-func extractFingerprintsWithFS(fs FileSystem, jsonlPath string, maxFPs int) []string {
-	f, err := fs.Open(jsonlPath)
+	f, err := os.Open(jsonlPath)
 	if err != nil {
 		return nil
 	}
@@ -150,10 +147,6 @@ func matchScore(paneText string, fingerprints []string) int {
 // or nil if no match (all scores are 0).
 // maxCandidates limits how many candidates are actually fingerprinted.
 func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, maxCandidates int) *SessionCandidate {
-	return contentMatchSessionWithFS(RealFileSystem{}, tmuxTarget, candidates, maxCandidates)
-}
-
-func contentMatchSessionWithFS(fs FileSystem, tmuxTarget string, candidates []SessionCandidate, maxCandidates int) *SessionCandidate {
 	if tmuxTarget == "" || len(candidates) == 0 {
 		return nil
 	}
@@ -177,7 +170,7 @@ func contentMatchSessionWithFS(fs FileSystem, tmuxTarget string, candidates []Se
 	var bestCandidate *SessionCandidate
 
 	for i := range top {
-		fps := extractFingerprintsWithFS(fs, top[i].JSONLPath, 20)
+		fps := extractFingerprints(top[i].JSONLPath, 20)
 		score := matchScore(paneText, fps)
 		if score > bestScore {
 			bestScore = score

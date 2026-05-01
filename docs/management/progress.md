@@ -6,12 +6,13 @@
 - Last updated: 2026-04-30
 
 ## 2) Overall Progress
-- Total tasks: 22 active
-- Done: 16 (T-001~T-003, T-004~T-009, T-012~T-013, T-015~T-017, T-019, B-001, TEST-001~005, T-014 backend+frontend, 架构探索)
-- In Progress: 6 (ARCH-001 manager split, ARCH-004 scanner abstraction, ARCH-005 flutter screens, ARCH-007 node manager, TEST-007 integration test, T-014 部署验证)
-- Blocked: 2 (ARCH-002 ws-service 依赖ARCH-001, ARCH-003 watcher-seam 依赖ARCH-001)
+- Total tasks: 24 active
+- Done: 18 (T-001~T-003, T-004~T-009, T-012~T-013, T-015~T-017, T-019, B-001, TEST-001~005, TEST-007, T-014 backend+frontend, ARCH-001, ARCH-004, ARCH-007, Test isolation fix, 架构探索)
+- In Progress: 1 (ARCH-005 flutter screens)
+- Ready: 2 (ARCH-002 ws-service 依赖ARCH-001, ARCH-003 watcher-seam 依赖ARCH-001)
 - Pending: 1 (ARCH-006 jsonrpc-types)
-- Overall health: 🟢 功能需求全部交付; 🟡 架构重构第一批进行中; 🟡 TEST-007 集成测试补写中
+- New Issues: 1 (i-012 APP user message display bug, high priority)
+- Overall health: 🟢 功能需求全部交付; 🟢 架构重构第一批大部分完成; 🟡 ARCH-005 Flutter重构进行中; 🔴 i-012 高优先级bug待处理
 
 ## 3) Task Execution Board
 | Task ID | Requirement ID | Owner | Assignee | Status | ETA | Last Update |
@@ -32,22 +33,24 @@
 | T-018 | — | Manager | team-lead | **Completed** | 2026-04-29 | Team模式子agent不加入默认管理列表; agentd 33/33 ws tests pass |
 | T-019 | R-005 session排序稳定 | Developer | dev-1 | **Completed** | 2026-04-28 | 两处排序 + 1个单元测试; 18/18 tests pass, analyze 无新增错误 |
 | **TEST-007** | — | Developer | dev agent | **Completed** | 2026-04-30 | handler_integration_test.go PASS; attach→load history→agent.list HasHistory 端到端验证 |
-| **ARCH-001** | — | Developer | dev agent | **Completed (未合并)** | 2026-04-30 | Manager拆分: ProcessManager+EventManager+StreamParser+PermissionResolver; TDD; manager.go 2307→1472行; worktree arch-001-manager-split |
-| **ARCH-002** | — | Developer | — | **Ready** | - | WS handler抽Service层; ARCH-001已完成, 可启动; worktree arch-002-ws-service |
-| **ARCH-003** | — | Developer | — | **Ready** | - | SessionWatcher假seam修复; ARCH-001已完成, 可启动; worktree arch-003-watcher-seam |
-| **ARCH-004** | — | Developer | dev agent | **Completed (未合并)** | 2026-04-30 | Scanner抽象文件系统: FileSystem接口+Real/Mem适配器; TDD; worktree arch-004-scanner-fs |
+| **ARCH-001** | — | Developer | dev agent | **Completed** | 2026-04-30 | Manager拆分: merged to main at commit `0d8494b`; ProcessManager+EventManager+StreamParser+PermissionResolver; manager.go 2307→1472行 |
+| **ARCH-002** | — | Developer | — | **Ready** | - | WS handler抽Service层; dependency ARCH-001 completed; worktree arch-002-ws-service |
+| **ARCH-003** | — | Developer | — | **Ready** | - | SessionWatcher假seam修复; dependency ARCH-001 completed; worktree arch-003-watcher-seam |
+| **ARCH-004** | — | Developer | dev agent | **Completed** | 2026-04-30 | Scanner FS abstraction: merged to main at commit `b51757e`; FileSystem接口+Real/Mem适配器; TDD |
 | **ARCH-005** | — | Developer | dev agent | **In Progress** | - | Flutter screens重构: DashboardService+AgentDetailService; TDD; worktree arch-005-flutter-screens |
 | **ARCH-006** | — | Developer | — | **Pending** | - | JSON-RPC类型安全: 手动map→typed client; worktree arch-006-jsonrpc-types |
-| **ARCH-007** | — | Developer | dev agent | **Completed (未合并)** | 2026-04-30 | NodeManager拆分: NodeRegistry+TunnelManager+ProxyManager; TDD; worktree arch-007-node-manager |
+| **ARCH-007** | — | Developer | dev agent | **Completed** | 2026-04-30 | NodeManager拆分: merged to main at commit `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
+| **Test isolation fix** | — | Developer | dev agent | **Completed** | 2026-04-30 | Merged to main at commit `93a7aeb` |
+| **i-012** | — | Developer | — | **Open (High Priority)** | - | APP user message display bug; newly discovered; needs investigation and fix |
 
 ## 4) Blockers & Risks
 | ID | Type | Description | Owner | Mitigation | Status |
 |---|---|---|---|---|---|
 | C-01 (dashboard) | Blocker | Event listener duplicate registration in dashboard :592/:653 | reviewer-1 | Extract unified listener, dispose subscription | **Fixed** (T-017) |
-| C-01 (logo) | Blocker | Cross-platform hash inconsistency in session_logo_provider | dev-2 | Use cross-platform string hash | Open |
+| i-012 | Blocker | APP user message display bug | — | Investigate and fix | Open |
 | RISK-01 | Risk | dev-1 has multiple tasks; now serialized by priority | team-lead | P0→P1→P2 order enforced | Mitigated |
 | RISK-02 | Risk | 61 pre-existing flutter analyze issues | team-lead | Not blocking, but noise masks real issues | Accepted |
-| RISK-03 | Risk | unread_provider lacks msg_id dedup | team-lead | Created T-013 for independent fix | Tracked |
+| RISK-03 | Risk | unread_provider lacks msg_id dedup | team-lead | Created T-013 for independent fix | Fixed |
 
 ## 5) Change Log
 | Date | What Changed | By | Notes |
@@ -62,11 +65,17 @@
 | 2026-04-30 | **Restart bug fix completed** | dev agent | `RestartInPlace`等待旧进程退出+移除`setProcess(nil)`; 1个TDD测试; agentd/agentgw全模块PASS |
 | 2026-04-30 | **T-014交互优化** | dev agent | 消息时间默认隐藏点击会话显示; agent运行中 |
 | 2026-04-30 | **Deployer bug修复完成** | dev agent | PlanStepsWithToken步骤重排: pkill→sleep→upload agentd.new→mv原子替换; 3个TDD测试; agentgw 7/7 tests PASS |
-| 2026-04-30 | **ARCH-001完成** | dev agent | Manager拆分: ProcessManager(600行)+EventManager(119行)+StreamParser(212行)+PermissionResolver(87行); manager.go 2307→1472行; agentd全模块PASS |
+| 2026-04-30 | **ARCH-001 merged** | dev agent | Manager拆分 merged to main at `0d8494b`; ProcessManager(600行)+EventManager(119行)+StreamParser(212行)+PermissionResolver(87行); manager.go 2307→1472行 |
+| 2026-04-30 | **ARCH-004 merged** | dev agent | Scanner FS abstraction merged to main at `b51757e`; FileSystem接口+Real/Mem适配器; TDD |
+| 2026-04-30 | **ARCH-007 merged** | dev agent | NodeManager拆分 merged to main at `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
+| 2026-04-30 | **Test isolation fix merged** | dev agent | Test isolation fix merged to main at `93a7aeb` |
+| 2026-04-30 | **ARCH-002/ARCH-003 Ready** | team-lead | Dependencies unblocked: ARCH-001 completed; both tasks ready to start |
+| 2026-04-30 | **i-012 discovered** | team-lead | APP user message display bug identified; high priority; needs investigation and fix |
 
 ## 6) Completion Summary
-- 2026-04-30 deliveries: T-014 (backend+frontend), TEST-007, ARCH-001, ARCH-004, ARCH-007, Restart bug fix, Deployer bug fix, 7 issues created, architecture refactor PRD
+- 2026-04-30 deliveries: T-014 (backend+frontend), TEST-007, ARCH-001, ARCH-004, ARCH-007, Test isolation fix, Restart bug fix, Deployer bug fix, 7 issues created, architecture refactor PRD
 - In progress: ARCH-005 Flutter重构
-- Blocked: ARCH-002 WS抽Service(依赖ARCH-001), ARCH-003 Watcher假seam(依赖ARCH-001)
+- Ready: ARCH-002 WS抽Service, ARCH-003 Watcher假seam (dependencies completed)
 - Deferred: ARCH-006 JSON-RPC类型安全
+- New issues: i-012 APP user message display bug (high priority)
 - Historical records archived to `docs/archive/progress-2026-04-24.md`

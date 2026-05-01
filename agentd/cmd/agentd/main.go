@@ -224,7 +224,7 @@ func runServer() {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	http.Handle("/ws", srv)
 	tokenPreview := cfg.Token
 	if len(tokenPreview) > 8 {
