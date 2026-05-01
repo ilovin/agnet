@@ -104,6 +104,25 @@ func (a *Agent) setStatus(s Status) {
 	}
 }
 
+// SetStatus sets the agent status from external callers.
+func (a *Agent) SetStatus(s Status) {
+	a.setStatus(s)
+}
+
+// ResetWatcherOffset resets the underlying session watcher's file offset
+// so that historical lines are not re-read after a conversation.clear.
+func (a *Agent) ResetWatcherOffset() {
+	a.mu.RLock()
+	w := a.w
+	a.mu.RUnlock()
+	if w == nil {
+		return
+	}
+	if cw, ok := w.(*watcher.ClaudeWatcher); ok {
+		cw.ResetOffset()
+	}
+}
+
 // Buffer returns the EventBuffer for this agent (typed as interface{} to avoid import cycle in tests).
 func (a *Agent) Buffer() interface{} {
 	return a.buf

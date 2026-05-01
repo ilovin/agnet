@@ -258,3 +258,75 @@ func TestStatusChangedParamsIncludesLastMessageTime(t *testing.T) {
 		t.Fatalf("expected lastMessageTime > 0, got %d", lastMsgTimeMs)
 	}
 }
+
+// TestConversationClearResetsState verifies that conversation.clear resets the
+// agent's EventBuffer, persisted store, and status to idle.
+func TestConversationClearResetsState(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	// Seed some events so we can verify they are cleared.
+	seq1 := ag.EventBuf().Append(map[string]any{"role": "user", "text": "hello"})
+	_ = ag.EventBuf().Append(map[string]any{"role": "assistant", "text": "hi"})
+	if err := s.SaveConversationEvent(ag.ID, seq1, map[string]any{"role": "user", "text": "hello"}); err != nil {
+		t.Fatalf("save event: %v", err)
+	}
+
+	// Simulate agent in working state (e.g. mid-reply).
+	ag.SetStatus(agent.StatusWorking)
+	if ag.Status() != agent.StatusWorking {
+		t.Fatalf("setup failed: expected working status")
+	}
+
+	srv := New(mgr, "testtoken")
+	h := &handler{server: srv}
+
+	resp := h.conversationClear(RPCRequest{
+		ID:     1,
+		Params: map[string]any{"agentId": ag.ID, "nodeId": "node1"},
+	})
+
+	if resp.Error != nil {
+		t.Fatalf("conversationClear returned error: %v", resp.Error)
+	}
+
+	// 1. EventBuffer should be reset.
+	if ag.EventBuf().LastSeq() != 0 {
+		t.Fatalf("EventBuffer.LastSeq() = %d, want 0", ag.EventBuf().LastSeq())
+	}
+
+	// 2. Status should be reset to idle.
+	if ag.Status() != agent.StatusIdle {
+		t.Fatalf("agent status = %q, want idle", ag.Status())
+	}
+
+	// 3. Persisted events should be cleared.
+	lastSeq, err := mgr.LastPersistedSeq(ag.ID)
+	if err != nil {
+		t.Fatalf("LastPersistedSeq error: %v", err)
+	}
+	if lastSeq != 0 {
+		t.Fatalf("LastPersistedSeq = %d, want 0", lastSeq)
+	}
+}

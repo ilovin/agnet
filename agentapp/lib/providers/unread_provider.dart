@@ -12,6 +12,15 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
   final Map<ConversationKey, Set<String>> _seenMsgIds = {};
 
   void handleEvent(WsMessage event) {
+    if (event.method == 'conversation.cleared') {
+      final params = event.params as Map<String, dynamic>?;
+      if (params != null) {
+        final nodeId = params['nodeId'] as String? ?? '';
+        final agentId = params['agentId'] as String? ?? '';
+        markAsRead(nodeId, agentId);
+      }
+      return;
+    }
     if (event.method != 'conversation.message' &&
         event.method != 'conversation.message_update') {
       return;

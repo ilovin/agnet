@@ -1318,6 +1318,10 @@ func (m *Manager) LastConversationEventTime(agentID string) (time.Time, error) {
 	return m.events.LastConversationEventTime(agentID)
 }
 
+func (m *Manager) ClearConversationEvents(agentID string) error {
+	return m.events.ClearConversationEvents(agentID)
+}
+
 func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 	ag := m.Get(id)
 	if ag == nil {
@@ -1913,6 +1917,19 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
 				log.Printf("[Watcher] Failed to update session ID for %s: %v", agentID, err)
 			}
+		}
+		ag.EventBuf().Reset()
+		if err := m.ClearConversationEvents(agentID); err != nil {
+			log.Printf("[Watcher] Warning: failed to clear persisted history for %s on session switch: %v", agentID, err)
+		}
+		m.mu.RLock()
+		onOut := m.onOutput
+		m.mu.RUnlock()
+		if onOut != nil {
+			onOut(agentID, map[string]any{
+				"type":    "conversation.cleared",
+				"agentId": agentID,
+			})
 		}
 		derived := m.DeriveAgentState(agentID)
 		m.mu.RLock()

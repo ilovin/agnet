@@ -15,7 +15,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/agent_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
+import '../providers/conversation_provider.dart';
 import '../providers/unread_provider.dart';
+import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
@@ -1008,6 +1010,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   // Connection state for banner display
   bool _wsConnected = true;
 
+  // Push event listener handle for cleanup
+  EventCallback? _eventHandler;
+
   // User interaction cooldown — prevents auto-scroll while user is reading
   DateTime? _lastUserScroll;
   DateTime? _lastUserTap; // track taps on expandable widgets
@@ -1060,6 +1065,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _pollNewEvents();
       }
     });
+
+    // Register push event listener for conversation.cleared
+    final client = ref.read(connectionProvider);
+    _eventHandler = _onPushEvent;
+    client?.onEvent(_eventHandler!);
   }
 
   @override
@@ -1102,12 +1112,35 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   void dispose() {
     _pollTimer?.cancel();
     _scrollCtrl.removeListener(_handleScroll);
+    final client = ref.read(connectionProvider);
+    if (_eventHandler != null) {
+      client?.offEvent(_eventHandler!);
+    }
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
 
   String get _cacheKey => '${widget.nodeId}:${widget.agentId}';
+
+  void _onPushEvent(WsMessage event) {
+    if (event.method != 'conversation.cleared') return;
+    final params = event.params as Map<String, dynamic>?;
+    if (params == null) return;
+    final nodeId = params['nodeId'] as String? ?? '';
+    final agentId = params['agentId'] as String? ?? '';
+    if (nodeId != widget.nodeId || agentId != widget.agentId) return;
+    setState(() {
+      _rawEvents = [];
+      _lastSeq = 0;
+      _oldestSeq = 0;
+      _hasMoreHistory = true;
+      _loading = false;
+    });
+    _touchMessageCache(cachedEvents: []);
+    ref.read(conversationProvider.notifier).clear(nodeId, agentId);
+    ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId);
+  }
 
   void _touchMessageCache({List<Map<String, dynamic>>? cachedEvents}) {
     _messageCache[_cacheKey] = ConversationEventCacheEntry(
@@ -1437,6 +1470,36 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   Future<void> _sendMessage() async {
     final text = _inputCtrl.text.trim();
     if (text.isEmpty && _pendingImages.isEmpty) return;
+
+    // Intercept /clear command and send RPC instead of raw input
+    if (text == '/clear') {
+      final client = ref.read(connectionProvider);
+      if (client == null) {
+        setState(() {
+          _lastError = '连接未就绪，无法发送';
+        });
+        return;
+      }
+      _inputCtrl.clear();
+      setState(() => _lastError = null);
+      try {
+        await client.call(
+          'conversation.clear',
+          {
+            'nodeId': widget.nodeId,
+            'agentId': widget.agentId,
+          },
+          timeout: const Duration(seconds: 10),
+        );
+      } catch (e) {
+        debugPrint('conversation.clear error: $e');
+        if (mounted) {
+          setState(() => _lastError = '清除会话失败: $e');
+        }
+      }
+      return;
+    }
+
     final nodeState0 = ref.read(nodesProvider);
     final agents0 = nodeState0.agentsFor(widget.nodeId);
     final agent0 = agents0.where((a) => a.id == widget.agentId).firstOrNull;

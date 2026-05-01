@@ -12,7 +12,7 @@
 - Ready: 2 (ARCH-002 ws-service 依赖ARCH-001, ARCH-003 watcher-seam 依赖ARCH-001)
 - Pending: 1 (ARCH-006 jsonrpc-types)
 - New Issues: 1 (i-012 APP user message display bug, high priority)
-- Overall health: 🟢 功能需求全部交付; 🟢 架构重构第一批大部分完成; 🟡 ARCH-005 Flutter重构进行中; 🔴 i-012 高优先级bug待处理
+- Overall health: 🟢 功能需求全部交付; 🟢 架构重构第一批已合并 (ARCH-001/004/007); 🟡 ARCH-005 Flutter重构进行中; 🟢 i-012 已修复; 🟢 看板状态已同步
 
 ## 3) Task Execution Board
 | Task ID | Requirement ID | Owner | Assignee | Status | ETA | Last Update |
@@ -33,21 +33,21 @@
 | T-018 | — | Manager | team-lead | **Completed** | 2026-04-29 | Team模式子agent不加入默认管理列表; agentd 33/33 ws tests pass |
 | T-019 | R-005 session排序稳定 | Developer | dev-1 | **Completed** | 2026-04-28 | 两处排序 + 1个单元测试; 18/18 tests pass, analyze 无新增错误 |
 | **TEST-007** | — | Developer | dev agent | **Completed** | 2026-04-30 | handler_integration_test.go PASS; attach→load history→agent.list HasHistory 端到端验证 |
-| **ARCH-001** | — | Developer | dev agent | **Completed** | 2026-04-30 | Manager拆分: merged to main at commit `0d8494b`; ProcessManager+EventManager+StreamParser+PermissionResolver; manager.go 2307→1472行 |
-| **ARCH-002** | — | Developer | — | **Ready** | - | WS handler抽Service层; dependency ARCH-001 completed; worktree arch-002-ws-service |
-| **ARCH-003** | — | Developer | — | **Ready** | - | SessionWatcher假seam修复; dependency ARCH-001 completed; worktree arch-003-watcher-seam |
-| **ARCH-004** | — | Developer | dev agent | **Completed** | 2026-04-30 | Scanner FS abstraction: merged to main at commit `b51757e`; FileSystem接口+Real/Mem适配器; TDD |
+| **ARCH-001** | — | Developer | dev agent | **已合并** | 2026-04-30 | Manager拆分: merged to main at commit `0d8494b`; ProcessManager+EventManager+StreamParser+PermissionResolver; manager.go 2307→1472行 |
+| **ARCH-002** | — | Developer | — | **Ready** | - | WS handler抽Service层; dependency ARCH-001 已合并; worktree arch-002-ws-service |
+| **ARCH-003** | — | Developer | — | **Ready** | - | SessionWatcher假seam修复; dependency ARCH-001 已合并; worktree arch-003-watcher-seam |
+| **ARCH-004** | — | Developer | dev agent | **已合并** | 2026-04-30 | Scanner FS abstraction: merged to main at commit `b51757e`; FileSystem接口+Real/Mem适配器; TDD |
 | **ARCH-005** | — | Developer | dev agent | **In Progress** | - | Flutter screens重构: DashboardService+AgentDetailService; TDD; worktree arch-005-flutter-screens |
 | **ARCH-006** | — | Developer | — | **Pending** | - | JSON-RPC类型安全: 手动map→typed client; worktree arch-006-jsonrpc-types |
-| **ARCH-007** | — | Developer | dev agent | **Completed** | 2026-04-30 | NodeManager拆分: merged to main at commit `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
+| **ARCH-007** | — | Developer | dev agent | **已合并** | 2026-04-30 | NodeManager拆分: merged to main at commit `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
 | **Test isolation fix** | — | Developer | dev agent | **Completed** | 2026-04-30 | Merged to main at commit `93a7aeb` |
-| **i-012** | — | Developer | — | **Open (High Priority)** | - | APP user message display bug; newly discovered; needs investigation and fix |
+| **i-012** | — | Developer | dev agent | **Completed** | 2026-05-01 | `/clear` in tmux mode breaks interaction + session switch re-tracking; 6 files changed; Go tests + 117 Flutter tests pass |
 
 ## 4) Blockers & Risks
 | ID | Type | Description | Owner | Mitigation | Status |
 |---|---|---|---|---|---|
 | C-01 (dashboard) | Blocker | Event listener duplicate registration in dashboard :592/:653 | reviewer-1 | Extract unified listener, dispose subscription | **Fixed** (T-017) |
-| i-012 | Blocker | APP user message display bug | — | Investigate and fix | Open |
+| i-012 | Blocker | `/clear` in tmux mode breaks interaction + session switch re-tracking | dev agent | Add `conversation.clear` RPC + intercept `/clear` in app + clear on session switch | **Fixed** |
 | RISK-01 | Risk | dev-1 has multiple tasks; now serialized by priority | team-lead | P0→P1→P2 order enforced | Mitigated |
 | RISK-02 | Risk | 61 pre-existing flutter analyze issues | team-lead | Not blocking, but noise masks real issues | Accepted |
 | RISK-03 | Risk | unread_provider lacks msg_id dedup | team-lead | Created T-013 for independent fix | Fixed |
@@ -70,12 +70,13 @@
 | 2026-04-30 | **ARCH-007 merged** | dev agent | NodeManager拆分 merged to main at `09e92f4`; NodeRegistry+TunnelManager+ProxyManager; TDD |
 | 2026-04-30 | **Test isolation fix merged** | dev agent | Test isolation fix merged to main at `93a7aeb` |
 | 2026-04-30 | **ARCH-002/ARCH-003 Ready** | team-lead | Dependencies unblocked: ARCH-001 completed; both tasks ready to start |
+| 2026-05-01 | **i-012 fixed** | dev agent | `/clear` tmux bug + session switch re-tracking; 6 files; agentd Go tests + 117 Flutter tests pass |
 | 2026-04-30 | **i-012 discovered** | team-lead | APP user message display bug identified; high priority; needs investigation and fix |
 
 ## 6) Completion Summary
+- 2026-05-01 deliveries: i-012 (`/clear` tmux bug + session switch re-tracking)
 - 2026-04-30 deliveries: T-014 (backend+frontend), TEST-007, ARCH-001, ARCH-004, ARCH-007, Test isolation fix, Restart bug fix, Deployer bug fix, 7 issues created, architecture refactor PRD
 - In progress: ARCH-005 Flutter重构
 - Ready: ARCH-002 WS抽Service, ARCH-003 Watcher假seam (dependencies completed)
 - Deferred: ARCH-006 JSON-RPC类型安全
-- New issues: i-012 APP user message display bug (high priority)
 - Historical records archived to `docs/archive/progress-2026-04-24.md`

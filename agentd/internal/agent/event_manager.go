@@ -123,3 +123,8 @@ func (em *EventManager) LastPersistedSeq(agentID string) (uint64, error) {
 func (em *EventManager) LastConversationEventTime(agentID string) (time.Time, error) {
 	return em.store.LastConversationEventTime(agentID)
 }
+
+// ClearConversationEvents removes all persisted conversation events for an agent.
+func (em *EventManager) ClearConversationEvents(agentID string) error {
+	return em.store.ClearConversationEvents(agentID)
+}

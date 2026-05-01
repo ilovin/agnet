@@ -33,8 +33,17 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: messages};
   }
 
-  /// Handle push events: [conversation.message] and [conversation.message_update].
+  /// Handle push events: [conversation.message], [conversation.message_update], and [conversation.cleared].
   void handleEvent(WsMessage event) {
+    if (event.method == 'conversation.cleared') {
+      final params = event.params as Map<String, dynamic>?;
+      if (params != null) {
+        final nodeId = params['nodeId'] as String? ?? '';
+        final agentId = params['agentId'] as String? ?? '';
+        clear(nodeId, agentId);
+      }
+      return;
+    }
     if (event.method == 'conversation.message_update') {
       _handleMessageUpdate(event);
       return;
@@ -133,6 +142,12 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
 
   List<MessageModel> messagesFor(String nodeId, String agentId) =>
       state[(nodeId, agentId)] ?? [];
+
+  void clear(String nodeId, String agentId) {
+    final key = (nodeId, agentId);
+    if (!state.containsKey(key)) return;
+    state = {...state}..remove(key);
+  }
 }
 
 final conversationProvider =

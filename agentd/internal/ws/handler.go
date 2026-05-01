@@ -114,6 +114,8 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.conversationImage(req), nil
 	case "conversation.permission_response":
 		return h.conversationPermissionResponse(req), nil
+	case "conversation.clear":
+		return h.conversationClear(req), nil
 	case "agent.rename":
 		return h.agentRename(req), nil
 	case "agent.remove":
@@ -1366,6 +1368,27 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 		"behavior":  behavior,
 	}), nil)
 
+	return okResp(req.ID, map[string]any{"ok": true})
+}
+
+func (h *handler) conversationClear(req RPCRequest) RPCResponse {
+	agentID, _ := req.Params["agentId"].(string)
+	ag := h.server.manager.Get(agentID)
+	if ag == nil {
+		return errResp(req.ID, -32000, "agent not found")
+	}
+	ag.EventBuf().Reset()
+	if err := h.server.manager.ClearConversationEvents(agentID); err != nil {
+		log.Printf("[conversationClear] failed to clear persisted history for %s: %v", agentID, err)
+	}
+	// Reset status to idle so the UI does not block new sends.
+	ag.SetStatus(agent.StatusIdle)
+	// Reset watcher offset so old session-file lines are not re-read.
+	ag.ResetWatcherOffset()
+	h.server.broadcast(event("conversation.cleared", map[string]any{
+		"nodeId":  req.Params["nodeId"],
+		"agentId": agentID,
+	}), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 

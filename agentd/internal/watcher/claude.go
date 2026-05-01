@@ -88,6 +88,17 @@ func (w *ClaudeWatcher) SetSkipExisting(skip bool) {
 	w.skipExisting = skip
 }
 
+// ResetOffset resets the file read offset to the current end-of-file.
+// Call this after conversation.clear so the watcher does not re-read
+// historical lines that were already cleared from the backend buffer.
+func (w *ClaudeWatcher) ResetOffset() {
+	if fi, err := os.Stat(w.path); err == nil {
+		w.offset = fi.Size()
+	} else {
+		w.offset = 0
+	}
+}
+
 // OnSessionSwitch registers a callback invoked when the watcher switches to a
 // different session file (e.g. after /clear).
 func (w *ClaudeWatcher) OnSessionSwitch(fn func(newPath string)) {
