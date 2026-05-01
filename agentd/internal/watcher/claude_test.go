@@ -606,3 +606,70 @@ func TestClaudeWatcherNoRefreshOnFirstPoll(t *testing.T) {
 		t.Fatalf("expected path unchanged on first poll, got %s", w.path)
 	}
 }
+
+func TestClaudeWatcherNoCrossProcessSwitch(t *testing.T) {
+	// When PID fd shows multiple sessions (old fd not closed after /clear),
+	// restrict candidates to ONLY those fd-backed sessions. Do NOT scan the
+	// whole project dir, which would include other processes' sessions.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	ownOld := filepath.Join(projectDir, "sess-own-old.jsonl")
+	ownNew := filepath.Join(projectDir, "sess-own-new.jsonl")
+	other  := filepath.Join(projectDir, "sess-other.jsonl")
+
+	now := time.Now()
+	oldTime := now.Add(-10 * time.Minute)
+	newTime := now.Add(-1 * time.Minute)
+	otherTime := now // other is also recent, to simulate an active unrelated session
+
+	// Write own-old with a timestamp line so getLastActivityTimeFromJSONL picks it up
+	oldLine := `{"timestamp":"` + oldTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(ownOld, []byte(oldLine), 0o644); err != nil {
+		t.Fatalf("write ownOld: %v", err)
+	}
+	if err := os.Chtimes(ownOld, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes ownOld: %v", err)
+	}
+
+	newLine := `{"timestamp":"` + newTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(ownNew, []byte(newLine), 0o644); err != nil {
+		t.Fatalf("write ownNew: %v", err)
+	}
+	if err := os.Chtimes(ownNew, newTime, newTime); err != nil {
+		t.Fatalf("chtimes ownNew: %v", err)
+	}
+
+	otherLine := `{"timestamp":"` + otherTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(other, []byte(otherLine), 0o644); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	if err := os.Chtimes(other, otherTime, otherTime); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	w := NewClaudeWatcher(ownOld, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(999999)
+	w.lastSwitchAt = time.Time{}
+
+	// Mock findSessionIDsFromTasks to return both own sessions (simulating old fd not closed)
+	w.findSessionIDsFromTasksFunc = func(tasksDir string) []string {
+		return []string{"sess-own-old", "sess-own-new"}
+	}
+
+	w.refreshSessionFile()
+
+	if w.path != ownNew {
+		t.Fatalf("expected watcher to switch to %s, got %s", ownNew, w.path)
+	}
+}

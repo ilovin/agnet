@@ -60,6 +60,8 @@ type ClaudeWatcher struct {
 
 	skipExisting bool // when true, Start() skips existing file content (for restarted watchers)
 	hasPolled    bool // true after the first poll; gates refreshSessionFile on empty polls
+
+	findSessionIDsFromTasksFunc func(tasksDir string) []string // test hook
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
@@ -164,7 +166,12 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
 
 	// Step 1: Task fd discovery
-	taskSessions := w.findSessionIDsFromTasks(tasksDir)
+	var taskSessions []string
+	if w.findSessionIDsFromTasksFunc != nil {
+		taskSessions = w.findSessionIDsFromTasksFunc(tasksDir)
+	} else {
+		taskSessions = w.findSessionIDsFromTasks(tasksDir)
+	}
 
 	if len(taskSessions) == 1 {
 		candidate := filepath.Join(projectDir, taskSessions[0]+".jsonl")
@@ -176,31 +183,36 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 		return
 	}
 
-	// Step 2: Build candidate list.
-	// Always include all .jsonl files from the project dir — the current session
-	// may not have a task dir yet (no tasks spawned), so task fd alone can miss it.
-	candidates := listSessionCandidatesInDir(projectDir)
-	if len(taskSessions) > 0 {
-		taskSet := make(map[string]bool, len(taskSessions))
+	// When PID fd shows multiple sessions (e.g. old fd not closed after /clear),
+	// restrict candidates to ONLY those sessions. Never scan the whole project dir
+	// when fd info is available — that would include other processes' sessions.
+	if len(taskSessions) > 1 {
+		var fdCandidates []sessionCandidate
 		for _, sid := range taskSessions {
-			taskSet[sid] = true
-		}
-		for i := range candidates {
-			if taskSet[candidates[i].sessionID] {
-				delete(taskSet, candidates[i].sessionID)
-			}
-		}
-		for sid := range taskSet {
 			jsonlPath := filepath.Join(projectDir, sid+".jsonl")
 			if _, err := os.Stat(jsonlPath); err == nil {
-				candidates = append(candidates, sessionCandidate{
+				fdCandidates = append(fdCandidates, sessionCandidate{
 					sessionID:    sid,
 					jsonlPath:    jsonlPath,
 					lastActivity: getLastActivityTimeFromJSONL(jsonlPath),
 				})
 			}
 		}
+		if len(fdCandidates) > 0 {
+			sort.Slice(fdCandidates, func(i, j int) bool {
+				return fdCandidates[i].lastActivity.After(fdCandidates[j].lastActivity)
+			})
+			if fdCandidates[0].jsonlPath != w.path {
+				w.switchToFile(fdCandidates[0].jsonlPath)
+			}
+		}
+		return
 	}
+
+	// Step 2: Build candidate list.
+	// Only scan the project dir when there is no fd info at all (no tasks spawned
+	// yet, or PID is unavailable). This prevents cross-process mis-switching.
+	candidates := listSessionCandidatesInDir(projectDir)
 
 	if len(candidates) == 0 {
 		return
