@@ -34,6 +34,54 @@ func TestTryParseStreamJSON_UnknownType(t *testing.T) {
 	}
 }
 
+func TestTryParseStreamJSON_AnthropicStreamingEvents(t *testing.T) {
+	sp := agent.NewStreamParser()
+
+	tests := []struct {
+		name     string
+		line     string
+		wantType string
+	}{
+		{
+			name:     "message_start",
+			line:     `{"type":"message_start","message":{"id":"msg_123","role":"assistant"}}`,
+			wantType: "message_start",
+		},
+		{
+			name:     "content_block_start tool_use",
+			line:     `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"Bash","input":{}}}`,
+			wantType: "content_block_start",
+		},
+		{
+			name:     "content_block_delta text",
+			line:     `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+			wantType: "content_block_delta",
+		},
+		{
+			name:     "content_block_stop",
+			line:     `{"type":"content_block_stop","index":0}`,
+			wantType: "content_block_stop",
+		},
+		{
+			name:     "message_stop",
+			line:     `{"type":"message_stop"}`,
+			wantType: "message_stop",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := sp.TryParseStreamJSON(tt.line)
+			if ev == nil {
+				t.Fatalf("expected parsed event, got nil")
+			}
+			if ev.Type != tt.wantType {
+				t.Fatalf("expected type=%q, got %q", tt.wantType, ev.Type)
+			}
+		})
+	}
+}
+
 func TestTryParseStreamJSON_NonObject(t *testing.T) {
 	sp := agent.NewStreamParser()
 	ev := sp.TryParseStreamJSON(`[1,2,3]`)

@@ -632,3 +632,114 @@ func TestRestartInPlaceCustomAgentStatusIdle(t *testing.T) {
 		t.Errorf("expected idle after restart, got %v", ag.Status())
 	}
 }
+
+func TestHandleStreamJSONEvent_MessageStartSetsWorking(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+	ag.SetStatus(agent.StatusIdle)
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"message_start","message":{"id":"msg_123","role":"assistant"}}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+	if ag.Status() != agent.StatusWorking {
+		t.Fatalf("expected Working after message_start, got %v", ag.Status())
+	}
+}
+
+func TestHandleStreamJSONEvent_ContentBlockDeltaBroadcastsText(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+
+	var received map[string]any
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		received = data
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+
+	if received == nil {
+		t.Fatal("expected onOutput callback to be called")
+	}
+	if received["text"] != "Hello" {
+		t.Fatalf("expected text=Hello, got %v", received["text"])
+	}
+	if received["role"] != "assistant" {
+		t.Fatalf("expected role=assistant, got %v", received["role"])
+	}
+	if received["kind"] != "text_delta" {
+		t.Fatalf("expected kind=text_delta, got %v", received["kind"])
+	}
+	if received["partial"] != true {
+		t.Fatalf("expected partial=true, got %v", received["partial"])
+	}
+}
+
+func TestHandleStreamJSONEvent_ContentBlockStartToolUseBroadcastsTool(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+
+	var received map[string]any
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		received = data
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+
+	if received == nil {
+		t.Fatal("expected onOutput callback to be called")
+	}
+	if received["kind"] != "tool_use" {
+		t.Fatalf("expected kind=tool_use, got %v", received["kind"])
+	}
+	if received["toolName"] != "Bash" {
+		t.Fatalf("expected toolName=Bash, got %v", received["toolName"])
+	}
+	if received["text"] != "[Bash: ls -la]" {
+		t.Fatalf("expected text=[Bash: ls -la], got %v", received["text"])
+	}
+}
+
+func TestHandleStreamJSONEvent_MessageStopSetsIdle(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+	ag.SetStatus(agent.StatusWorking)
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"message_stop"}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+	if ag.Status() != agent.StatusIdle {
+		t.Fatalf("expected Idle after message_stop, got %v", ag.Status())
+	}
+}

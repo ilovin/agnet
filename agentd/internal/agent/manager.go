@@ -368,6 +368,11 @@ func (m *Manager) tryParseStreamJSON(text string) *streamJSONEvent {
 	return m.parser.TryParseStreamJSON(text)
 }
 
+// HandleStreamJSONEvent is an exported wrapper for handleStreamJSONEvent (tests only).
+func (m *Manager) HandleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSONEvent) {
+	m.handleStreamJSONEvent(agentID, ag, ev)
+}
+
 // buildToolResultSummary extracts a concise summary from a tool result output.
 // toolName is optional (may be empty if not available in the event).
 func buildToolResultSummary(toolName string, output []byte) string {
@@ -529,6 +534,79 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		}
 		ag.setStatus(StatusIdle)
 		data = nil
+		return
+
+	case "message_start":
+		ag.setStatus(StatusWorking)
+		return
+
+	case "content_block_start":
+		if ev.Raw == nil {
+			return
+		}
+		if contentBlock, ok := ev.Raw["content_block"].(map[string]any); ok {
+			blockType, _ := contentBlock["type"].(string)
+			if blockType == "tool_use" {
+				name, _ := contentBlock["name"].(string)
+				inputRaw, _ := json.Marshal(contentBlock["input"])
+				summary := buildToolInputSummary(name, inputRaw)
+				var toolText string
+				if summary != "" {
+					toolText = fmt.Sprintf("[%s: %s]", name, summary)
+				} else {
+					toolText = fmt.Sprintf("[%s]", name)
+				}
+				data := map[string]any{
+					"role":     "assistant",
+					"text":     toolText,
+					"raw":      false,
+					"kind":     "tool_use",
+					"toolName": name,
+				}
+				seq := m.appendAndPersistEvent(agentID, ag, data)
+				data["seq"] = seq
+				m.mu.RLock()
+				cb := m.onOutput
+				m.mu.RUnlock()
+				if cb != nil {
+					cb(agentID, data)
+				}
+				ag.setStatus(StatusWorking)
+			}
+		}
+		return
+
+	case "content_block_delta":
+		if ev.Raw == nil {
+			return
+		}
+		if delta, ok := ev.Raw["delta"].(map[string]any); ok {
+			text, _ := delta["text"].(string)
+			if text == "" {
+				text, _ = delta["text_delta"].(string)
+			}
+			if text != "" {
+				data := map[string]any{
+					"role":    "assistant",
+					"text":    text,
+					"raw":     false,
+					"kind":    "text_delta",
+					"partial": true,
+				}
+				seq := m.appendAndPersistEvent(agentID, ag, data)
+				data["seq"] = seq
+				m.mu.RLock()
+				cb := m.onOutput
+				m.mu.RUnlock()
+				if cb != nil {
+					cb(agentID, data)
+				}
+			}
+		}
+		return
+
+	case "message_stop":
+		ag.setStatus(StatusIdle)
 		return
 
 	case "stream_event":

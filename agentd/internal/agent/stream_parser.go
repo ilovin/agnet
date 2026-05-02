@@ -49,7 +49,10 @@ func (sp *StreamParser) TryParseStreamJSON(text string) *StreamJSONEvent {
 
 	// Validate it's a known stream-json event type
 	switch ev.Type {
-	case "init", "message", "user", "assistant", "tool_use", "tool_result", "result", "permission_prompt", "control_request", "stream_event", "system":
+	case "init", "message", "user", "assistant", "tool_use", "tool_result",
+		"result", "permission_prompt", "control_request", "stream_event", "system",
+		"message_start", "content_block_start", "content_block_delta",
+		"content_block_stop", "message_stop":
 		return &ev
 	default:
 		return nil
