@@ -62,10 +62,16 @@ type ClaudeWatcher struct {
 	hasPolled    bool // true after the first poll; gates refreshSessionFile on empty polls
 
 	findSessionIDsFromTasksFunc func(tasksDir string) []string // test hook
+	startTime                   time.Time                     // watcher start time; used to filter out old sessions
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
-	return &ClaudeWatcher{path: path, callback: callback, stop: make(chan struct{})}
+	return &ClaudeWatcher{
+		path:      path,
+		callback:  callback,
+		stop:      make(chan struct{}),
+		startTime: time.Now(),
+	}
 }
 
 // SetWorkDir sets the project directory used for auto-detecting newer session files.
@@ -210,9 +216,30 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	}
 
 	// Step 2: Build candidate list.
-	// Only scan the project dir when there is no fd info at all (no tasks spawned
-	// yet, or PID is unavailable). This prevents cross-process mis-switching.
+	// Only scan the project dir when there is no fd info at all.
+	// Before scanning, verify the current file is actually stale — if it's
+	// still being modified, don't risk switching to another process' session.
+	if w.path != "" {
+		if fi, err := os.Stat(w.path); err == nil {
+			if time.Since(fi.ModTime()) < 30*time.Second {
+				// Current file is still active; don't scan project dir
+				return
+			}
+		}
+	}
+
 	candidates := listSessionCandidatesInDir(projectDir)
+
+	// Exclude sessions that existed before this watcher started.
+	// When PID fd info is unavailable, this prevents old sessions and
+	// other processes' early sessions from being considered.
+	var filtered []sessionCandidate
+	for _, c := range candidates {
+		if !c.lastActivity.Before(w.startTime.Add(-5 * time.Minute)) {
+			filtered = append(filtered, c)
+		}
+	}
+	candidates = filtered
 
 	if len(candidates) == 0 {
 		return

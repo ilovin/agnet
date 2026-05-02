@@ -474,8 +474,10 @@ func TestClaudeWatcherRefreshKeepsStaleSession(t *testing.T) {
 		t.Fatalf("write fresh: %v", err)
 	}
 	now := time.Now()
-	// stale is 31 minutes old, fresh is current
-	if err := os.Chtimes(stale, now.Add(-31*time.Minute), now.Add(-31*time.Minute)); err != nil {
+	// stale is a few minutes old but still within the startTime window,
+	// fresh is current. The watcher should not hop just because another
+	// session exists — the current binding is still valid.
+	if err := os.Chtimes(stale, now.Add(-3*time.Minute), now.Add(-3*time.Minute)); err != nil {
 		t.Fatalf("chtimes stale: %v", err)
 	}
 	if err := os.Chtimes(fresh, now, now); err != nil {
@@ -665,6 +667,100 @@ func TestClaudeWatcherNoCrossProcessSwitch(t *testing.T) {
 	// Mock findSessionIDsFromTasks to return both own sessions (simulating old fd not closed)
 	w.findSessionIDsFromTasksFunc = func(tasksDir string) []string {
 		return []string{"sess-own-old", "sess-own-new"}
+	}
+
+	w.refreshSessionFile()
+
+	if w.path != ownNew {
+		t.Fatalf("expected watcher to switch to %s, got %s", ownNew, w.path)
+	}
+}
+
+func TestClaudeWatcherNoMisSwitchWhenFdEmpty(t *testing.T) {
+	// When findSessionIDsFromTasks returns empty (Claude closes fd after writing),
+	// refreshSessionFile falls back to scanning the project dir. We must NOT switch
+	// to another process' recent session.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir work dir: %v", err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	ownOld := filepath.Join(projectDir, "sess-own-old.jsonl")
+	ownNew := filepath.Join(projectDir, "sess-own-new.jsonl")
+	other  := filepath.Join(projectDir, "sess-other.jsonl")
+
+	now := time.Now()
+	oldTime := now.Add(-10 * time.Minute)
+	newTime := now.Add(-2 * time.Minute)
+	otherTime := now.Add(-1 * time.Minute) // slightly newer than ownNew (the trap)
+
+	// Write own-old with a timestamp line so getLastActivityTimeFromJSONL picks it up
+	oldLine := `{"timestamp":"` + oldTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(ownOld, []byte(oldLine), 0o644); err != nil {
+		t.Fatalf("write ownOld: %v", err)
+	}
+	if err := os.Chtimes(ownOld, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes ownOld: %v", err)
+	}
+
+	newLine := `{"timestamp":"` + newTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(ownNew, []byte(newLine), 0o644); err != nil {
+		t.Fatalf("write ownNew: %v", err)
+	}
+	if err := os.Chtimes(ownNew, newTime, newTime); err != nil {
+		t.Fatalf("chtimes ownNew: %v", err)
+	}
+
+	otherLine := `{"timestamp":"` + otherTime.Format(time.RFC3339) + `"}` + "\n"
+	if err := os.WriteFile(other, []byte(otherLine), 0o644); err != nil {
+		t.Fatalf("write other: %v", err)
+	}
+	if err := os.Chtimes(other, otherTime, otherTime); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	w := NewClaudeWatcher(ownOld, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(999999)
+	w.SetTmuxTarget("mock:0.0")
+	w.lastSwitchAt = time.Time{}
+
+	// Set startTime so ownOld is excluded but ownNew and other are included.
+	w.startTime = newTime.Add(-1 * time.Minute)
+
+	// Mock findSessionIDsFromTasks to return empty (simulating unreliable fd)
+	w.findSessionIDsFromTasksFunc = func(tasksDir string) []string {
+		return nil
+	}
+
+	// Mock capturePaneContent and extractFingerprints so content match can
+	// differentiate ownNew from other.
+	origCapture := capturePaneContentFunc
+	origExtract := extractFingerprintsFunc
+	t.Cleanup(func() {
+		capturePaneContentFunc = origCapture
+		extractFingerprintsFunc = origExtract
+	})
+
+	capturePaneContentFunc = func(string) (string, error) {
+		return "pane text includes alpha beta gamma delta", nil
+	}
+	extractFingerprintsFunc = func(path string, _ int) []string {
+		switch path {
+		case ownNew:
+			return []string{"alpha", "beta", "gamma", "delta"}
+		case other:
+			return []string{"alpha", "beta"}
+		default:
+			return nil
+		}
 	}
 
 	w.refreshSessionFile()
