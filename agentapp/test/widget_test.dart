@@ -818,6 +818,19 @@ void main() {
     expect(shouldShowRawToggle('custom'), isTrue);
   });
 
+  test('short user messages are displayed and not filtered by isNoiseOnlyText', () {
+    final messages = convertEventsToMessages([
+      {'role': 'user', 'text': 'hi', 'seq': 1, 'raw': false, 'kind': 'user'},
+      {'role': 'user', 'text': 'ok', 'seq': 2, 'raw': false, 'kind': 'user'},
+      {'role': 'user', 'text': '?', 'seq': 3, 'raw': false, 'kind': 'user'},
+    ]);
+
+    expect(messages.length, 3);
+    expect(messages[0].text, 'hi');
+    expect(messages[1].text, 'ok');
+    expect(messages[2].text, '?');
+  });
+
   // R-003: Compact dashboard header and status folding
   testWidgets('NodeCard hides summary chips when showDetails is false on large screen', (
     WidgetTester tester,
