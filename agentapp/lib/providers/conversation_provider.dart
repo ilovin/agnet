@@ -26,7 +26,27 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     };
     for (final raw in rawMessages) {
       final message = MessageModel.fromJson(raw as Map<String, dynamic>);
-      merged[message.seq] = message;
+      final local = merged[message.seq];
+      if (local != null) {
+        final localTs = local.timestamp;
+        final rpcTs = message.timestamp;
+        if (localTs != null && rpcTs != null) {
+          // Both have timestamps: newer wins, equal timestamps preserve local (WS-updated)
+          if (localTs < rpcTs) {
+            merged[message.seq] = message;
+          }
+          // else: local >= rpcTs => keep local
+        } else if (localTs == null && rpcTs == null) {
+          // Neither has timestamp: RPC wins (latest snapshot, no WS update involved)
+          merged[message.seq] = message;
+        }
+        // else: one has timestamp, the other doesn't => keep local
+        // (local with timestamp but RPC without: local is WS-enriched)
+        // (local without timestamp but RPC with: local is WS-updated text)
+      } else {
+        // New message from RPC
+        merged[message.seq] = message;
+      }
     }
     final messages = merged.values.toList()
       ..sort((a, b) => a.seq.compareTo(b.seq));

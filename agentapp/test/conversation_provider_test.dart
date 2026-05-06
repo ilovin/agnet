@@ -149,5 +149,99 @@ void main() {
       expect(msgs[0].text, equals('Hello'));
       expect(msgs[1].text, equals(' world'));
     });
+
+    // ---- R-013: mergeHistory preserves WS-updated messages ----
+
+    test('mergeHistory: WS message_update preserves newer text when RPC returns stale', () {
+      // 1. Load initial history
+      notifier.loadHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1, 'msg_id': 'm1', 'timestamp': 1000},
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'initial response', 'seq': 2, 'msg_id': 'm2', 'timestamp': 2000},
+      ]);
+
+      // 2. WS message_update updates text (simulates real-time edit)
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message_update',
+        params: {
+          'nodeId': 'n1', 'agentId': 'a1',
+          'msg_id': 'm2', 'text': 'updated response', 'seq': 2,
+        },
+      ));
+      expect(notifier.messagesFor('n1', 'a1')[1].text, equals('updated response'));
+
+      // 3. Polling RPC history returns stale text
+      notifier.mergeHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1, 'msg_id': 'm1', 'timestamp': 1000},
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'initial response', 'seq': 2, 'msg_id': 'm2', 'timestamp': 2000},
+      ]);
+
+      final msgs = notifier.messagesFor('n1', 'a1');
+      // WS-updated text should be preserved since local has no timestamp on the updated message
+      // (message_update does not set timestamp, so local.timestamp is null)
+      // With both having timestamp=2000 on the original RPC vs null on WS update,
+      // local (null timestamp) should be preserved per the tie-break rule.
+      expect(msgs[1].text, equals('updated response'));
+    });
+
+    test('mergeHistory: new messages from history RPC are added', () {
+      // 1. WS delivers first message
+      notifier.handleEvent(WsMessage(
+        method: 'conversation.message',
+        params: {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1},
+      ));
+      expect(notifier.messagesFor('n1', 'a1').length, equals(1));
+
+      // 2. Polling RPC returns history with seq 1 + 2 (seq 2 is new)
+      notifier.mergeHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1, 'timestamp': 1000},
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'assistant', 'text': 'History reply', 'seq': 2, 'timestamp': 2000},
+      ]);
+
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs.length, equals(2));
+      expect(msgs[1].text, equals('History reply'));
+      expect(msgs[1].seq, equals(2));
+    });
+
+    test('mergeHistory: local newer timestamp preserved over RPC older timestamp', () {
+      // Local message has timestamp 3000 (newer), RPC returns timestamp 2000 (older)
+      notifier.loadHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Hello', 'seq': 1, 'timestamp': 3000},
+      ]);
+
+      notifier.mergeHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'Old text', 'seq': 1, 'timestamp': 2000},
+      ]);
+
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs[0].text, equals('Hello'), reason: 'local (newer timestamp) should win');
+    });
+
+    test('mergeHistory: RPC newer timestamp overwrites local older timestamp', () {
+      // Local message has timestamp 1000 (older), RPC returns timestamp 2000 (newer)
+      notifier.loadHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'old local', 'seq': 1, 'timestamp': 1000},
+      ]);
+
+      notifier.mergeHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'fresh from RPC', 'seq': 1, 'timestamp': 2000},
+      ]);
+
+      final msgs = notifier.messagesFor('n1', 'a1');
+      expect(msgs[0].text, equals('fresh from RPC'), reason: 'RPC (newer timestamp) should win');
+    });
+
+    test('mergeHistory: equal or null timestamps preserves local message', () {
+      // Both have timestamp 1000 — tie goes to local
+      notifier.loadHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'local', 'seq': 1, 'timestamp': 1000},
+      ]);
+
+      notifier.mergeHistory('n1', 'a1', [
+        {'nodeId': 'n1', 'agentId': 'a1', 'role': 'user', 'text': 'rpc', 'seq': 1, 'timestamp': 1000},
+      ]);
+
+      expect(notifier.messagesFor('n1', 'a1')[0].text, equals('local'));
+    });
   });
 }

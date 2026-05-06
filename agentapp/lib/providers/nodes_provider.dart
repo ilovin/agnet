@@ -29,24 +29,82 @@ class NodesNotifier extends StateNotifier<NodeState> {
   NodesNotifier() : super(const NodeState());
 
   /// Load initial state from [node.list] response.
+  /// Merges with existing state: preserves WS-updated status for known nodes,
+  /// adds new nodes, removes nodes not returned by RPC.
   void loadNodes(List<dynamic> rawNodes) {
     final map = <String, NodeModel>{};
     for (final n in rawNodes) {
-      final node = NodeModel.fromJson(n as Map<String, dynamic>);
-      map[node.id] = node;
+      final rpcNode = NodeModel.fromJson(n as Map<String, dynamic>);
+      final existing = state.nodes[rpcNode.id];
+      if (existing != null) {
+        // Preserve WS-updated status (more real-time), update static fields from RPC
+        map[rpcNode.id] = existing.copyWith(
+          name: rpcNode.name,
+          host: rpcNode.host,
+          location: rpcNode.location,
+          agentCount: rpcNode.agentCount,
+        );
+      } else {
+        map[rpcNode.id] = rpcNode;
+      }
     }
     state = state.copyWith(nodes: map);
   }
 
   /// Load agents for a given node from [agent.list] response.
+  /// Merges with existing state: preserves WS-updated dynamic fields for known agents,
+  /// adds new agents, removes agents not returned by RPC.
   void loadAgents(String nodeId, List<dynamic> rawAgents) {
-    final list = rawAgents.map((a) {
+    final rpcAgents = rawAgents.map((a) {
       final json = a as Map<String, dynamic>;
       json['nodeId'] = nodeId; // inject nodeId
       return AgentModel.fromJson(json);
     }).toList();
+
+    final existing = <String, AgentModel>{
+      for (final a in state.agents[nodeId] ?? const <AgentModel>[]) a.id: a,
+    };
+
+    final merged = <AgentModel>[];
+    for (final rpcAgent in rpcAgents) {
+      final prev = existing[rpcAgent.id];
+      if (prev != null) {
+        // Preserve WS-updated dynamic fields, update static fields from RPC
+        merged.add(AgentModel(
+          id: rpcAgent.id,
+          nodeId: rpcAgent.nodeId,
+          // Static fields from RPC
+          name: rpcAgent.name,
+          workDir: rpcAgent.workDir,
+          provider: rpcAgent.provider,
+          pid: rpcAgent.pid,
+          hasHistory: rpcAgent.hasHistory,
+          attachMode: rpcAgent.attachMode,
+          projectName: rpcAgent.projectName,
+          sessionId: rpcAgent.sessionId,
+          // Dynamic fields preserved from WS (local state)
+          status: prev.status,
+          runtimeState: prev.runtimeState,
+          sessionState: prev.sessionState,
+          sessionStateReason: prev.sessionStateReason,
+          sessionControl: prev.sessionControl,
+          providerState: prev.providerState,
+          providerScope: prev.providerScope,
+          providerWriteMode: prev.providerWriteMode,
+          providerReadOnlyReason: prev.providerReadOnlyReason,
+          permissionMode: prev.permissionMode,
+          isReadOnly: prev.isReadOnly,
+          readOnlyReason: prev.readOnlyReason,
+          lastMessageTime: prev.lastMessageTime,
+        ));
+      } else {
+        // New agent from RPC
+        merged.add(rpcAgent);
+      }
+    }
+
     final updated = Map<String, List<AgentModel>>.from(state.agents);
-    updated[nodeId] = list;
+    updated[nodeId] = merged;
     state = state.copyWith(agents: updated);
   }
 
