@@ -1713,10 +1713,10 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			oldWatcher.Stop()
 			ag.setWatcher(nil)
 		}
+		// Reset the in-memory EventBuf so new-session events start from seq=0,
+		// but keep persisted history intact so the dashboard can reload
+		// previous conversation from SQLite via LoadPersistedEventsLatest.
 		ag.EventBuf().Reset()
-		if err := m.store.ClearConversationEvents(ag.ID); err != nil {
-			log.Printf("[Attach] Warning: failed to clear persisted history for %s: %v", ag.ID, err)
-		}
 		currentName := ag.Name
 		currentPID := ag.PID
 		currentSessionID, _ := m.GetResumeSessionID(ag.ID)

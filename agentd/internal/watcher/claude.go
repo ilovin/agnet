@@ -932,9 +932,18 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 							}
 						}
 					}
+					case "tool_result":
+						// Tool results are system-level messages (responses to tool_use).
+						// They should not appear as conversation text in the dashboard.
+						// Skip them entirely - they contribute no visible content.
+					}
 				}
 			}
-		}
+			// If the content array had only tool_result blocks (no text, no tool_use),
+			// the event has no meaningful content - skip it to avoid empty user messages.
+			if ev.Text == "" && !hasToolUse {
+				return ConversationEvent{}, false
+			}
 		// Status change detection
 		if line.Type == "assistant" {
 			if hasToolUse {

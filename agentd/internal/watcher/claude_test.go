@@ -769,3 +769,26 @@ func TestClaudeWatcherNoMisSwitchWhenFdEmpty(t *testing.T) {
 		t.Fatalf("expected watcher to switch to %s, got %s", ownNew, w.path)
 	}
 }
+
+func TestParseLineToolResultIsSkipped(t *testing.T) {
+	// Claude JSONL writes tool_result as a user-type message with no text block.
+	// It should be skipped entirely to avoid empty user messages in the dashboard.
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc123","content":"file contents here"}]}}`)
+	ev, ok := parseLine(line)
+	if ok {
+		t.Fatalf("expected tool_result line to be skipped, got ev=%+v", ev)
+	}
+}
+
+func TestParseLineMixedContentWithToolResultAndText(t *testing.T) {
+	// If a user message has both tool_result and text blocks, only the text
+	// blocks should contribute to the event text.
+	line := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc123","content":"result"},{"type":"text","text":"hello world"}]}}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected mixed content line to be parsed")
+	}
+	if ev.Text != "hello world" {
+		t.Fatalf("expected text 'hello world', got %q", ev.Text)
+	}
+}

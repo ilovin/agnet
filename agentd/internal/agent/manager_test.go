@@ -165,11 +165,11 @@ func TestAttachSamePIDSwitchesSessionAndClearsHistory(t *testing.T) {
 	if err := m.Rename(ag.ID, "custom title"); err != nil {
 		t.Fatalf("Rename failed: %v", err)
 	}
-	if seq := ag.AppendEvent(map[string]any{"role": "assistant", "text": "stale"}); seq == 0 {
-		t.Fatalf("expected seq > 0")
+	if seq, err := m.RecordConversationEvent(ag.ID, map[string]any{"role": "assistant", "text": "stale"}); err != nil || seq == 0 {
+		t.Fatalf("expected persisted event seq > 0, got seq=%d err=%v", seq, err)
 	}
-	if _, err := m.LoadPersistedEventsLatest(ag.ID, 10); err != nil {
-		t.Fatalf("expected persisted events API to work before reset: %v", err)
+	if persisted, err := m.LoadPersistedEventsLatest(ag.ID, 10); err != nil || len(persisted) == 0 {
+		t.Fatalf("expected persisted events before rebind, got %d err=%v", len(persisted), err)
 	}
 	if _, err := m.LoadPersistedEventsSince(ag.ID, 0, 10); err != nil {
 		t.Fatalf("expected persisted events since API to work before reset: %v", err)
@@ -209,12 +209,14 @@ func TestAttachSamePIDSwitchesSessionAndClearsHistory(t *testing.T) {
 	if events := rebound.EventBuf().Since(0); len(events) != 0 {
 		t.Fatalf("expected cleared live history, got %d events", len(events))
 	}
+	// Persisted history should survive session rebind so the dashboard can
+	// reload previous conversation from SQLite.
 	persisted, err := m.LoadPersistedEventsLatest(ag.ID, 10)
 	if err != nil {
 		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
 	}
-	if len(persisted) != 0 {
-		t.Fatalf("expected cleared persisted history, got %d events", len(persisted))
+	if len(persisted) == 0 {
+		t.Fatalf("expected persisted history to survive rebind, got 0 events")
 	}
 }
 
