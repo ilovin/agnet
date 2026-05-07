@@ -42,7 +42,7 @@ type ComponentStatus struct {
 // NewClient creates a telemetry client
 func NewClient(apiURL, installID, version string) *Client {
 	if apiURL == "" {
-		apiURL = "https://api.ilovim.xyz/v1/telemetry"
+		apiURL = "https://api.ilovin.xyz/v1/telemetry"
 	}
 	return &Client{
 		apiURL:     apiURL,

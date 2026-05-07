@@ -181,26 +181,15 @@
         </header>
 
         <div class="platforms">
-            <div class="platform-card" onclick="selectPlatform('mac')">
-                <div class="platform-icon">🍎</div>
-                <h2>Mac</h2>
-                <p>适用于 macOS 的本机安装</p>
+            <div class="platform-card" onclick="selectPlatform('desktop')">
+                <div class="platform-icon">💻</div>
+                <h2>Mac / Linux</h2>
+                <p>适用于 macOS 和 Linux 的安装</p>
                 <div class="install-command">
-                    <button class="copy-btn" onclick="copyCommand(event, 'mac')">复制</button>
-                    <code id="mac-command">curl -fsSL https://api.ilovin.xyz/v1/install.sh | bash</code>
+                    <button class="copy-btn" onclick="copyCommand(event, 'desktop')">复制</button>
+                    <code id="desktop-command">curl -fsSL https://api.ilovin.xyz/v1/install.sh | bash</code>
                 </div>
-                <a href="#" class="download-btn" onclick="downloadFor('mac')">下载安装包</a>
-            </div>
-
-            <div class="platform-card" onclick="selectPlatform('linux')">
-                <div class="platform-icon">🐧</div>
-                <h2>Linux</h2>
-                <p>适用于 Linux 服务器的安装</p>
-                <div class="install-command">
-                    <button class="copy-btn" onclick="copyCommand(event, 'linux')">复制</button>
-                    <code id="linux-command">curl -fsSL https://api.ilovin.xyz/v1/install.sh | bash</code>
-                </div>
-                <a href="#" class="download-btn" onclick="downloadFor('linux')">下载安装包</a>
+                <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
             </div>
 
             <div class="platform-card" onclick="selectPlatform('android')">
@@ -271,6 +260,17 @@
                 const btn = event.target;
                 btn.textContent = '已复制!';
                 setTimeout(() => btn.textContent = '复制', 2000);
+            }).catch(() => {
+                // Fallback for browsers without clipboard API
+                const textArea = document.createElement('textarea');
+                textArea.value = command;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                const btn = event.target;
+                btn.textContent = '已复制!';
+                setTimeout(() => btn.textContent = '复制', 2000);
             });
         }
 
@@ -289,13 +289,40 @@
                 }
                 const manifest = await response.json();
                 
-                let downloadUrl = null;
+                // Find artifact in manifest
+                let artifactName = '';
+                let osName = '';
+                let archName = '';
+                
                 if (platform === 'mac') {
-                    downloadUrl = manifest.assets?.agentgw?.macos_arm64;
+                    artifactName = 'agentgw';
+                    osName = 'darwin';
+                    archName = 'arm64';
                 } else if (platform === 'linux') {
-                    downloadUrl = manifest.assets?.agentgw?.linux_amd64;
+                    artifactName = 'agentgw';
+                    osName = 'linux';
+                    archName = 'amd64';
                 } else if (platform === 'android') {
-                    downloadUrl = manifest.assets?.android?.apk;
+                    artifactName = 'agentapp';
+                }
+                
+                let downloadUrl = null;
+                if (artifactName && manifest.artifacts) {
+                    for (const artifact of manifest.artifacts) {
+                        if (artifact.name === artifactName) {
+                            if (platform === 'android' && artifact.apk) {
+                                downloadUrl = artifact.apk.url;
+                            } else if (artifact.platforms) {
+                                for (const p of artifact.platforms) {
+                                    if (p.os === osName && p.arch === archName) {
+                                        downloadUrl = p.url;
+                                        break;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                    }
                 }
                 
                 if (downloadUrl) {
