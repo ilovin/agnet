@@ -95,7 +95,10 @@ class NodesNotifier extends StateNotifier<NodeState> {
           permissionMode: prev.permissionMode,
           isReadOnly: prev.isReadOnly,
           readOnlyReason: prev.readOnlyReason,
-          lastMessageTime: prev.lastMessageTime,
+          lastMessageTime: (rpcAgent.lastMessageTime != null &&
+                  (prev.lastMessageTime == null || rpcAgent.lastMessageTime! > prev.lastMessageTime!))
+              ? rpcAgent.lastMessageTime
+              : prev.lastMessageTime,
         ));
       } else {
         // New agent from RPC
@@ -173,9 +176,17 @@ class NodesNotifier extends StateNotifier<NodeState> {
       providerWriteMode: params['providerWriteMode'] as String?,
       providerReadOnlyReason: params['providerReadOnlyReason'] as String?,
       permissionMode: params['permissionMode'] as String?,
-      lastMessageTime: params.containsKey('lastMessageTime')
-          ? (params['lastMessageTime'] as num?)?.toInt()
-          : current.lastMessageTime,
+      // Defensive: never let an older WS lastMessageTime overwrite a newer one.
+      lastMessageTime: (() {
+        final wsTime = params.containsKey('lastMessageTime')
+            ? (params['lastMessageTime'] as num?)?.toInt()
+            : null;
+        if (wsTime == null) return current.lastMessageTime;
+        if (current.lastMessageTime == null || wsTime > current.lastMessageTime!) {
+          return wsTime;
+        }
+        return current.lastMessageTime;
+      })(),
     );
     final updated = Map<String, List<AgentModel>>.from(state.agents);
     updated[nodeId] = agentList;

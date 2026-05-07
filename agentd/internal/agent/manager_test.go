@@ -802,6 +802,70 @@ func TestHandleStreamJSONEvent_UserMessageWithText_Broadcasts(t *testing.T) {
 	}
 }
 
+func TestCleanupDeadAgents_RemovesDeadAgent(t *testing.T) {
+	m := newTestManager(t)
+
+	// Create an agent and then simulate it dying by setting PID to a non-existent one
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         999999,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	// Verify agent exists
+	if m.Get(ag.ID) == nil {
+		t.Fatal("expected agent to exist before cleanup")
+	}
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+
+	// Run cleanup — PID 999999 is not running, so it should be removed
+	m.CleanupDeadAgents()
+
+	// Verify agent was removed
+	if m.Get(ag.ID) != nil {
+		t.Fatalf("expected agent to be removed after cleanup, got %v", m.Get(ag.ID))
+	}
+	agents = m.List()
+	if len(agents) != 0 {
+		t.Fatalf("expected 0 agents after cleanup, got %d", len(agents))
+	}
+}
+
+func TestCleanupDeadAgents_KeepsLiveAgent(t *testing.T) {
+	m := newTestManager(t)
+
+	ownPID := os.Getpid()
+	// Use provider "go" because on macOS ps -p <pid> -o comm= returns "go"
+	// for the test binary, and isProcessRunning checks comm contains provider.
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "go",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	// Run cleanup — ownPID is running, so it should be kept
+	m.CleanupDeadAgents()
+
+	if m.Get(ag.ID) == nil {
+		t.Fatal("expected live agent to survive cleanup")
+	}
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent after cleanup, got %d", len(agents))
+	}
+}
+
 func TestHandleStreamJSONEvent_AssistantMessageWithToolUse_EmptyText_Allowed(t *testing.T) {
 	m := newTestManager(t)
 	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
@@ -827,5 +891,58 @@ func TestHandleStreamJSONEvent_AssistantMessageWithToolUse_EmptyText_Allowed(t *
 	}
 	if received["role"] != "assistant" {
 		t.Fatalf("expected role=assistant, got %v", received["role"])
+	}
+}
+
+// TestHandleStreamJSONEvent_AssistantMessage_PersistsBeforeStatusChange verifies
+// that an assistant message is persisted to the store BEFORE setStatus fires,
+// so that any downstream status-changed handler sees the up-to-date event time.
+func TestHandleStreamJSONEvent_AssistantMessage_PersistsBeforeStatusChange(t *testing.T) {
+	m := newTestManager(t)
+
+	// Use Attach (no real process) so the agent stays in the status we set.
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         os.Getpid(),
+		Provider:    "go",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	var statusChangedAt time.Time
+	m.SetOnStatusChange(func(agentID string, data map[string]any) {
+		statusChangedAt = time.Now().UTC()
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"assistant","role":"assistant","content":[{"type":"text","text":"hello"}]}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(ag.ID, ag, ev)
+
+	// Wait briefly for the async status-change goroutine to run.
+	time.Sleep(50 * time.Millisecond)
+
+	// The event should have been persisted.
+	lastTime, err := m.LastConversationEventTime(ag.ID)
+	if err != nil {
+		t.Fatalf("LastConversationEventTime failed: %v", err)
+	}
+	if lastTime.IsZero() {
+		t.Fatal("expected last conversation event time to be non-zero after assistant message")
+	}
+
+	// Agent status should have changed to working.
+	if ag.Status() != agent.StatusWorking {
+		t.Fatalf("expected agent status=working, got %v", ag.Status())
+	}
+
+	// If the status-change goroutine fired, its timestamp must be >= the persisted event time.
+	if !statusChangedAt.IsZero() && statusChangedAt.Before(lastTime) {
+		t.Fatalf("status changed at %v before event persisted at %v; event not persisted before status change",
+			statusChangedAt, lastTime)
 	}
 }
