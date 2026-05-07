@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./scripts/build.sh [TARGET]
+#   DOMAIN=ilovim.xyz ./scripts/build.sh go
 #
 # TARGETS:
 #   all              Build everything (agentd + agentgw + APK + IPA + Web) [default]
@@ -15,6 +16,11 @@
 #   ipa              Build iOS IPA
 #   web              Build Flutter Web
 #   help             Show this help message
+#
+# ENVIRONMENT:
+#   DOMAIN           Root domain for build-time injection (default: ilovin.xyz)
+#                    Subdomains are automatically derived: api.<DOMAIN>, download.<DOMAIN>
+#   BUILD_VERSION    Version string to embed in binaries
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -36,6 +42,12 @@ IPA_OUTPUT="$OUT_DIR_IOS/agentapp.ipa"
 WEB_STATIC_DIR="$OUT_DIR/static"
 WEB_HASH_FILE="$OUT_DIR/static.buildhash"
 BUILD_VERSION="${BUILD_VERSION:-}"
+DOMAIN="${DOMAIN:-ilovin.xyz}"
+
+# Derive subdomains from root domain
+HUB_DOMAIN="tunnel.${DOMAIN}"
+API_DOMAIN="api.${DOMAIN}"
+DOWNLOAD_DOMAIN="download.${DOMAIN}"
 
 mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
 
@@ -63,6 +75,11 @@ binary_hash_file() {
 version_hash_file() {
     local output="$1"
     echo "${output}.buildversion"
+}
+
+domain_hash_file() {
+    local output="$1"
+    echo "${output}.builddomain"
 }
 
 compute_source_hash() {
@@ -107,6 +124,12 @@ binary_up_to_date() {
         recorded_version="$(<"$version_file")"
         [[ "$recorded_version" == "$BUILD_VERSION" ]] || return 1
     fi
+    # Check if DOMAIN changed
+    local domain_file recorded_domain
+    domain_file="$(domain_hash_file "$output")"
+    [[ -f "$domain_file" ]] || return 1
+    recorded_domain="$(<"$domain_file")"
+    [[ "$recorded_domain" == "${DOMAIN:-}" ]] || return 1
     return 0
 }
 
@@ -119,6 +142,7 @@ record_binary_hash() {
     else
         rm -f "$(version_hash_file "$output")"
     fi
+    printf '%s' "${DOMAIN:-}" > "$(domain_hash_file "$output")"
 }
 
 # Check if an output file is up-to-date versus its source files.
@@ -164,8 +188,15 @@ build_agentgw_mac() {
         return 0
     fi
     echo "[build] Building agentgw for macOS..."
+    local ldflags=""
     if [[ -n "$BUILD_VERSION" ]]; then
-        (cd "$AGENTGW_DIR" && go build -ldflags "-X main.Version=$BUILD_VERSION" -o "../$GW_BIN" ./cmd/agentgw/)
+        ldflags="-X main.Version=$BUILD_VERSION"
+    fi
+    if [[ -n "$DOMAIN" ]]; then
+        ldflags="${ldflags:+$ldflags }-X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
+    fi
+    if [[ -n "$ldflags" ]]; then
+        (cd "$AGENTGW_DIR" && go build -ldflags "$ldflags" -o "../$GW_BIN" ./cmd/agentgw/)
     else
         (cd "$AGENTGW_DIR" && go build -o "../$GW_BIN" ./cmd/agentgw/)
     fi
@@ -180,8 +211,15 @@ build_agentgw_linux() {
         return 0
     fi
     echo "[build] Building agentgw for Linux amd64..."
+    local ldflags=""
     if [[ -n "$BUILD_VERSION" ]]; then
-        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "-X main.Version=$BUILD_VERSION" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
+        ldflags="-X main.Version=$BUILD_VERSION"
+    fi
+    if [[ -n "$DOMAIN" ]]; then
+        ldflags="${ldflags:+$ldflags }-X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
+    fi
+    if [[ -n "$ldflags" ]]; then
+        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "$ldflags" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
     else
         (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
     fi
@@ -263,6 +301,35 @@ build_web() {
     echo "[build] Web static copied to $WEB_STATIC_DIR"
 }
 
+build_portal() {
+    local portal_src="./portal"
+    local portal_out="./out/portal"
+    if [[ ! -d "$portal_src" ]]; then
+        echo "[build] Portal source not found, skipping"
+        return 0
+    fi
+    if [[ -d "$portal_out" && -f "$portal_out/index.html" ]]; then
+        local src_hash out_hash
+        src_hash="$(compute_source_hash "$portal_src" | shasum -a 256 | awk '{print $1}')"
+        out_hash="$(compute_source_hash "$portal_out" | shasum -a 256 | awk '{print $1}')"
+        if [[ "$src_hash" == "$out_hash" ]]; then
+            echo "[build] Portal up-to-date, skipping"
+            return 0
+        fi
+    fi
+    echo "[build] Building download portal..."
+    rm -rf "$portal_out"
+    mkdir -p "$portal_out"
+    cp -r "$portal_src/"* "$portal_out/"
+    if [[ -n "$DOMAIN" ]]; then
+        find "$portal_out" -name '*.html' -exec sed -i '' \
+            -e "s/api\.ilovim\.xyz/api.${DOMAIN}/g" \
+            -e "s/download\.ilovim\.xyz/download.${DOMAIN}/g" \
+            -e "s/ilovim\.xyz/${DOMAIN}/g" {} \; 2>/dev/null || true
+    fi
+    echo "[build] Portal built at $portal_out"
+}
+
 build_go_all() {
     echo "[build] Building all Go binaries in parallel..."
     local mac_pid linux_pid gw_mac_pid gw_linux_pid
@@ -281,8 +348,8 @@ build_go_all() {
 
 build_all() {
     echo "[build] Building all components in parallel..."
-    local mac_pid linux_pid gw_mac_pid gw_linux_pid apk_pid ipa_pid web_pid
-    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0
+    local mac_pid linux_pid gw_mac_pid gw_linux_pid apk_pid ipa_pid web_pid portal_pid
+    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0 portal_ok=0
     build_agentd_mac & mac_pid=$!
     build_agentd_linux & linux_pid=$!
     build_agentgw_mac & gw_mac_pid=$!
@@ -290,6 +357,7 @@ build_all() {
     build_apk & apk_pid=$!
     build_ipa & ipa_pid=$!
     build_web & web_pid=$!
+    build_portal & portal_pid=$!
     wait "$mac_pid" && mac_ok=1 || true
     wait "$linux_pid" && linux_ok=1 || true
     wait "$gw_mac_pid" && gw_mac_ok=1 || true
@@ -297,7 +365,8 @@ build_all() {
     wait "$apk_pid" && apk_ok=1 || true
     wait "$ipa_pid" && ipa_ok=1 || true
     wait "$web_pid" && web_ok=1 || true
-    echo "[build] Build results: agentd_mac=$mac_ok agentd_linux=$linux_ok agentgw_mac=$gw_mac_ok agentgw_linux=$gw_linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok"
+    wait "$portal_pid" && portal_ok=1 || true
+    echo "[build] Build results: agentd_mac=$mac_ok agentd_linux=$linux_ok agentgw_mac=$gw_mac_ok agentgw_linux=$gw_linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok portal=$portal_ok"
     [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_ok -eq 1 && $apk_ok -eq 1 ]]
 }
 
@@ -319,6 +388,7 @@ TARGETS:
   apk              Build Android APK
   ipa              Build iOS IPA
   web              Build Flutter Web
+  portal           Build download portal static site
   help             Show this help message
 
 EXAMPLES:
@@ -386,6 +456,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         web)
             build_web
+            ;;
+        portal)
+            build_portal
             ;;
         *)
             echo "Unknown target: $TARGET"

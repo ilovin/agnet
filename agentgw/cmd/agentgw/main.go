@@ -39,6 +39,12 @@ var currentRealityCfg *tunnel.RealityConfig
 // Version is set at build time via -ldflags "-X main.Version=<version>".
 var Version = "v0.1.0"
 
+// Domain defaults are injected at build time via -ldflags.
+// Subdomains are automatically derived from the root domain.
+var DefaultHubDomain = "ilovin.xyz"
+var DefaultAPIDomain = ""
+var DefaultDownloadDomain = ""
+
 type tunnelStatusBody struct {
 	Connected               bool      `json:"connected"`
 	ConnectedAt             time.Time `json:"connectedAt"`
@@ -106,7 +112,11 @@ func main() {
 		fs := flag.NewFlagSet("start", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
-		hubBase := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub public base URL, e.g. https://domain (env AGENTGW_HUB)")
+		defaultHub := os.Getenv("AGENTGW_HUB")
+		if defaultHub == "" && DefaultHubDomain != "" {
+			defaultHub = "https://" + DefaultHubDomain
+		}
+		hubBase := fs.String("hub", defaultHub, "tunnelhub public base URL, e.g. https://domain (env AGENTGW_HUB)")
 		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		realityPub := fs.String("reality-pub", os.Getenv("AGENTGW_REALITY_PUB"), "REALITY public key base64 (env AGENTGW_REALITY_PUB)")
 		realitySID := fs.String("reality-sid", os.Getenv("AGENTGW_REALITY_SID"), "REALITY short ID hex (env AGENTGW_REALITY_SID)")
@@ -126,12 +136,20 @@ func main() {
 		fs := flag.NewFlagSet("qr", flag.ExitOnError)
 		tunnelURL := fs.String("tunnel-url", os.Getenv("AGENTGW_TUNNEL_URL"), "tunnel hub URL (env AGENTGW_TUNNEL_URL)")
 		tunnelToken := fs.String("tunnel-token", os.Getenv("AGENTGW_TUNNEL_TOKEN"), "tunnel auth token (env AGENTGW_TUNNEL_TOKEN)")
-		appURL := fs.String("app-url", os.Getenv("AGENTGW_APP_URL"), "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
+		defaultAppURL := os.Getenv("AGENTGW_APP_URL")
+		if defaultAppURL == "" && DefaultHubDomain != "" {
+			defaultAppURL = "https://" + DefaultHubDomain
+		}
+		appURL := fs.String("app-url", defaultAppURL, "app-facing hub URL for QR code, if different from tunnel-url (env AGENTGW_APP_URL)")
 		fs.Parse(args[1:])
 		printQRFromConfig(*tunnelURL, *tunnelToken, *appURL)
 	case "login":
 		fs := flag.NewFlagSet("login", flag.ExitOnError)
-		hubURL := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub URL for registration (env AGENTGW_HUB)")
+		defaultHub := os.Getenv("AGENTGW_HUB")
+		if defaultHub == "" && DefaultHubDomain != "" {
+			defaultHub = "https://" + DefaultHubDomain
+		}
+		hubURL := fs.String("hub", defaultHub, "tunnelhub URL for registration (env AGENTGW_HUB)")
 		fs.Parse(args[1:])
 		if os.Getenv("OPENSSO_CLIENT_ID") != "" {
 			cfg := oauth.DefaultConfig()
@@ -158,7 +176,11 @@ func main() {
 		}
 	case "logout":
 		fs := flag.NewFlagSet("logout", flag.ExitOnError)
-		hubURL := fs.String("hub", os.Getenv("AGENTGW_HUB"), "tunnelhub URL for unregistration (env AGENTGW_HUB)")
+		defaultHub := os.Getenv("AGENTGW_HUB")
+		if defaultHub == "" && DefaultHubDomain != "" {
+			defaultHub = "https://" + DefaultHubDomain
+		}
+		hubURL := fs.String("hub", defaultHub, "tunnelhub URL for unregistration (env AGENTGW_HUB)")
 		fs.Parse(args[1:])
 		if err := oauth.DoLocalLogout(*hubURL); err != nil {
 			log.Fatalf("logout failed: %v", err)
@@ -183,7 +205,11 @@ func main() {
 }
 
 func showHelp() {
-	fmt.Print(`Usage: agentgw <start|login|logout|qr|status|version|rotate-token|help>
+	hubExample := "https://ilovin.xyz"
+	if DefaultHubDomain != "" {
+		hubExample = "https://" + DefaultHubDomain
+	}
+	fmt.Printf(`Usage: agentgw <start|login|logout|qr|status|version|rotate-token|help>
 
 Commands:
   start         Start the gateway server
@@ -212,8 +238,8 @@ Login flags:
   --hub string           Tunnelhub base URL for registration (env AGENTGW_HUB)
 
 Quick start:
-  agentgw login --hub https://ilovin.xyz
-  agentgw start --hub https://ilovin.xyz --qr
+  agentgw login --hub %s
+  agentgw start --hub %s --qr
 
 REALITY mode (anti-detection):
   agentgw start --hub https://domain:443 \
@@ -226,7 +252,7 @@ Environment:
   AGENTGW_REALITY_PUB   REALITY public key (base64)
   AGENTGW_REALITY_SID   REALITY short ID (hex)
   AGENTGW_REALITY_SNI   REALITY server name for TLS SNI
-`)
+`, hubExample, hubExample)
 }
 
 func generateToken() string {

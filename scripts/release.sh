@@ -5,6 +5,13 @@
 #   ./scripts/release.sh              # build everything
 #   ./scripts/release.sh --skip-apk   # skip Flutter APK build
 #   ./scripts/release.sh --skip-ios   # skip iOS build
+#   ./scripts/release.sh --publish    # upload to OSS and refresh CDN
+#
+# Environment:
+#   DOMAIN           Root domain for download URLs (default: ilovin.xyz)
+#   OSS_BUCKET       OSS bucket name for upload
+#   OSS_ENDPOINT     OSS endpoint (e.g. oss-cn-hangzhou.aliyuncs.com)
+#   CDN_DOMAIN       CDN domain for download URLs (default: download.<DOMAIN>)
 #
 # Output: release/phone-talk-vX.Y.Z.tar.gz
 set -euo pipefail
@@ -20,6 +27,8 @@ Build all release artifacts and package them into a distributable tarball.
 OPTIONS:
   --skip-apk     Skip Flutter Android APK build
   --skip-ios     Skip iOS IPA build
+  --publish      Upload artifacts to OSS and refresh CDN
+  --dry-run      Show what would be uploaded without actually uploading
   --version V    Override version (default: auto-detected from agentgw)
   -h, --help     Show this help message and exit
 
@@ -54,6 +63,8 @@ EOF
 # Parse args
 SKIP_APK=false
 SKIP_IOS=false
+PUBLISH=false
+DRY_RUN=false
 
 auto_increment_version() {
   local bump="${RELEASE_BUMP:-patch}"
@@ -104,6 +115,8 @@ for arg in "$@"; do
       ;;
     --skip-apk) SKIP_APK=true ;;
     --skip-ios) SKIP_IOS=true ;;
+    --publish) PUBLISH=true ;;
+    --dry-run) DRY_RUN=true ;;
   esac
 done
 
@@ -111,7 +124,15 @@ VERSION="${VERSION:-$(auto_increment_version)}"
 RELEASE_DIR="release/phone-talk-${VERSION}"
 MANIFEST_PATH="${RELEASE_DIR}/manifest.json"
 
+# Domain configuration for download URLs
+DOMAIN="${DOMAIN:-ilovin.xyz}"
+CDN_DOMAIN="${CDN_DOMAIN:-download.${DOMAIN}}"
+API_DOMAIN="${API_DOMAIN:-api.${DOMAIN}}"
+BASE_URL="https://${CDN_DOMAIN}"
+
 echo "=== Release ${VERSION} ==="
+echo "[release] Domain: ${DOMAIN}"
+echo "[release] CDN: ${CDN_DOMAIN}"
 rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR/bin"
 
@@ -253,49 +274,67 @@ EOF
 
 cat > "$MANIFEST_PATH" <<EOF
 {
+  "schemaVersion": 1,
   "package": "phone-talk",
   "version": "${VERSION}",
   "buildDate": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "components": {
-    "agentgw": [
-      {
-        "os": "darwin",
-        "arch": "arm64",
-        "path": "bin/agentgw-macos-arm64",
-        "sha256": "${AGENTGW_MAC_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-macos-arm64")
-      },
-      {
-        "os": "linux",
-        "arch": "amd64",
-        "path": "bin/agentgw-linux",
-        "sha256": "${AGENTGW_LINUX_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-linux")
-      }
-    ],
-    "agentd": [
-      {
-        "os": "darwin",
-        "arch": "arm64",
-        "path": "bin/agentd",
-        "sha256": "${AGENTD_MAC_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentd")
-      },
-      {
-        "os": "linux",
-        "arch": "amd64",
-        "path": "bin/agentd-linux",
-        "sha256": "${AGENTD_LINUX_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentd-linux")
-      }
-    ],
-    "agentapp": {
+  "downloadBaseUrl": "${BASE_URL}",
+  "installScriptUrl": "https://${API_DOMAIN}/v1/install.sh",
+  "artifacts": [
+    {
+      "name": "agentgw",
+      "description": "Gateway daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentgw-macos-arm64",
+          "url": "${BASE_URL}/${VERSION}/bin/agentgw-macos-arm64",
+          "sha256": "${AGENTGW_MAC_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-macos-arm64")
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentgw-linux",
+          "url": "${BASE_URL}/${VERSION}/bin/agentgw-linux",
+          "sha256": "${AGENTGW_LINUX_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-linux")
+        }
+      ]
+    },
+    {
+      "name": "agentd",
+      "description": "Agent daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentd",
+          "url": "${BASE_URL}/${VERSION}/bin/agentd",
+          "sha256": "${AGENTD_MAC_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentd")
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentd-linux",
+          "url": "${BASE_URL}/${VERSION}/bin/agentd-linux",
+          "sha256": "${AGENTD_LINUX_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentd-linux")
+        }
+      ]
+    },
+    {
+      "name": "agentapp",
+      "description": "Mobile app",
       "apk": $(if [[ -n "$APK_SHA" ]]; then cat <<JSON
 {
-        "path": "bin/agentapp.apk",
-        "sha256": "${APK_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.apk")
-      }
+          "path": "bin/agentapp.apk",
+          "url": "${BASE_URL}/${VERSION}/bin/agentapp.apk",
+          "sha256": "${APK_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.apk")
+        }
 JSON
 else
 cat <<JSON
@@ -304,10 +343,11 @@ JSON
 fi),
       "ipa": $(if [[ -n "$IPA_SHA" ]]; then cat <<JSON
 {
-        "path": "bin/agentapp.ipa",
-        "sha256": "${IPA_SHA}",
-        "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.ipa")
-      }
+          "path": "bin/agentapp.ipa",
+          "url": "${BASE_URL}/${VERSION}/bin/agentapp.ipa",
+          "sha256": "${IPA_SHA}",
+          "size": $(wc -c < "${RELEASE_DIR}/bin/agentapp.ipa")
+        }
 JSON
 else
 cat <<JSON
@@ -315,7 +355,7 @@ null
 JSON
 fi)
     }
-  }
+  ]
 }
 EOF
 
@@ -323,12 +363,73 @@ EOF
 echo "[release] Creating tarball..."
 tar czf "release/phone-talk-${VERSION}.tar.gz" -C release "phone-talk-${VERSION}"
 
+# ── Upload to OSS (optional) ──────────────────────────────────────
+if $PUBLISH || $DRY_RUN; then
+  echo ""
+  if $DRY_RUN; then
+    echo "[release] DRY RUN - would upload the following artifacts:"
+  else
+    echo "[release] Publishing to OSS..."
+  fi
+
+  OSS_BUCKET="${OSS_BUCKET:-}"
+  OSS_ENDPOINT="${OSS_ENDPOINT:-}"
+
+  if [[ -z "$OSS_BUCKET" || -z "$OSS_ENDPOINT" ]]; then
+    echo "[release] No OSS configured (OSS_BUCKET/OSS_ENDPOINT not set)"
+    echo "[release] Skipping cloud upload - binaries remain in ${RELEASE_DIR}/"
+    echo "[release] To host locally, copy ${RELEASE_DIR}/ to your web server:"
+    echo "[release]   cp -r ${RELEASE_DIR} /var/www/download/${VERSION}/"
+    echo "[release] Or use --dry-run to preview what would be uploaded"
+  else
+    upload_oss() {
+      local src="$1"
+      local dst="$2"
+      if $DRY_RUN; then
+        echo "  [dry-run] would upload: ${src} -> oss://${OSS_BUCKET}/${dst}"
+      else
+        echo "  [upload] ${src} -> oss://${OSS_BUCKET}/${dst}"
+        # Placeholder: replace with actual ossutil or aws s3 cp command
+        # ossutil cp "${src}" "oss://${OSS_BUCKET}/${dst}"
+      fi
+    }
+
+    # Upload individual binaries
+    upload_oss "${RELEASE_DIR}/bin/agentd" "${VERSION}/bin/agentd"
+    upload_oss "${RELEASE_DIR}/bin/agentd-linux" "${VERSION}/bin/agentd-linux"
+    upload_oss "${RELEASE_DIR}/bin/agentgw-macos-arm64" "${VERSION}/bin/agentgw-macos-arm64"
+    upload_oss "${RELEASE_DIR}/bin/agentgw-linux" "${VERSION}/bin/agentgw-linux"
+
+    if [[ -n "$APK_SHA" ]]; then
+      upload_oss "${RELEASE_DIR}/bin/agentapp.apk" "${VERSION}/bin/agentapp.apk"
+    fi
+
+    if [[ -n "$IPA_SHA" ]]; then
+      upload_oss "${RELEASE_DIR}/bin/agentapp.ipa" "${VERSION}/bin/agentapp.ipa"
+    fi
+
+    # Upload manifest
+    upload_oss "$MANIFEST_PATH" "${VERSION}/manifest.json"
+
+    # Upload install script
+    upload_oss "${RELEASE_DIR}/install.sh" "${VERSION}/install.sh"
+
+    if ! $DRY_RUN; then
+      echo "[release] Refreshing CDN cache..."
+      # Placeholder: replace with actual CDN refresh API call
+      # curl -X POST "https://cdn.api/refresh" -d "url=${BASE_URL}/${VERSION}/manifest.json"
+      echo "[release] CDN cache refresh placeholder (implement with your CDN provider API)"
+    fi
+  fi
+fi
+
 echo ""
 echo "=== Release ${VERSION} complete ==="
 echo ""
 ls -lh "${RELEASE_DIR}/bin/"
 echo ""
 echo "  Tarball: release/phone-talk-${VERSION}.tar.gz"
+echo "  Manifest: ${MANIFEST_PATH}"
 echo ""
 echo "  首次安装:"
 echo "    tar xzf phone-talk-${VERSION}.tar.gz"

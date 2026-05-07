@@ -11,23 +11,23 @@ import (
 )
 
 func TestBuildRemoteQRURLDropsPortForDefaultHTTPS(t *testing.T) {
-	got := buildRemoteQRURL("https://ilovin.xyz:8443", "", "fengming.xie")
-	want := "wss://ilovin.xyz/ws/fengming.xie"
+	got := buildRemoteQRURL("https://example.com:8443", "", "fengming.xie")
+	want := "wss://example.com/ws/fengming.xie"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
 func TestBuildRemoteQRURLUsesAppURLHost(t *testing.T) {
-	got := buildRemoteQRURL("https://hub.internal:9443", "https://ilovin.xyz:443", "u1")
-	want := "wss://ilovin.xyz/ws/u1"
+	got := buildRemoteQRURL("https://hub.internal:9443", "https://example.com:443", "u1")
+	want := "wss://example.com/ws/u1"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
 func TestBuildRemoteQRURLInvalidURLReturnsEmpty(t *testing.T) {
-	if got := buildRemoteQRURL("https://ilovin.xyz:8443", "://bad-url", "u1"); got != "" {
+	if got := buildRemoteQRURL("https://example.com:8443", "://bad-url", "u1"); got != "" {
 		t.Fatalf("expected empty URL, got %q", got)
 	}
 }

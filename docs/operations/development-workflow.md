@@ -111,10 +111,17 @@ flutter analyze                  # lint/static analysis
 ```
 
 **环境变量**：
-- `AGENTGW_HUB` — Tunnelhub base URL（默认：`https://ilovin.xyz`）
+- `AGENTGW_HUB` — Tunnelhub base URL（默认：编译时注入，通常为 `https://ilovim.xyz`）
 - `AGENTGW_TUNNEL_URL` — 完整 tunnel URL
 - `AGENTGW_APP_URL` — App-facing remote URL
 - `AGENTGW_REALITY_PUB` / `AGENTGW_REALITY_SID` / `AGENTGW_REALITY_SNI` — REALITY 配置
+
+**构建时域名注入**：
+- `DOMAIN` — 根域名，用于编译时注入到二进制中（默认：`ilovin.xyz`，建议生产环境设置为 `ilovim.xyz`）
+  ```bash
+  DOMAIN=ilovim.xyz ./scripts/build.sh go
+  ```
+  子域自动推导：`tunnel.<DOMAIN>` / `api.<DOMAIN>` / `download.<DOMAIN>`
 
 **安装后产物**：
 - `~/.agentgw/agentgw` — gateway 二进制

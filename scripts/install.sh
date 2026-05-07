@@ -35,8 +35,10 @@ INSTALL_DIR="$HOME/.agentgw"
 RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
-GW_PORT=7374
-DEFAULT_HUB_URL="https://ilovin.xyz"
+GW_PORT=7376
+# Domain defaults injected at build time via -ldflags, fallback to tunnel.ilovin.xyz
+DEFAULT_HUB_DOMAIN="${DEFAULT_HUB_DOMAIN:-tunnel.ilovin.xyz}"
+DEFAULT_HUB_URL="https://${DEFAULT_HUB_DOMAIN}"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
@@ -61,11 +63,12 @@ COMMANDS:
   restart   Alias for start
   stop      Stop local agentgw and local agentd
   status    Check whether local agentgw and agentd are running
+  update    Self-update agentgw binary from manifest
   help      Show this help message
 
 OPTIONS (for install):
   --token TOKEN      Pre-set authentication token
-  --hub URL          Tunnelhub base URL (e.g. https://ilovin.xyz)
+  --hub URL          Tunnelhub base URL (e.g. https://${DEFAULT_HUB_DOMAIN})
   --tunnel-url URL   Full tunnel URL (overrides --hub)
   --app-url URL      App-facing remote URL for QR/websocket
   --local-only       Only setup local agentgw, skip remote deployment
@@ -73,7 +76,7 @@ OPTIONS (for install):
   -h, --help         Show this help message and exit
 
 ENVIRONMENT:
-  AGENTGW_HUB              Tunnelhub base URL (default: https://ilovin.xyz)
+  AGENTGW_HUB              Tunnelhub base URL (default: https://${DEFAULT_HUB_DOMAIN})
   AGENTGW_TUNNEL_URL       Full tunnel URL (overrides AGENTGW_HUB)
   AGENTGW_APP_URL          App-facing remote URL
   AGENTGW_REALITY_PUB      REALITY public key (base64)
@@ -94,7 +97,7 @@ EOF
 # Sub-command handling
 SUBCMD="${1:-}"
 case "$SUBCMD" in
-  start|restart|stop|status|help|--help|-h)
+  start|restart|stop|status|update|help|--help|-h)
     # Subcommands bypass normal flag parsing
     ;;
   *)
@@ -125,7 +128,178 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC
 info()  { echo -e "${GREEN}✅ $*${NC}"; }
 warn()  { echo -e "${YELLOW}⚠️  $*${NC}"; }
 step()  { echo -e "${CYAN}⚙️  $*${NC}"; }
-err()   { echo -e "${RED}❌ $*${NC}"; }
+  err()   { echo -e "${RED}❌ $*${NC}"; }
+
+# ── Platform detection ─────────────────────────────────────────────
+detect_platform() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "${os}:${arch}" in
+    Darwin:arm64|Darwin:aarch64) echo "darwin-arm64" ;;
+    Darwin:x86_64) echo "darwin-amd64" ;;
+    Linux:arm64|Linux:aarch64) echo "linux-arm64" ;;
+    Linux:x86_64) echo "linux-amd64" ;;
+    *) echo "unsupported" ;;
+  esac
+}
+
+# ── Manifest helpers ───────────────────────────────────────────────
+download_manifest() {
+  local manifest_url="${1:-https://download.ilovin.xyz/manifest.json}"
+  local tmpfile="/tmp/phone-talk-manifest-$$.json"
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$manifest_url" -o "$tmpfile" 2>/dev/null; then
+      echo "$tmpfile"
+      return 0
+    fi
+    rm -f "$tmpfile"
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q "$manifest_url" -O "$tmpfile" 2>/dev/null; then
+      echo "$tmpfile"
+      return 0
+    fi
+    rm -f "$tmpfile"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import urllib.request; urllib.request.urlretrieve('$manifest_url', '$tmpfile')" 2>/dev/null; then
+      echo "$tmpfile"
+      return 0
+    fi
+    rm -f "$tmpfile"
+  fi
+  err "需要 curl、wget 或 python3 来下载 manifest"
+  return 1
+}
+
+# Download artifact from manifest
+self_update() {
+  step "检查更新..."
+  local platform="$(detect_platform)"
+  if [[ "$platform" == "unsupported" ]]; then
+    err "不支持的平台: $(uname -s) $(uname -m)"
+    return 1
+  fi
+
+  local manifest_file
+  manifest_file="$(download_manifest)" || {
+    warn "无法下载 manifest，跳过更新检查"
+    return 0
+  }
+  trap 'rm -f "$manifest_file"' EXIT
+
+  local latest_version
+  latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
+
+  if [[ -z "$latest_version" ]]; then
+    warn "无法解析 manifest"
+    return 0
+  fi
+
+  local current_version="unknown"
+  if [[ -f "$INSTALL_DIR/agentgw" ]]; then
+    current_version="$("$INSTALL_DIR/agentgw" version 2>/dev/null | awk '{print $2}' || true)"
+  fi
+
+  if [[ "$current_version" == "$latest_version" ]]; then
+    info "当前已是最新版本: $current_version"
+    return 0
+  fi
+
+  step "发现新版本: $current_version -> $latest_version"
+
+  # Find artifact URL for current platform
+  local artifact_url artifact_sha
+  local py_script="/tmp/phone-talk-get-url-$$.py"
+  cat > "$py_script" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+plat=sys.argv[2]
+for a in m.get('artifacts',[]):
+    if a.get('name') != 'agentgw':
+        continue
+    for p in a.get('platforms',[]):
+        if f"{p['os']}-{p['arch']}"==plat:
+            print(p.get('url',''))
+            break
+PY
+  artifact_url="$(python3 "$py_script" "$manifest_file" "$platform" 2>/dev/null || true)"
+  rm -f "$py_script"
+
+  if [[ -z "$artifact_url" ]]; then
+    warn "未找到 $platform 的更新包"
+    return 0
+  fi
+
+  step "下载更新: $artifact_url"
+  local tmp_bin="/tmp/agentgw-update-$$"
+  local download_ok=false
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$artifact_url" -o "$tmp_bin" 2>/dev/null; then
+      download_ok=true
+    fi
+  fi
+  if [[ "$download_ok" != true ]] && command -v wget >/dev/null 2>&1; then
+    if wget -q "$artifact_url" -O "$tmp_bin" 2>/dev/null; then
+      download_ok=true
+    fi
+  fi
+  if [[ "$download_ok" != true ]] && command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import urllib.request; urllib.request.urlretrieve('$artifact_url', '$tmp_bin')" 2>/dev/null; then
+      download_ok=true
+    fi
+  fi
+  if [[ "$download_ok" != true ]]; then
+    rm -f "$tmp_bin"
+    err "下载失败: $artifact_url"
+    return 1
+  fi
+
+  # Verify checksum if available
+  local py_script_sha="/tmp/phone-talk-get-sha-$$.py"
+  cat > "$py_script_sha" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1]))
+plat=sys.argv[2]
+for a in m.get('artifacts',[]):
+    if a.get('name') != 'agentgw':
+        continue
+    for p in a.get('platforms',[]):
+        if f"{p['os']}-{p['arch']}"==plat:
+            print(p.get('sha256',''))
+            break
+PY
+  artifact_sha="$(python3 "$py_script_sha" "$manifest_file" "$platform" 2>/dev/null || true)"
+  rm -f "$py_script_sha"
+
+  if [[ -n "$artifact_sha" ]]; then
+    local actual_sha
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual_sha="$(sha256sum "$tmp_bin" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual_sha="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
+    else
+      warn "缺少 sha256sum/shasum，跳过校验和验证"
+      actual_sha=""
+    fi
+    if [[ -n "$actual_sha" && "$actual_sha" != "$artifact_sha" ]]; then
+      err "校验失败！expected $artifact_sha, got $actual_sha"
+      rm -f "$tmp_bin"
+      return 1
+    fi
+    if [[ -n "$actual_sha" ]]; then
+      info "校验和验证通过"
+    fi
+  fi
+
+  # Atomic replace
+  chmod +x "$tmp_bin"
+  cp "$tmp_bin" "$INSTALL_DIR/agentgw.new"
+  mv "$INSTALL_DIR/agentgw.new" "$INSTALL_DIR/agentgw"
+  rm -f "$tmp_bin"
+  info "更新完成: $latest_version"
+}
 
 # ── Service helpers ────────────────────────────────────────────────
 local_agentd_pid() {
@@ -442,6 +616,10 @@ case "$SUBCMD" in
     show_status
     exit 0
     ;;
+  update)
+    self_update
+    exit 0
+    ;;
   help|--help|-h)
     show_help
     exit 0
@@ -653,7 +831,13 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 
 # ── 1. Detect binary ──────────────────────────────────────────────
-GW_BIN="$(detect_binary)" || exit 1
+GW_BIN="$(detect_binary)" || true
+if [[ ! -f "$GW_BIN" ]]; then
+  step "本地未找到 agentgw，尝试从远程下载..."
+  if self_update; then
+    GW_BIN="$INSTALL_DIR/agentgw"
+  fi
+fi
 if [[ ! -f "$GW_BIN" ]]; then
   err "找不到适合当前平台的 agentgw"
   echo "  平台: $(uname -s)/$(uname -m)"

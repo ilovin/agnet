@@ -24,6 +24,13 @@ source scripts/build.sh
 REMOTE_HOST="${REMOTE_HOST:-ws}"
 REMOTE_LOG="/tmp/agentd.log"
 
+# ── Release deployment config ─────────────────────────────────────────
+RELEASE_REMOTE_HOST="${RELEASE_REMOTE_HOST:-}"
+RELEASE_REMOTE_DIR="${RELEASE_REMOTE_DIR:-/opt/phonetalk/releases}"
+API_REMOTE_HOST="${API_REMOTE_HOST:-}"
+API_REMOTE_DIR="${API_REMOTE_DIR:-/opt/phonetalk/api}"
+PORTAL_REMOTE_DIR="${PORTAL_REMOTE_DIR:-/opt/phonetalk/portal}"
+
 # ── Device detection ──────────────────────────────────────────────────
 
 detect_android_devices() {
@@ -328,6 +335,114 @@ deploy_all() {
     [[ $local_ok -eq 1 && $remote_ok -eq 1 && $runtime_ok -eq 1 ]]
 }
 
+# ── Release deployment functions ──────────────────────────────────────
+
+deploy_release_artifacts() {
+    if [[ -z "$RELEASE_REMOTE_HOST" ]]; then
+        echo "[deploy-release] RELEASE_REMOTE_HOST not set, skipping artifact upload"
+        echo "[deploy-release] Set RELEASE_REMOTE_HOST to enable remote release deployment"
+        return 0
+    fi
+
+    echo "[deploy-release] Deploying release artifacts to $RELEASE_REMOTE_HOST..."
+
+    # Find latest release tarball
+    local latest_release
+    latest_release=$(ls -t release/phone-talk-v*.tar.gz 2>/dev/null | head -1)
+    if [[ -z "$latest_release" ]]; then
+        echo "[deploy-release] ERROR: No release tarball found"
+        return 1
+    fi
+
+    echo "[deploy-release] Uploading $latest_release..."
+    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "mkdir -p '$RELEASE_REMOTE_DIR'" || return 1
+    scp -o ConnectTimeout=5 "$latest_release" "$RELEASE_REMOTE_HOST:$RELEASE_REMOTE_DIR/" || return 1
+
+    # Extract version from tarball name
+    local version
+    version=$(basename "$latest_release" .tar.gz | sed 's/phone-talk-//')
+
+    echo "[deploy-release] Extracting release $version on remote..."
+    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "
+        cd '$RELEASE_REMOTE_DIR' && \
+        rm -rf '$version' && \
+        tar xzf 'phone-talk-$version.tar.gz' && \
+        mv 'phone-talk-$version' '$version' && \
+        ln -sfn '$version' latest
+    " || return 1
+
+    echo "[deploy-release] Release $version deployed to $RELEASE_REMOTE_HOST:$RELEASE_REMOTE_DIR/"
+}
+
+deploy_portal() {
+    if [[ -z "$RELEASE_REMOTE_HOST" ]]; then
+        echo "[deploy-portal] RELEASE_REMOTE_HOST not set, skipping portal deployment"
+        return 0
+    fi
+
+    local portal_src="./out/portal"
+    if [[ ! -d "$portal_src" ]]; then
+        echo "[deploy-portal] Portal not built, building now..."
+        build_portal || return 1
+    fi
+
+    echo "[deploy-portal] Deploying portal to $RELEASE_REMOTE_HOST:$PORTAL_REMOTE_DIR..."
+    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "mkdir -p '$PORTAL_REMOTE_DIR'" || return 1
+    scp -o ConnectTimeout=5 -r "$portal_src/"* "$RELEASE_REMOTE_HOST:$PORTAL_REMOTE_DIR/" || return 1
+
+    echo "[deploy-portal] Portal deployed successfully"
+}
+
+deploy_api_service() {
+    if [[ -z "$API_REMOTE_HOST" ]]; then
+        echo "[deploy-api] API_REMOTE_HOST not set, skipping API deployment"
+        echo "[deploy-api] Set API_REMOTE_HOST to enable API service deployment"
+        return 0
+    fi
+
+    echo "[deploy-api] Building API service..."
+    (cd api && GOOS=linux GOARCH=amd64 go build -o api-server ./cmd/api/) || {
+        echo "[deploy-api] ERROR: API service build failed"
+        return 1
+    }
+
+    echo "[deploy-api] Deploying API service to $API_REMOTE_HOST:$API_REMOTE_DIR..."
+    ssh -o ConnectTimeout=5 "$API_REMOTE_HOST" "mkdir -p '$API_REMOTE_DIR'" || return 1
+    scp -o ConnectTimeout=5 "./api/api-server" "$API_REMOTE_HOST:$API_REMOTE_DIR/" || return 1
+
+    # Create systemd service file
+    local service_file="/tmp/phonetalk-api.service"
+    cat > "$service_file" <<EOF
+[Unit]
+Description=PhoneTalk API Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$API_REMOTE_DIR
+ExecStart=$API_REMOTE_DIR/api-server
+Restart=always
+RestartSec=5
+Environment="PORT=8080"
+Environment="MANIFEST_PATH=$RELEASE_REMOTE_DIR/latest/manifest.json"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    scp -o ConnectTimeout=5 "$service_file" "$API_REMOTE_HOST:/tmp/phonetalk-api.service" || return 1
+    ssh -o ConnectTimeout=5 "$API_REMOTE_HOST" "
+        sudo mv /tmp/phonetalk-api.service /etc/systemd/system/ && \
+        sudo systemctl daemon-reload && \
+        sudo systemctl enable phonetalk-api && \
+        sudo systemctl restart phonetalk-api
+    " || return 1
+
+    rm -f "$service_file"
+    echo "[deploy-api] API service deployed and started"
+}
+
 # ── Gateway management ────────────────────────────────────────────────
 
 restart_agentgw() {
@@ -362,10 +477,19 @@ TARGETS:
   mobile           Install existing APK/IPA to connected devices without rebuilding
   devices          Detect and list connected mobile devices
   gw               Build and restart agentgw only
+  release          Build release tarball (calls release.sh)
+  deploy-release   Deploy release artifacts + portal + API to remote server
+  deploy-portal    Deploy download portal to remote server
+  deploy-api       Deploy API service to remote server
   help             Show this help message
 
 ENVIRONMENT:
   REMOTE_HOST            Remote SSH host for 'ws' target (default: ws)
+  RELEASE_REMOTE_HOST    Remote SSH host for release deployment (default: same as REMOTE_HOST)
+  RELEASE_REMOTE_DIR     Remote directory for release artifacts (default: /opt/phonetalk/releases)
+  API_REMOTE_HOST        Remote SSH host for API deployment (default: same as RELEASE_REMOTE_HOST)
+  API_REMOTE_DIR         Remote directory for API service (default: /opt/phonetalk/api)
+  PORTAL_REMOTE_DIR      Remote directory for portal (default: /opt/phonetalk/portal)
   AGENTGW_HUB            Tunnelhub base URL (e.g. https://8.146.236.75:443)
   AGENTGW_TUNNEL_URL     Full tunnel URL (overrides AGENTGW_HUB)
 
@@ -381,6 +505,18 @@ EXAMPLES:
 
   # Quick gateway restart after config change
   ./scripts/deploy.sh gw
+
+  # Build release tarball
+  ./scripts/deploy.sh release
+
+  # Deploy release + portal + API to production
+  RELEASE_REMOTE_HOST=prod ./scripts/deploy.sh deploy-release
+
+  # Deploy only portal
+  RELEASE_REMOTE_HOST=prod ./scripts/deploy.sh deploy-portal
+
+  # Deploy only API service
+  API_REMOTE_HOST=prod ./scripts/deploy.sh deploy-api
 
   # Install already-built APK/IPA to devices
   ./scripts/deploy.sh mobile
@@ -464,6 +600,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         gw)
             build_agentgw_mac
             restart_agentgw
+            ;;
+        release)
+            echo "[deploy] Building release tarball..."
+            ./scripts/release.sh
+            ;;
+        deploy-release)
+            echo "[deploy] Deploying release artifacts + portal + API..."
+            deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
+            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
+            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+            echo "[deploy] All components deployed successfully"
+            ;;
+        deploy-portal)
+            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
+            ;;
+        deploy-api)
+            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
             ;;
         all)
             # Start all builds in parallel. Go binaries + web static are needed
