@@ -2108,7 +2108,7 @@ func getWorkingDirectory(pid int) (string, error) {
 // PeriodicScanAndAttach runs periodically to discover new Claude/OpenCode processes
 // and attach to them as new agents.
 func (m *Manager) PeriodicScanAndAttach() {
-	ticker := time.NewTicker(120 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	for range ticker.C {
@@ -2179,7 +2179,25 @@ func (m *Manager) PeriodicScanAndAttach() {
 				}
 			}
 		}
+
+		// Cleanup dead agents
+		m.CleanupDeadAgents()
 	}
+}
+
+// CleanupDeadAgents removes agents whose underlying process is no longer running.
+func (m *Manager) CleanupDeadAgents() {
+	m.mu.Lock()
+	for id, ag := range m.agents {
+		if ag.PID > 0 && !isProcessRunning(ag.PID, ag.Provider) {
+			log.Printf("[PeriodicScan] Cleaning up dead agent %s (%s, PID %d)", ag.ID, ag.Name, ag.PID)
+			ag.setStatus(StatusStopped)
+			ag.setProcess(nil)
+			_ = m.store.DeleteAgent(ag.ID)
+			delete(m.agents, id)
+		}
+	}
+	m.mu.Unlock()
 }
 
 func parseEventRowTimestamp(createdAt string) int64 {

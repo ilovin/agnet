@@ -297,6 +297,100 @@ void main() {
       expect(agent.readOnlyReason, equals('provider scope is inherited'));
     });
 
+    // ---- i-017: loadAgents merge (timestamp-aware lastMessageTime) ----
+
+    test('loadAgents merge: newer RPC lastMessageTime updates existing value', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {'id': 'a1', 'name': 'claude-1', 'status': 'idle', 'workDir': '/home', 'nodeId': 'n1'},
+      ]);
+
+      // WS event sets lastMessageTime to an older value
+      notifier.handleEvent(WsMessage(
+        method: 'agent.status_changed',
+        params: {
+          'nodeId': 'n1', 'agentId': 'a1', 'status': 'working',
+          'lastMessageTime': 1700000000000,
+        },
+      ));
+      expect(container.read(nodesProvider).agentsFor('n1')[0].lastMessageTime, equals(1700000000000));
+
+      // RPC returns a newer lastMessageTime — should update
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1', 'name': 'claude-1', 'status': 'idle',
+          'workDir': '/home', 'nodeId': 'n1',
+          'lastMessageTime': 1700000001000,
+        },
+      ]);
+
+      final agent = container.read(nodesProvider).agentsFor('n1')[0];
+      expect(agent.lastMessageTime, equals(1700000001000), reason: 'newer RPC lastMessageTime should update');
+    });
+
+    test('loadAgents merge: older RPC lastMessageTime preserves existing value', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {'id': 'a1', 'name': 'claude-1', 'status': 'idle', 'workDir': '/home', 'nodeId': 'n1'},
+      ]);
+
+      // WS event sets lastMessageTime to a newer value
+      notifier.handleEvent(WsMessage(
+        method: 'agent.status_changed',
+        params: {
+          'nodeId': 'n1', 'agentId': 'a1', 'status': 'working',
+          'lastMessageTime': 1700000001000,
+        },
+      ));
+      expect(container.read(nodesProvider).agentsFor('n1')[0].lastMessageTime, equals(1700000001000));
+
+      // RPC returns an older lastMessageTime — should preserve existing
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1', 'name': 'claude-1', 'status': 'idle',
+          'workDir': '/home', 'nodeId': 'n1',
+          'lastMessageTime': 1700000000000,
+        },
+      ]);
+
+      final agent = container.read(nodesProvider).agentsFor('n1')[0];
+      expect(agent.lastMessageTime, equals(1700000001000), reason: 'older RPC lastMessageTime should not overwrite');
+    });
+
+    test('loadAgents merge: null RPC lastMessageTime preserves existing value', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {'id': 'a1', 'name': 'claude-1', 'status': 'idle', 'workDir': '/home', 'nodeId': 'n1'},
+      ]);
+
+      // WS event sets lastMessageTime
+      notifier.handleEvent(WsMessage(
+        method: 'agent.status_changed',
+        params: {
+          'nodeId': 'n1', 'agentId': 'a1', 'status': 'working',
+          'lastMessageTime': 1700000000000,
+        },
+      ));
+      expect(container.read(nodesProvider).agentsFor('n1')[0].lastMessageTime, equals(1700000000000));
+
+      // RPC returns null lastMessageTime — should preserve existing
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1', 'name': 'claude-1', 'status': 'idle',
+          'workDir': '/home', 'nodeId': 'n1',
+        },
+      ]);
+
+      final agent = container.read(nodesProvider).agentsFor('n1')[0];
+      expect(agent.lastMessageTime, equals(1700000000000), reason: 'null RPC lastMessageTime should not overwrite');
+    });
+
     test(
       'handleEvent agent.status_changed updates session and provider fields',
       () {

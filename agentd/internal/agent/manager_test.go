@@ -802,6 +802,70 @@ func TestHandleStreamJSONEvent_UserMessageWithText_Broadcasts(t *testing.T) {
 	}
 }
 
+func TestCleanupDeadAgents_RemovesDeadAgent(t *testing.T) {
+	m := newTestManager(t)
+
+	// Create an agent and then simulate it dying by setting PID to a non-existent one
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         999999,
+		Provider:    "claude",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	// Verify agent exists
+	if m.Get(ag.ID) == nil {
+		t.Fatal("expected agent to exist before cleanup")
+	}
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+
+	// Run cleanup — PID 999999 is not running, so it should be removed
+	m.CleanupDeadAgents()
+
+	// Verify agent was removed
+	if m.Get(ag.ID) != nil {
+		t.Fatalf("expected agent to be removed after cleanup, got %v", m.Get(ag.ID))
+	}
+	agents = m.List()
+	if len(agents) != 0 {
+		t.Fatalf("expected 0 agents after cleanup, got %d", len(agents))
+	}
+}
+
+func TestCleanupDeadAgents_KeepsLiveAgent(t *testing.T) {
+	m := newTestManager(t)
+
+	ownPID := os.Getpid()
+	// Use provider "go" because on macOS ps -p <pid> -o comm= returns "go"
+	// for the test binary, and isProcessRunning checks comm contains provider.
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "go",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	// Run cleanup — ownPID is running, so it should be kept
+	m.CleanupDeadAgents()
+
+	if m.Get(ag.ID) == nil {
+		t.Fatal("expected live agent to survive cleanup")
+	}
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent after cleanup, got %d", len(agents))
+	}
+}
+
 func TestHandleStreamJSONEvent_AssistantMessageWithToolUse_EmptyText_Allowed(t *testing.T) {
 	m := newTestManager(t)
 	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)

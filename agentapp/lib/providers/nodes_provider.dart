@@ -95,7 +95,10 @@ class NodesNotifier extends StateNotifier<NodeState> {
           permissionMode: prev.permissionMode,
           isReadOnly: prev.isReadOnly,
           readOnlyReason: prev.readOnlyReason,
-          lastMessageTime: prev.lastMessageTime,
+          lastMessageTime: (rpcAgent.lastMessageTime != null &&
+                  (prev.lastMessageTime == null || rpcAgent.lastMessageTime! > prev.lastMessageTime!))
+              ? rpcAgent.lastMessageTime
+              : prev.lastMessageTime,
         ));
       } else {
         // New agent from RPC
