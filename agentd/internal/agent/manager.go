@@ -454,11 +454,8 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			// User messages (including interrupts) should reset status to idle.
 			// When a user interrupts a running request, Claude writes a user-type
 			// message, and we need to transition away from StatusWorking.
-			ag.setStatus(StatusIdle)
-		}
-
-		if role == "assistant" {
-			ag.setStatus(StatusWorking)
+			// NOTE: status change is deferred until after the event is persisted
+			// so that agent.status_changed carries the up-to-date lastMessageTime.
 		}
 
 		kind := role // "user" or "assistant"
@@ -474,11 +471,6 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			} else if parsed, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
 				data["timestamp"] = parsed.UnixMilli()
 			}
-		}
-
-		// Update status based on content
-		if role == "assistant" {
-			ag.setStatus(StatusWorking)
 		}
 
 	case "tool_use":
@@ -758,6 +750,15 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		m.mu.RUnlock()
 		if cb != nil {
 			cb(agentID, data)
+		}
+
+		// Set status after persistence so that status-changed events carry
+		// the up-to-date lastMessageTime (LastConversationEventTime reads DB).
+		switch ev.Type {
+		case "user":
+			ag.setStatus(StatusIdle)
+		case "assistant":
+			ag.setStatus(StatusWorking)
 		}
 	}
 }

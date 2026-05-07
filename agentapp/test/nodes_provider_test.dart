@@ -449,5 +449,76 @@ void main() {
         );
       },
     );
+
+    // ---- i-017-followup: stale lastMessageTime from WS must not overwrite newer value ----
+
+    test('handleEvent agent.status_changed: older lastMessageTime is ignored', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1',
+          'name': 'claude-1',
+          'status': 'idle',
+          'workDir': '/home',
+          'nodeId': 'n1',
+          'lastMessageTime': 1700000001000,
+        },
+      ]);
+
+      // WS event carries an older lastMessageTime (simulates async goroutine
+      // firing after loadAgents already updated to a newer value).
+      notifier.handleEvent(WsMessage(
+        method: 'agent.status_changed',
+        params: {
+          'nodeId': 'n1',
+          'agentId': 'a1',
+          'status': 'working',
+          'lastMessageTime': 1700000000000,
+        },
+      ));
+
+      final agent = container.read(nodesProvider).agentsFor('n1')[0];
+      expect(
+        agent.lastMessageTime,
+        equals(1700000001000),
+        reason: 'older WS lastMessageTime must not overwrite newer existing value',
+      );
+    });
+
+    test('handleEvent agent.status_changed: newer lastMessageTime updates existing', () {
+      notifier.loadNodes([
+        {'id': 'n1', 'name': 'r1', 'host': 'h', 'status': 'connected'},
+      ]);
+      notifier.loadAgents('n1', [
+        {
+          'id': 'a1',
+          'name': 'claude-1',
+          'status': 'idle',
+          'workDir': '/home',
+          'nodeId': 'n1',
+          'lastMessageTime': 1700000000000,
+        },
+      ]);
+
+      // WS event carries a newer lastMessageTime.
+      notifier.handleEvent(WsMessage(
+        method: 'agent.status_changed',
+        params: {
+          'nodeId': 'n1',
+          'agentId': 'a1',
+          'status': 'working',
+          'lastMessageTime': 1700000001000,
+        },
+      ));
+
+      final agent = container.read(nodesProvider).agentsFor('n1')[0];
+      expect(
+        agent.lastMessageTime,
+        equals(1700000001000),
+        reason: 'newer WS lastMessageTime should update existing value',
+      );
+    });
   });
 }

@@ -893,3 +893,56 @@ func TestHandleStreamJSONEvent_AssistantMessageWithToolUse_EmptyText_Allowed(t *
 		t.Fatalf("expected role=assistant, got %v", received["role"])
 	}
 }
+
+// TestHandleStreamJSONEvent_AssistantMessage_PersistsBeforeStatusChange verifies
+// that an assistant message is persisted to the store BEFORE setStatus fires,
+// so that any downstream status-changed handler sees the up-to-date event time.
+func TestHandleStreamJSONEvent_AssistantMessage_PersistsBeforeStatusChange(t *testing.T) {
+	m := newTestManager(t)
+
+	// Use Attach (no real process) so the agent stays in the status we set.
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         os.Getpid(),
+		Provider:    "go",
+		WorkDir:     t.TempDir(),
+		SessionFile: filepath.Join(t.TempDir(), "sess.jsonl"),
+	})
+	if err != nil {
+		t.Fatalf("Attach failed: %v", err)
+	}
+
+	var statusChangedAt time.Time
+	m.SetOnStatusChange(func(agentID string, data map[string]any) {
+		statusChangedAt = time.Now().UTC()
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"assistant","role":"assistant","content":[{"type":"text","text":"hello"}]}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(ag.ID, ag, ev)
+
+	// Wait briefly for the async status-change goroutine to run.
+	time.Sleep(50 * time.Millisecond)
+
+	// The event should have been persisted.
+	lastTime, err := m.LastConversationEventTime(ag.ID)
+	if err != nil {
+		t.Fatalf("LastConversationEventTime failed: %v", err)
+	}
+	if lastTime.IsZero() {
+		t.Fatal("expected last conversation event time to be non-zero after assistant message")
+	}
+
+	// Agent status should have changed to working.
+	if ag.Status() != agent.StatusWorking {
+		t.Fatalf("expected agent status=working, got %v", ag.Status())
+	}
+
+	// If the status-change goroutine fired, its timestamp must be >= the persisted event time.
+	if !statusChangedAt.IsZero() && statusChangedAt.Before(lastTime) {
+		t.Fatalf("status changed at %v before event persisted at %v; event not persisted before status change",
+			statusChangedAt, lastTime)
+	}
+}
