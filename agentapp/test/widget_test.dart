@@ -831,6 +831,26 @@ void main() {
     expect(messages[2].text, '?');
   });
 
+  test('empty user message is not added to messages', () {
+    final messages = convertEventsToMessages([
+      {'role': 'user', 'text': '', 'seq': 1, 'raw': false, 'kind': 'user'},
+      {'role': 'user', 'text': 'ok', 'seq': 2, 'raw': false, 'kind': 'user'},
+      {'role': 'user', 'text': '', 'seq': 3, 'raw': false, 'kind': 'user'},
+    ]);
+
+    expect(messages.length, 1);
+    expect(messages[0].text, 'ok');
+  });
+
+  test('short user message is added to messages', () {
+    final messages = convertEventsToMessages([
+      {'role': 'user', 'text': 'ok', 'seq': 1, 'raw': false, 'kind': 'user'},
+    ]);
+
+    expect(messages.length, 1);
+    expect(messages[0].text, 'ok');
+  });
+
   // R-003: Compact dashboard header and status folding
   testWidgets('NodeCard hides summary chips when showDetails is false on large screen', (
     WidgetTester tester,

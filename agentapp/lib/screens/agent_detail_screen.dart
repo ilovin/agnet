@@ -688,20 +688,23 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
       deltaTextBuf.clear();
       // User messages should always be shown regardless of length.
       // isNoiseOnlyText is for filtering TUI noise from assistant output.
-      messages.add(
-        ChatMessage(
-          role: role,
-          text: cleaned,
-          seq: seq,
-          isRaw: raw,
-          kind: kind,
-          imageCount: (e['imageCount'] as num?)?.toInt() ?? 0,
-          images:
-              (e['images'] as List?)?.map((i) => i.toString()).toList() ??
-              <String>[],
-          timestamp: e['timestamp'] as int?,
-        ),
-      );
+      // Empty strings are still skipped.
+      if (cleaned.isNotEmpty) {
+        messages.add(
+          ChatMessage(
+            role: role,
+            text: cleaned,
+            seq: seq,
+            isRaw: raw,
+            kind: kind,
+            imageCount: (e['imageCount'] as num?)?.toInt() ?? 0,
+            images:
+                (e['images'] as List?)?.map((i) => i.toString()).toList() ??
+                <String>[],
+            timestamp: e['timestamp'] as int?,
+          ),
+        );
+      }
       continue;
     }
 

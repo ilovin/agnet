@@ -745,3 +745,87 @@ func TestHandleStreamJSONEvent_MessageStopSetsIdle(t *testing.T) {
 		t.Fatalf("expected Idle after message_stop, got %v", ag.Status())
 	}
 }
+
+func TestHandleStreamJSONEvent_UserMessageWithToolResultOnly_Skipped(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+
+	var received map[string]any
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		received = data
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"user","role":"user","content":[{"type":"tool_result","tool_use_id":"tu_123","content":"ignored"}]}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+
+	if received != nil {
+		t.Fatalf("expected onOutput NOT to be called for tool_result-only user message, got %v", received)
+	}
+}
+
+func TestHandleStreamJSONEvent_UserMessageWithText_Broadcasts(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+
+	var received map[string]any
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		received = data
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"user","role":"user","content":[{"type":"text","text":"Hello world"}]}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+
+	if received == nil {
+		t.Fatal("expected onOutput callback to be called")
+	}
+	if received["text"] != "Hello world" {
+		t.Fatalf("expected text=Hello world, got %v", received["text"])
+	}
+	if received["role"] != "user" {
+		t.Fatalf("expected role=user, got %v", received["role"])
+	}
+}
+
+func TestHandleStreamJSONEvent_AssistantMessageWithToolUse_EmptyText_Allowed(t *testing.T) {
+	m := newTestManager(t)
+	id, _ := m.Create("test-agent", "custom", "echo", []string{"x"}, t.TempDir(), nil)
+	ag := m.Get(id)
+	if ag == nil {
+		t.Fatal("agent not found")
+	}
+
+	var received map[string]any
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		received = data
+	})
+
+	sp := agent.NewStreamParser()
+	ev := sp.TryParseStreamJSON(`{"type":"assistant","role":"assistant","content":[{"type":"tool_use","id":"tu_123","name":"Bash","input":{"command":"ls"}}]}`)
+	if ev == nil {
+		t.Fatal("expected parsed event")
+	}
+	m.HandleStreamJSONEvent(id, ag, ev)
+
+	if received == nil {
+		t.Fatal("expected onOutput callback to be called for assistant with tool_use")
+	}
+	if received["role"] != "assistant" {
+		t.Fatalf("expected role=assistant, got %v", received["role"])
+	}
+}

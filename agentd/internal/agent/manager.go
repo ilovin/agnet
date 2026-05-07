@@ -415,6 +415,7 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 
 		// Parse content (can be string or array)
 		var text string
+		var hasToolUse bool
 		var contentArr []struct {
 			Type string `json:"type"`
 			Text string `json:"text,omitempty"`
@@ -424,10 +425,20 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		} else if err := json.Unmarshal(ev.Content, &contentArr); err == nil {
 			// Array of content blocks
 			for _, block := range contentArr {
-				if block.Type == "text" {
+				switch block.Type {
+				case "text":
 					text += block.Text
+				case "tool_use":
+					hasToolUse = true
+				case "tool_result":
+					// Tool results are system-level messages; skip them.
 				}
 			}
+		}
+
+		// Skip empty user messages that have no text and no tool_use.
+		if text == "" && !hasToolUse {
+			return
 		}
 
 		// Deduplicate user messages against the EventBuffer so conversation.send
