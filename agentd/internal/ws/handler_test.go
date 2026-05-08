@@ -10,8 +10,10 @@ import (
 	"github.com/phone-talk/agentd/internal/store"
 )
 
+var testSvc = NewAgentService()
+
 func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
-	provider, cmd, args, env := resolveLaunch("claude", "", nil, "abc123", "claude-sonnet-4-6", "")
+	provider, cmd, args, env := testSvc.ResolveLaunch("claude", "", nil, "abc123", "claude-sonnet-4-6", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -42,7 +44,7 @@ func TestResolveLaunchClaudeWithSessionAndModel(t *testing.T) {
 }
 
 func TestResolveLaunchOpencodeSession(t *testing.T) {
-	provider, cmd, args, _ := resolveLaunch("opencode", "", []string{"ignored"}, "ses_123", "", "")
+	provider, cmd, args, _ := testSvc.ResolveLaunch("opencode", "", []string{"ignored"}, "ses_123", "", "")
 	if provider != "opencode" {
 		t.Fatalf("provider = %q, want opencode", provider)
 	}
@@ -61,7 +63,7 @@ func TestResolveLaunchOpencodeSession(t *testing.T) {
 }
 
 func TestResolveLaunchDefaultProviderUsesClaude(t *testing.T) {
-	provider, cmd, args, _ := resolveLaunch("", "", nil, "", "", "")
+	provider, cmd, args, _ := testSvc.ResolveLaunch("", "", nil, "", "", "")
 	if provider != "" {
 		t.Fatalf("provider = %q, want empty", provider)
 	}
@@ -80,7 +82,7 @@ func TestResolveLaunchDefaultProviderUsesClaude(t *testing.T) {
 }
 
 func TestResolveLaunchBedrockSetsEnvAndNormalizesProvider(t *testing.T) {
-	provider, cmd, _, env := resolveLaunch("claude-bedrock", "", nil, "", "", "")
+	provider, cmd, _, env := testSvc.ResolveLaunch("claude-bedrock", "", nil, "", "", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -99,7 +101,7 @@ func TestResolveLaunchBedrockSetsEnvAndNormalizesProvider(t *testing.T) {
 }
 
 func TestResolveLaunchVertexSetsEnvAndNormalizesProvider(t *testing.T) {
-	provider, cmd, _, env := resolveLaunch("claude-vertex", "", nil, "", "", "")
+	provider, cmd, _, env := testSvc.ResolveLaunch("claude-vertex", "", nil, "", "", "")
 	if provider != "claude" {
 		t.Fatalf("provider = %q, want claude", provider)
 	}
@@ -118,7 +120,7 @@ func TestResolveLaunchVertexSetsEnvAndNormalizesProvider(t *testing.T) {
 }
 
 func TestResolveLaunchOpencodeWithModel(t *testing.T) {
-	provider, cmd, args, _ := resolveLaunch("opencode", "", nil, "ses_abc", "tb-api/claude-sonnet-4-6", "")
+	provider, cmd, args, _ := testSvc.ResolveLaunch("opencode", "", nil, "ses_abc", "tb-api/claude-sonnet-4-6", "")
 	if provider != "opencode" {
 		t.Fatalf("provider = %q, want opencode", provider)
 	}
@@ -137,7 +139,7 @@ func TestResolveLaunchOpencodeWithModel(t *testing.T) {
 }
 
 func TestResolveLaunchOpencodeModelWithoutSession(t *testing.T) {
-	_, _, args, _ := resolveLaunch("opencode", "", nil, "", "ADVibe/Kimi-K2.5", "")
+	_, _, args, _ := testSvc.ResolveLaunch("opencode", "", nil, "", "ADVibe/Kimi-K2.5", "")
 	want := []string{"-m", "ADVibe/Kimi-K2.5"}
 	if len(args) != len(want) {
 		t.Fatalf("args len = %d, want %d (%v)", len(args), len(want), args)
@@ -150,22 +152,22 @@ func TestResolveLaunchOpencodeModelWithoutSession(t *testing.T) {
 }
 
 func TestCurrentPermissionMode(t *testing.T) {
-	if got := currentPermissionMode([]string{"--permission-mode", "plan"}); got != "plan" {
+	if got := testSvc.CurrentPermissionMode([]string{"--permission-mode", "plan"}); got != "plan" {
 		t.Fatalf("got %q, want plan", got)
 	}
-	if got := currentPermissionMode([]string{"--dangerously-skip-permissions"}); got != "bypassPermissions" {
+	if got := testSvc.CurrentPermissionMode([]string{"--dangerously-skip-permissions"}); got != "bypassPermissions" {
 		t.Fatalf("got %q, want bypassPermissions", got)
 	}
-	if got := currentPermissionMode([]string{"--model", "claude-sonnet-4-6"}); got != "" {
+	if got := testSvc.CurrentPermissionMode([]string{"--model", "claude-sonnet-4-6"}); got != "" {
 		t.Fatalf("got %q, want empty", got)
 	}
 }
 
 func TestCurrentOpenCodeModel(t *testing.T) {
-	if got := currentOpenCodeModel([]string{"-s", "ses_123", "-m", "tb-api/claude-sonnet-4-6"}); got != "tb-api/claude-sonnet-4-6" {
+	if got := testSvc.CurrentOpenCodeModel([]string{"-s", "ses_123", "-m", "tb-api/claude-sonnet-4-6"}); got != "tb-api/claude-sonnet-4-6" {
 		t.Fatalf("got %q, want tb-api/claude-sonnet-4-6", got)
 	}
-	if got := currentOpenCodeModel([]string{"-s", "ses_123"}); got != "" {
+	if got := testSvc.CurrentOpenCodeModel([]string{"-s", "ses_123"}); got != "" {
 		t.Fatalf("got %q, want empty", got)
 	}
 }
@@ -235,7 +237,7 @@ func TestStatusChangedParamsIncludesLastMessageTime(t *testing.T) {
 
 	// 4. Create a WS handler with the manager via a test Server
 	srv := New(mgr, "testtoken", "testnode")
-	h := &handler{server: srv}
+	h := &handler{server: srv, service: NewAgentService()}
 
 	// 5. Call statusChangedParams for the attached agent
 	params := h.statusChangedParams(ag.ID, "idle")
@@ -300,7 +302,7 @@ func TestConversationClearResetsState(t *testing.T) {
 	}
 
 	srv := New(mgr, "testtoken", "testnode")
-	h := &handler{server: srv}
+	h := &handler{server: srv, service: NewAgentService()}
 
 	resp := h.conversationClear(RPCRequest{
 		ID:     1,
