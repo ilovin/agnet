@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	version      = "v0.1.0"
+	Version      = "v0.2.3"
 	manifestPath = os.Getenv("MANIFEST_PATH")
 )
 
@@ -30,7 +30,7 @@ func main() {
 	mux.HandleFunc("/v1/telemetry", telemetryHandler)
 
 	addr := ":" + port
-	log.Printf("[api] PhoneTalk API %s listening on %s", version, addr)
+	log.Printf("[api] PhoneTalk API %s listening on %s", Version, addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("[api] server failed: %v", err)
 	}
@@ -40,7 +40,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":    "ok",
-		"version":   version,
+		"version":   Version,
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 	})
 }
