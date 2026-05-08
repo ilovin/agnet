@@ -2030,23 +2030,51 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 		w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
 		w.SetWorkDir(workDir)
 		w.OnSessionSwitch(func(newSessionID string) {
-			if ag := m.Get(agentID); ag != nil {
-				if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
-					log.Printf("[Watcher] Failed to update session ID for %s on opencode session switch: %v", agentID, err)
+			ag := m.Get(agentID)
+			if ag == nil {
+				return
+			}
+			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
+				log.Printf("[Watcher] Failed to update session ID for %s on opencode session switch: %v", agentID, err)
+			}
+			ag.EventBuf().Reset()
+			if err := m.ClearConversationEvents(agentID); err != nil {
+				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+			}
+			m.mu.RLock()
+			onOut := m.onOutput
+			m.mu.RUnlock()
+			if onOut != nil {
+				onOut(agentID, map[string]any{
+					"type":    "conversation.cleared",
+					"agentId": agentID,
+				})
+			}
+			derived := m.DeriveAgentState(agentID)
+			m.mu.RLock()
+			onSC := m.onStatusChange
+			m.mu.RUnlock()
+			if onSC != nil {
+				params := map[string]any{
+					"agentId":            agentID,
+					"status":             string(ag.Status()),
+					"runtimeState":       derived.RuntimeState,
+					"sessionState":       derived.SessionState,
+					"sessionStateReason": derived.SessionStateReason,
+					"sessionControl":     derived.SessionControl,
 				}
-				ag.EventBuf().Reset()
-				if err := m.ClearConversationEvents(agentID); err != nil {
-					log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+				if ag.Name != "" {
+					params["name"] = ag.Name
 				}
-				m.mu.RLock()
-				onOut := m.onOutput
-				m.mu.RUnlock()
-				if onOut != nil {
-					onOut(agentID, map[string]any{
-						"type":    "conversation.cleared",
-						"agentId": agentID,
-					})
+				resumeID, _ := m.GetResumeSessionID(agentID)
+				if resumeID != "" {
+					params["sessionId"] = resumeID
 				}
+				onSC(agentID, map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "agent.status_changed",
+					"params":  params,
+				})
 			}
 		})
 		return w

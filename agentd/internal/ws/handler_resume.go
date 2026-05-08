@@ -85,7 +85,9 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 
 	// Get the stored resume session ID
 	resumeSessionID, _ := h.server.manager.GetResumeSessionID(ag.ID)
+	log.Printf("[OpenCode] agent %s resumeSessionID=%q", ag.ID, resumeSessionID)
 	if resumeSessionID == "" {
+		log.Printf("[OpenCode] ERROR: agent %s has no session ID for resume", ag.ID)
 		return errResp(req.ID, -32000, "OpenCode agent has no session ID for resume")
 	}
 
@@ -106,6 +108,7 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 	}), nil)
 
 	// Broadcast status change to working
+	log.Printf("[OpenCode] Broadcasting working status for agent %s", ag.ID)
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	// Extract model from agent args (set by resolveLaunch via -m flag)

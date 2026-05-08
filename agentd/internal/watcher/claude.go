@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -219,10 +220,18 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	// Only scan the project dir when there is no fd info at all.
 	// Before scanning, verify the current file is actually stale — if it's
 	// still being modified, don't risk switching to another process' session.
+	// When the current file is stale but still exists and the PID is alive,
+	// the process is just idle — don't scan (prevents stealing another agent's
+	// session in multi-process projects).
 	if w.path != "" {
 		if fi, err := os.Stat(w.path); err == nil {
 			if time.Since(fi.ModTime()) < 30*time.Second {
 				// Current file is still active; don't scan project dir
+				return
+			}
+			// File exists but stale. If the process is still alive, it's just idle;
+			// don't risk switching to another process's session.
+			if w.pid > 0 && syscall.Kill(w.pid, 0) == nil {
 				return
 			}
 		}
