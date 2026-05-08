@@ -1230,6 +1230,30 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
         _touchMessageCache();
 
+        // Sync last few messages to conversationProvider so dashboard preview stays in sync
+        final previewEvents = mergedEvents.length > 12
+            ? mergedEvents.sublist(mergedEvents.length - 12)
+            : mergedEvents;
+        final previewMessages = collapseConsecutiveActivityBlocks(
+          convertEventsToMessages(previewEvents),
+        ).where((m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall).toList();
+        if (previewMessages.isNotEmpty) {
+          ref.read(conversationProvider.notifier).mergeHistory(
+            widget.nodeId,
+            widget.agentId,
+            previewMessages.map((m) {
+              final role = m.role == 'user' ? 'user' : 'assistant';
+              return {
+                'nodeId': widget.nodeId,
+                'agentId': widget.agentId,
+                'role': role,
+                'text': m.text,
+                'seq': m.seq,
+              };
+            }).toList(),
+          );
+        }
+
         if (_stickToBottom) {
           _scrollToBottom(force: true, animate: false);
         }
@@ -5149,62 +5173,50 @@ class _InputBarState extends State<_InputBar> {
 
   Future<void> _pickImage() async {
     try {
-      ImageSource? source;
       if (kIsWeb) {
-        source = ImageSource.gallery;
-      } else {
-        source = await showModalBottomSheet<ImageSource>(
-          context: context,
-          builder: (ctx) => SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ListTile(
-                  leading: const Icon(Icons.camera_alt),
-                  title: const Text('拍照'),
-                  onTap: () => Navigator.pop(ctx, ImageSource.camera),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.photo_library),
-                  title: const Text('从相册选择'),
-                  onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-                ),
-              ],
-            ),
-          ),
-        );
-      }
-      if (source == null) return;
-
-      final picked = kIsWeb
-          ? await _imagePicker.pickImage(source: source)
-          : await _imagePicker.pickImage(
-              source: source,
-              maxWidth: 1920,
-              maxHeight: 1920,
-              imageQuality: 85,
-            );
-      if (picked == null) return;
-
-      final bytes = await picked.readAsBytes();
-      final b64 = base64Encode(bytes);
-      // Web端未压缩，限制单张图片 base64 后不超过 5MB（约 3.75MB 原始文件）
-      if (kIsWeb && b64.length > 5 * 1024 * 1024) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Web 端图片过大，请选择小于 3MB 的图片')),
-          );
-        }
+        // Web: use multi-image picker directly
+        final picked = await _imagePicker.pickMultiImage();
+        if (picked.isEmpty) return;
+        await _processPickedImages(picked);
         return;
       }
-      String mime = picked.mimeType ?? '';
-      if (mime.isEmpty) {
-        mime = _detectMimeType(bytes);
-      }
 
-      final updated = List<Map<String, String>>.from(widget.pendingImages)
-        ..add({'data': b64, 'mimeType': mime});
-      widget.onImagesChanged(updated);
+      // Mobile: show source selector
+      final isMulti = await showModalBottomSheet<bool>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('拍照'),
+                onTap: () => Navigator.pop(ctx, false),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('从相册选择（可多选）'),
+                onTap: () => Navigator.pop(ctx, true),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (isMulti == null) return;
+
+      if (isMulti) {
+        final picked = await _imagePicker.pickMultiImage(
+          maxWidth: 1920,
+          maxHeight: 1920,
+          imageQuality: 85,
+        );
+        if (picked.isEmpty) return;
+        await _processPickedImages(picked);
+      } else {
+        final picked = await _imagePicker.pickImage(source: ImageSource.camera);
+        if (picked == null) return;
+        await _processPickedImages([picked]);
+      }
     } catch (e, st) {
       debugPrint('pickImage error: $e\n$st');
       if (mounted) {
@@ -5213,6 +5225,29 @@ class _InputBarState extends State<_InputBar> {
         ).showSnackBar(SnackBar(content: Text('选择图片失败: $e')));
       }
     }
+  }
+
+  Future<void> _processPickedImages(List<XFile> files) async {
+    final updated = List<Map<String, String>>.from(widget.pendingImages);
+    for (final picked in files) {
+      final bytes = await picked.readAsBytes();
+      final b64 = base64Encode(bytes);
+      // Web端未压缩，限制单张图片 base64 后不超过 5MB（约 3.75MB 原始文件）
+      if (kIsWeb && b64.length > 5 * 1024 * 1024) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('${picked.name} 过大，已跳过（Web 端限制 3MB）')),
+          );
+        }
+        continue;
+      }
+      String mime = picked.mimeType ?? '';
+      if (mime.isEmpty) {
+        mime = _detectMimeType(bytes);
+      }
+      updated.add({'data': b64, 'mimeType': mime});
+    }
+    widget.onImagesChanged(updated);
   }
 
   String _detectMimeType(List<int> bytes) {
