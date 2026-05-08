@@ -293,9 +293,14 @@ func (w *OpenCodeDBWatcher) poll() {
 				Text:  m.text,
 				MsgID: m.id,
 			}
-			if m.role == "assistant" && m.hasTool {
-				s := StatusWorking
-				ev.StatusChange = &s
+			if m.role == "assistant" {
+				if m.hasTool {
+					s := StatusWorking
+					ev.StatusChange = &s
+				} else {
+					s := StatusStandby
+					ev.StatusChange = &s
+				}
 			}
 			w.callback(ev)
 		}
@@ -317,7 +322,7 @@ func (w *OpenCodeDBWatcher) poll() {
 				Text:  last.text,
 				MsgID: last.id,
 			}
-			if last.role == "assistant" && last.hasTool {
+			if last.role == "assistant" {
 				s := StatusWorking
 				ev.StatusChange = &s
 			}
@@ -335,7 +340,7 @@ func (w *OpenCodeDBWatcher) poll() {
 			Text:  last.text,
 			MsgID: last.id,
 		}
-		if last.role == "assistant" && last.hasTool {
+		if last.role == "assistant" {
 			s := StatusWorking
 			ev.StatusChange = &s
 		}
