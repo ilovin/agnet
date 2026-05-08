@@ -40,6 +40,7 @@ GW_PORT=7376
 # Domain defaults injected at build time via -ldflags, fallback to tunnel.ilovin.xyz
 DEFAULT_HUB_DOMAIN="${DEFAULT_HUB_DOMAIN:-tunnel.ilovin.xyz}"
 DEFAULT_HUB_URL="https://${DEFAULT_HUB_DOMAIN}"
+SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://download.ilovin.xyz/install.sh}"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
@@ -64,7 +65,7 @@ COMMANDS:
   restart   Alias for start
   stop      Stop local agentgw and local agentd
   status    Check whether local agentgw and agentd are running
-  update    Self-update agentgw binary from manifest
+  update    Self-update install script from remote, then re-exec
   help      Show this help message
 
 OPTIONS (for install):
@@ -345,6 +346,40 @@ self_update() {
     fi
   fi
   download_artifact agentgw "$INSTALL_DIR/agentgw"
+}
+
+# Download latest install.sh from remote, replace current script, and re-exec.
+update_script_and_reexec() {
+  local script_path
+  script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+  step "更新安装脚本..."
+  mkdir -p "$CACHE_DIR"
+  local tmpfile="$CACHE_DIR/install.sh.tmp"
+
+  if ! _download_file "$SCRIPT_UPDATE_URL" "$tmpfile"; then
+    warn "脚本下载失败: $SCRIPT_UPDATE_URL"
+    return 1
+  fi
+
+  if [[ ! -s "$tmpfile" ]] || ! head -1 "$tmpfile" | grep -q "^#!/"; then
+    warn "下载的文件不是有效的脚本"
+    rm -f "$tmpfile"
+    return 1
+  fi
+
+  cp "$tmpfile" "$script_path"
+  chmod +x "$script_path"
+  rm -f "$tmpfile"
+  info "安装脚本已更新"
+
+  # Strip "update" from args, pass the rest to new version
+  local -a reexec_args=()
+  for arg in "$@"; do
+    [[ "$arg" == "update" ]] && continue
+    reexec_args+=("$arg")
+  done
+  exec "$script_path" "${reexec_args[@]}"
 }
 
 # Download agentd for the current platform from manifest
@@ -721,6 +756,8 @@ case "$SUBCMD" in
     exit 0
     ;;
   update)
+    update_script_and_reexec "$@"
+    # If script update failed, still update agentgw binary
     self_update
     exit 0
     ;;
@@ -771,6 +808,7 @@ scan_ssh_nodes() {
     esac
   done < "$cfg"
   [[ -n "$host" && -n "$hostname" ]] && echo "${host}|${hostname}|${port}"
+  return 0
 }
 
 # ── Deploy agentd to remote ────────────────────────────────────────
@@ -973,6 +1011,21 @@ fi
 info "平台: $(uname -s)/$(uname -m)"
 info "agentgw 来源: $GW_BIN"
 
+# ── 1.5 Resolve token early ───────────────────────────────────────
+# Token must be resolved BEFORE deploying remote nodes so that
+# deploy_agentd can write the correct token to remote config.
+if [[ -z "$TOKEN" && -f "$INSTALL_DIR/config.json" ]]; then
+  EXISTING_TOKEN="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('token',''))" "$INSTALL_DIR/config.json" 2>/dev/null || true)"
+  if [[ -n "$EXISTING_TOKEN" ]]; then
+    TOKEN="$EXISTING_TOKEN"
+    info "沿用已有 Token: ${TOKEN:0:12}..."
+  fi
+fi
+if [[ -z "$TOKEN" ]]; then
+  TOKEN="$(generate_token)"
+  info "生成新 Token: ${TOKEN:0:12}..."
+fi
+
 # ── 2. Scan & deploy remote nodes ─────────────────────────────────
 NODES=() NODE_HOSTS=() NODE_PORTS=()
 SELECTION=""
@@ -1165,18 +1218,11 @@ if [[ -n "$HUB_URL" ]]; then
   fi
 fi
 
-# ── 4. Token ──────────────────────────────────────────────────────
-# Reuse existing token if config already exists
-if [[ -z "$TOKEN" && -f "$INSTALL_DIR/config.json" ]]; then
-  EXISTING_TOKEN="$(grep 'token:' "$INSTALL_DIR/config.json" 2>/dev/null | head -1 | sed 's/.*token:[[:space:]]*//' | tr -d '"' | tr -d "'")"
-  if [[ -n "$EXISTING_TOKEN" ]]; then
-    TOKEN="$EXISTING_TOKEN"
-    info "沿用已有 Token: ${TOKEN}"
-  fi
-fi
-if [[ -z "$TOKEN" ]]; then
-  TOKEN="$(generate_token)"
-  info "生成新 Token: ${TOKEN}"
+# ── 4. Token (already resolved in step 1.5) ──────────────────────
+# Token may be overridden by REGISTERED_TOKEN from tunnelhub registration
+if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
+  TOKEN="$REGISTERED_TOKEN"
+  info "使用注册 Token: ${TOKEN:0:12}..."
 fi
 
 # ── 5. Config ─────────────────────────────────────────────────────
