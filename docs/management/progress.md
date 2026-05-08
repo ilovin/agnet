@@ -43,6 +43,7 @@
 | **Test isolation fix** | — | Developer | dev agent | **Completed** | 2026-04-30 | Merged to main at commit `93a7aeb` |
 | **i-012** | — | Developer | dev agent | **Completed** | 2026-05-01 | `/clear` in tmux mode breaks interaction + session switch re-tracking; 6 files changed; Go tests + 117 Flutter tests pass |
 | **i-012-followup** | — | Developer | — | **Open** | 2026-05-01 | `currentBound()` blocks watcher session switch after tmux `/clear`; root cause identified |
+| **R-006** | R-006 Portal本机QR连接 | Manager | team-lead | **Completed** | 2026-05-08 | Portal网页"尝试连接本机gw"按钮+二维码显示功能；Go测试2/2通过；Chrome验证完成 |
 
 ## 4) Blockers & Risks
 | ID | Type | Description | Owner | Mitigation | Status |
@@ -74,6 +75,7 @@
 | 2026-04-30 | **ARCH-002/ARCH-003 Ready** | team-lead | Dependencies unblocked: ARCH-001 completed; both tasks ready to start |
 | 2026-05-01 | **i-012 fixed** | dev agent | `/clear` tmux bug + session switch re-tracking; 6 files; agentd Go tests + 117 Flutter tests pass |
 | 2026-04-30 | **i-012 discovered** | team-lead | APP user message display bug identified; high priority; needs investigation and fix |
+| 2026-05-08 | **R-006 completed** | team-lead | Portal本机QR连接: agentgw /local-info端点+CORS, portal按钮+二维码, 2个Go测试通过, Chrome验证通过 |
 
 ## 6) Completion Summary
 - 2026-05-01 deliveries: i-012 (`/clear` tmux bug + session switch re-tracking)
