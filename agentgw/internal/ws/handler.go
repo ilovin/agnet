@@ -67,7 +67,7 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		return h.nodeRestart(req)
 	case "agent.list", "agent.create", "agent.stop", "agent.restart", "agent.rename", "agent.remove",
 		"conversation.history", "conversation.send", "conversation.key",
-		"conversation.image", "conversation.permission_response",
+		"conversation.image", "conversation.permission_response", "conversation.clear",
 		"session.list", "session.create", "session.attach", "session.catalog",
 		"provider.list", "provider.switch", "provider.add",
 		"opencode.models",
