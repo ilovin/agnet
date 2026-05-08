@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -42,6 +44,128 @@ func TestFormatDuration(t *testing.T) {
 	if got := formatDuration(3661 * time.Second); got != "1h1m1s" {
 		t.Fatalf("expected 1h1m1s, got %q", got)
 	}
+}
+
+func TestQRLocalEndpoint(t *testing.T) {
+	mux := http.NewServeMux()
+	registerQRHandler(mux, 7374, "testtoken123", "", "", "", "")
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/qr.png?type=local")
+	if err != nil {
+		t.Fatalf("GET /qr.png?type=local: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("expected Content-Type image/png, got %q", got)
+	}
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("expected CORS header *, got %q", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if len(body) == 0 {
+		t.Fatalf("expected non-empty PNG body")
+	}
+
+	// Verify PNG magic bytes
+	if len(body) < 8 || !bytes.Equal(body[:8], []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}) {
+		t.Fatalf("expected PNG magic bytes, got % x", body[:min(len(body), 8)])
+	}
+}
+
+func TestQRLocalEndpointCORSOptions(t *testing.T) {
+	mux := http.NewServeMux()
+	registerQRHandler(mux, 7374, "tok", "", "", "", "")
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodOptions, server.URL+"/qr.png?type=local", nil)
+	if err != nil {
+		t.Fatalf("create OPTIONS request: %v", err)
+	}
+	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS /qr.png: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("expected CORS header *, got %q", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); got == "" {
+		t.Fatalf("expected Access-Control-Allow-Methods header")
+	}
+}
+
+func TestQRRemoteEndpointWithTunnel(t *testing.T) {
+	mux := http.NewServeMux()
+	registerQRHandler(mux, 7374, "testtoken123", "https://hub.example.com", "tunneltoken", "https://app.example.com", "user1")
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/qr.png?type=remote")
+	if err != nil {
+		t.Fatalf("GET /qr.png?type=remote: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	if got := resp.Header.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("expected Content-Type image/png, got %q", got)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if len(body) == 0 {
+		t.Fatalf("expected non-empty PNG body")
+	}
+}
+
+func TestQRRemoteEndpointWithoutTunnel(t *testing.T) {
+	mux := http.NewServeMux()
+	registerQRHandler(mux, 7374, "testtoken123", "", "", "", "")
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/qr.png?type=remote")
+	if err != nil {
+		t.Fatalf("GET /qr.png?type=remote: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", resp.StatusCode)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func TestShowStatusPrintsTunnelTelemetry(t *testing.T) {

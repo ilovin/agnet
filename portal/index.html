@@ -167,6 +167,65 @@
             color: #856404;
             font-size: 0.9em;
         }
+        .local-gw-section {
+            margin-top: 30px;
+            padding: 25px;
+            background: #f8f9ff;
+            border-radius: 15px;
+            border: 2px dashed #667eea;
+            text-align: center;
+        }
+        .local-gw-section h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .local-gw-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: box-shadow 0.3s ease;
+        }
+        .local-gw-btn:hover {
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+        .local-gw-status {
+            margin-top: 15px;
+            color: #666;
+            font-size: 0.9em;
+            min-height: 1.5em;
+        }
+        .local-gw-status.error {
+            color: #e74c3c;
+        }
+        .local-gw-status.success {
+            color: #27ae60;
+        }
+        #local-qr-display {
+            margin-top: 15px;
+            display: none;
+        }
+        .qr-img {
+            width: 150px;
+            height: 150px;
+            border-radius: 10px;
+            background: white;
+            padding: 5px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .qr-container {
+            display: inline-block;
+            margin: 0 10px;
+            text-align: center;
+        }
+        .qr-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 8px;
+        }
         @media (max-width: 768px) {
             header h1 { font-size: 2em; }
             .platforms { grid-template-columns: 1fr; }
@@ -235,6 +294,23 @@
                 <div class="step-content">
                     <h3>远程管理</h3>
                     <p>通过 Web UI 或手机 App 管理你的 AI Agent，查看会话、执行命令、监控状态。</p>
+                </div>
+            </div>
+
+            <div class="local-gw-section">
+                <h3>本机连接</h3>
+                <p style="color:#666;margin-bottom:15px;font-size:0.9em;">在同一台电脑上启动 agentgw 后，点击下方按钮生成连接二维码</p>
+                <button class="local-gw-btn" onclick="tryConnectLocalGW()">尝试连接本机 gw</button>
+                <div class="local-gw-status" id="local-gw-status"></div>
+                <div id="local-qr-display">
+                    <div class="qr-container" id="qr-local-container">
+                        <img src="http://localhost:7374/qr.png?type=local" class="qr-img" id="qr-local" alt="本机二维码" onload="onLocalQRLoad()" onerror="onLocalQRError()">
+                        <div class="qr-label">本机连接</div>
+                    </div>
+                    <div class="qr-container" id="qr-remote-container" style="display:none;">
+                        <img src="http://localhost:7374/qr.png?type=remote" class="qr-img" id="qr-remote" alt="远程二维码" onload="onRemoteQRLoad()" onerror="onRemoteQRError()">
+                        <div class="qr-label">远程连接</div>
+                    </div>
                 </div>
             </div>
 
@@ -344,6 +420,43 @@
         }
 
         generateQR();
+
+        function onLocalQRLoad() {
+            const statusEl = document.getElementById('local-gw-status');
+            statusEl.textContent = '已检测到本地网关，请使用 PhoneTalk App 扫描二维码';
+            statusEl.className = 'local-gw-status success';
+        }
+
+        function onLocalQRError() {
+            const statusEl = document.getElementById('local-gw-status');
+            statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
+            statusEl.className = 'local-gw-status error';
+            document.getElementById('qr-local-container').style.display = 'none';
+        }
+
+        function onRemoteQRLoad() {
+            document.getElementById('qr-remote-container').style.display = 'inline-block';
+        }
+
+        function onRemoteQRError() {
+            document.getElementById('qr-remote-container').style.display = 'none';
+        }
+
+        async function tryConnectLocalGW() {
+            const statusEl = document.getElementById('local-gw-status');
+            const qrDisplay = document.getElementById('local-qr-display');
+            statusEl.textContent = '正在检测本地网关...';
+            statusEl.className = 'local-gw-status';
+            qrDisplay.style.display = 'block';
+            document.getElementById('qr-local-container').style.display = 'inline-block';
+            document.getElementById('qr-remote-container').style.display = 'none';
+
+            // Force reload images to trigger onload/onerror
+            const localImg = document.getElementById('qr-local');
+            const remoteImg = document.getElementById('qr-remote');
+            localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
+            remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
+        }
     </script>
 </body>
 </html>

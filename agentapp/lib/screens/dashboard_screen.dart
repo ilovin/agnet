@@ -392,6 +392,11 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
 }
 
 String managedVisibilityKey(AgentModel agent) {
+  // Use PID as the primary key when available so multiple live processes
+  // sharing one session remain independently visible on the dashboard.
+  if (agent.pid != null && agent.pid! > 0) {
+    return '${agent.provider.trim().toLowerCase()}|pid:${agent.pid}';
+  }
   return sessionIdentityKey(
     provider: agent.provider,
     sessionId: agent.sessionId,
@@ -557,7 +562,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   final Map<String, TextEditingController> _canvasInputControllers = {};
   final Map<String, bool> _canvasSending = {};
   String? _canvasPickerSelectionKey;
-  bool _showDetails = false;
+  bool _showDetails = true;
   bool _canvasSelectionMode = false;
   EventCallback? _eventHandler;
   WsClient? _eventClient;

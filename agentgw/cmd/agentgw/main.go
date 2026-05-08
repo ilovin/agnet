@@ -395,6 +395,69 @@ func checkToken(r *http.Request, token string) bool {
 	return t == token
 }
 
+// withCORS wraps an http.HandlerFunc and adds CORS headers for cross-origin requests.
+func withCORS(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// registerQRHandler registers GET /qr.png which returns a PNG QR code image.
+// Query param ?type=local generates a QR for ws://<localIP>:<port>/ws|<token>.
+// Query param ?type=remote generates a QR for the remote tunnel URL.
+func registerQRHandler(mux *http.ServeMux, port int, token string, tunnelURL, tunnelToken, appURL, userID string) {
+	mux.HandleFunc("/qr.png", withCORS(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		qrType := r.URL.Query().Get("type")
+		var content string
+		switch qrType {
+		case "local":
+			localIP := getLocalIP()
+			if localIP == "" {
+				http.Error(w, "unable to determine local IP", http.StatusInternalServerError)
+				return
+			}
+			content = fmt.Sprintf("ws://%s:%d/ws|%s", localIP, port, token)
+		case "remote":
+			if tunnelURL == "" {
+				http.Error(w, "tunnel not configured", http.StatusNotFound)
+				return
+			}
+			remoteURL := buildRemoteQRURL(tunnelURL, appURL, userID)
+			if remoteURL == "" {
+				http.Error(w, "unable to build remote URL", http.StatusInternalServerError)
+				return
+			}
+			content = remoteURL + "|" + tunnelToken
+		default:
+			http.Error(w, "invalid type parameter", http.StatusBadRequest)
+			return
+		}
+		qr, err := qrcode.New(content, qrcode.Medium)
+		if err != nil {
+			http.Error(w, "failed to generate QR code", http.StatusInternalServerError)
+			return
+		}
+		pngBytes, err := qr.PNG(256)
+		if err != nil {
+			http.Error(w, "failed to encode QR code", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngBytes)
+	}))
+}
+
 func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, realityCfg *tunnel.RealityConfig, showQR bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -702,6 +765,10 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	log.Printf("agentgw listening on %s (token: %s...)", addr, tokenPreview)
 
 	userID := tunnelUserID
+
+	// Register QR image endpoint for portal.
+	registerQRHandler(http.DefaultServeMux, cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag, userID)
+
 	if showQR {
 		printQRCode(cfg.Port, cfg.Token, tunnelURL, tunnelToken, appURLFlag, userID)
 	}
