@@ -25,6 +25,10 @@ type OpenCodeDBWatcher struct {
 	db        *sql.DB // persistent connection
 	dbMu      sync.Mutex
 
+	workDir         string
+	onSwitch        func(newSessionID string)
+	lastSessionCheck time.Time
+
 	// Streaming message tracking: opencode writes parts progressively,
 	// so the most recent message may receive new parts between polls.
 	// We keep re-querying it until a newer message appears.
@@ -116,6 +120,14 @@ func (w *OpenCodeDBWatcher) Stop() {
 // in Start() to avoid re-processing historical messages.
 func (w *OpenCodeDBWatcher) SetSkipExisting(bool) {}
 
+func (w *OpenCodeDBWatcher) SetWorkDir(dir string) {
+	w.workDir = dir
+}
+
+func (w *OpenCodeDBWatcher) OnSessionSwitch(fn func(newSessionID string)) {
+	w.onSwitch = fn
+}
+
 func (w *OpenCodeDBWatcher) loop() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -141,6 +153,8 @@ type openCodePart struct {
 }
 
 func (w *OpenCodeDBWatcher) poll() {
+	w.refreshSession()
+
 	db, err := w.getDB()
 	if err != nil {
 		return
@@ -319,6 +333,38 @@ func (w *OpenCodeDBWatcher) poll() {
 		}
 		w.callback(ev)
 	}
+}
+
+func (w *OpenCodeDBWatcher) refreshSession() {
+	if w.workDir == "" || w.onSwitch == nil {
+		return
+	}
+	if time.Since(w.lastSessionCheck) < 15*time.Second {
+		return
+	}
+	w.lastSessionCheck = time.Now()
+
+	db, err := w.getDB()
+	if err != nil {
+		return
+	}
+
+	var latestSessionID string
+	err = db.QueryRow(`
+		SELECT id FROM session
+		WHERE directory = ?
+		ORDER BY time_updated DESC
+		LIMIT 1`, w.workDir).Scan(&latestSessionID)
+	if err != nil || latestSessionID == "" || latestSessionID == w.sessionID {
+		return
+	}
+
+	log.Printf("[OpenCodeDB] Session switched from %s to %s for workDir %s", w.sessionID, latestSessionID, w.workDir)
+	w.sessionID = latestSessionID
+	w.lastMsgID = ""
+	w.streamingMsgID = ""
+	w.streamingMsgText = ""
+	w.onSwitch(latestSessionID)
 }
 
 // OpenCodeDBHistory loads all conversation events from the opencode DB for a session.

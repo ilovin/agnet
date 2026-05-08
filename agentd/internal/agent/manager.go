@@ -1837,6 +1837,23 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 	}
 	m.mu.RUnlock()
 
+	if sessionID != "" {
+		m.mu.RLock()
+		for _, existing := range m.agents {
+			if existing.PID == info.PID || existing.PID <= 0 {
+				continue
+			}
+			existingResumeID, _ := m.GetResumeSessionID(existing.ID)
+			if existingResumeID == sessionID {
+				log.Printf("[Attach] CONFLICT: existing agent %s (PID %d) already maps to session %s; new PID %d will be display-only",
+					existing.ID, existing.PID, sessionID, info.PID)
+				isDisplayOnly = true
+				break
+			}
+		}
+		m.mu.RUnlock()
+	}
+
 	// Create a managed agent that watches the existing session
 	// WITHOUT killing or restarting the original process
 	name := attachedDisplayName(info.PID, sessionID, info.Provider, info.WorkDir)
@@ -2010,7 +2027,29 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 // for claude (and others) it returns a ClaudeWatcher on the JSONL file.
 func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent), agentID string) watcher.SessionWatcher {
 	if provider == "opencode" && sessionID != "" {
-		return watcher.NewOpenCodeDBWatcher(sessionID, cb)
+		w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
+		w.SetWorkDir(workDir)
+		w.OnSessionSwitch(func(newSessionID string) {
+			if ag := m.Get(agentID); ag != nil {
+				if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
+					log.Printf("[Watcher] Failed to update session ID for %s on opencode session switch: %v", agentID, err)
+				}
+				ag.EventBuf().Reset()
+				if err := m.ClearConversationEvents(agentID); err != nil {
+					log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+				}
+				m.mu.RLock()
+				onOut := m.onOutput
+				m.mu.RUnlock()
+				if onOut != nil {
+					onOut(agentID, map[string]any{
+						"type":    "conversation.cleared",
+						"agentId": agentID,
+					})
+				}
+			}
+		})
+		return w
 	}
 	w := watcher.NewClaudeWatcher(sessionFile, cb)
 	w.SetWorkDir(workDir)
