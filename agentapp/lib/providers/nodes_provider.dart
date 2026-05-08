@@ -135,14 +135,21 @@ class NodesNotifier extends StateNotifier<NodeState> {
   void _handleAgentStatus(Map<String, dynamic> params) {
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String?;
-    if (nodeId.isEmpty || agentId == null || agentId.isEmpty) return;
+    print('[WS] agent.status_changed nodeId=$nodeId agentId=$agentId status=${params['status']}');
+    if (nodeId.isEmpty || agentId == null || agentId.isEmpty) {
+      print('[WS] agent.status_changed: missing nodeId or agentId, skipping');
+      return;
+    }
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
+    print('[WS] agent.status_changed: found ${agentList.length} agents, idx=$idx');
     if (idx == -1) {
+      print('[WS] agent.status_changed: agent not found, refreshing');
       _refreshAgents(nodeId);
       return;
     }
     final status = _parseAgentStatus(params['status'] as String? ?? '');
+    print('[WS] agent.status_changed: updating status to $status');
     if ((params['status'] as String? ?? '') == 'removed') {
       agentList.removeAt(idx);
       final updated = Map<String, List<AgentModel>>.from(state.agents);

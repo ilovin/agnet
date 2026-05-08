@@ -2843,67 +2843,9 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     ];
 
     final details = <PopupMenuEntry<String>>[];
-    if ((agent.runtimeState ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.memory,
-          'Runtime: ${_runtimeStateLabel(agent.runtimeState)}',
-        ),
-      );
-    }
-    if ((agent.sessionState ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.chat_bubble_outline,
-          'Session: ${_sessionStateLabel(agent.sessionState)}',
-        ),
-      );
-    }
-    if ((agent.sessionControl ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.gamepad_outlined,
-          'Control: ${_sessionControlLabel(agent.sessionControl)}',
-        ),
-      );
-    }
-    if ((agent.providerState ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.settings,
-          'Provider: ${_providerStateLabel(agent.providerState)}',
-        ),
-      );
-    }
-    if ((agent.providerScope ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.account_tree,
-          'Scope: ${agent.providerScope == 'inherited' ? '继承 Root' : agent.providerScope!}',
-        ),
-      );
-    }
-    if ((agent.providerWriteMode ?? '').isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          agent.providerWriteMode == 'read_only'
-              ? Icons.lock_outline
-              : Icons.edit_note,
-          'Mode: ${agent.providerWriteMode == 'read_only' ? 'Provider 只读' : 'Provider 可切换'}',
-        ),
-      );
-    }
     if ((agent.sessionStateReason ?? '').trim().isNotEmpty) {
       details.add(
         _detailMenuItem(Icons.info_outline, agent.sessionStateReason!.trim()),
-      );
-    }
-    if ((agent.providerReadOnlyReason ?? '').trim().isNotEmpty) {
-      details.add(
-        _detailMenuItem(
-          Icons.info_outline,
-          agent.providerReadOnlyReason!.trim(),
-        ),
       );
     }
 
@@ -3063,21 +3005,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     );
   }
 
-  List<String> _buildMetaBadges(AgentModel agent) {
-    final badges = <String>[];
-    final runtime = _runtimeStateLabel(agent.runtimeState).trim();
-    if (runtime.isNotEmpty) badges.add(runtime);
-    final sessionState = _sessionStateLabel(agent.sessionState).trim();
-    if (sessionState.isNotEmpty) badges.add(sessionState);
-    final control = _sessionControlLabel(agent.sessionControl).trim();
-    if (control.isNotEmpty) badges.add(control);
-    final providerState = _providerStateLabel(agent.providerState).trim();
-    if (providerState.isNotEmpty) badges.add(providerState);
-    final mode = agent.permissionMode?.trim() ?? '';
-    if (mode.isNotEmpty) badges.add('权限:$mode');
-    return badges;
-  }
-
   @override
   Widget build(BuildContext context) {
     final agent = widget.agent;
@@ -3087,9 +3014,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             ref.watch(conversationProvider)[(widget.nodeId, agent.id)] ??
                 const [],
           )
-        : const <String>[];
-    final metaBadges = widget.isLargeScreen && widget.showDetails
-        ? _buildMetaBadges(agent)
         : const <String>[];
 
     final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
@@ -3140,49 +3064,15 @@ class _AgentRowState extends ConsumerState<AgentRow> {
               ),
             ),
       title: _buildTitleRow(context, displayTitle),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (metaBadges.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: metaBadges
-                  .map(
-                    (badge) => Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        badge,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          ],
-          if (previewLines.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            _MarkdownPreview(
-              previewLines.join('\n'),
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ],
-        ],
-      ),
+      subtitle: previewLines.isNotEmpty
+          ? Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: _MarkdownPreview(
+                previewLines.join('\n'),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            )
+          : null,
       onTap: widget.canvasSelectionMode
           ? null
           : () => context.push('/agent/${widget.nodeId}/${agent.id}'),
@@ -3274,72 +3164,6 @@ String _agentFallbackTitle(AgentModel agent) {
     return _dirname(agent.workDir);
   }
   return agent.provider;
-}
-
-String _runtimeStateLabel(String? value) {
-  switch (value) {
-    case 'live':
-      return '运行中';
-    case 'exited':
-      return '已退出';
-    case 'stopped':
-      return '已停止';
-    case 'crashed':
-      return '异常退出';
-    case 'starting':
-      return '启动中';
-    default:
-      return value ?? '';
-  }
-}
-
-String _sessionStateLabel(String? value) {
-  switch (value) {
-    case 'active':
-      return '会话活跃';
-    case 'standby':
-      return '会话待机';
-    case 'resumable':
-      return '可恢复';
-    case 'missing':
-      return '会话缺失';
-    case 'broken':
-      return '会话异常';
-    case 'none':
-      return '无会话';
-    default:
-      return value ?? '';
-  }
-}
-
-String _providerStateLabel(String? value) {
-  switch (value) {
-    case 'synced':
-      return 'Provider 已同步';
-    case 'drifted':
-      return 'Provider 漂移';
-    case 'unknown':
-      return 'Provider 未知';
-    default:
-      return value ?? '';
-  }
-}
-
-String _sessionControlLabel(String? value) {
-  switch (value) {
-    case 'managed':
-      return '已托管';
-    case 'attachable':
-      return '可附加';
-    case 'rebindable':
-      return '可重绑';
-    case 'read_only':
-      return '只读';
-    case 'unavailable':
-      return '不可接管';
-    default:
-      return value ?? '';
-  }
 }
 
 class _HealthIndicator extends ConsumerWidget {
