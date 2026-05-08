@@ -365,7 +365,7 @@ func (w *OpenCodeDBWatcher) refreshSession() {
 	var latestSessionID string
 	err = db.QueryRow(`
 		SELECT id FROM session
-		WHERE directory = ?
+		WHERE directory = ? AND parent_id IS NULL
 		ORDER BY time_updated DESC
 		LIMIT 1`, w.workDir).Scan(&latestSessionID)
 	if err != nil || latestSessionID == "" || latestSessionID == w.sessionID {
