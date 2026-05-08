@@ -123,7 +123,7 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 		if params != nil {
 			status = params["status"]
 		}
-		enriched := (&handler{server: srv}).statusChangedParams(agentID, status)
+		enriched := (&handler{server: srv, service: NewAgentService()}).statusChangedParams(agentID, status)
 		if params != nil {
 			if name, ok := params["name"]; ok {
 				enriched["name"] = name
@@ -198,7 +198,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	h := &handler{server: s, conn: conn, self: c}
+	h := &handler{server: s, conn: conn, self: c, service: NewAgentService()}
 	h.loop()
 }
 

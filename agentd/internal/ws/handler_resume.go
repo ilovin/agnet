@@ -112,7 +112,7 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	// Extract model from agent args (set by resolveLaunch via -m flag)
-	currentModel := currentOpenCodeModel(ag.Args)
+	currentModel := h.service.CurrentOpenCodeModel(ag.Args)
 
 	// Start OpenCode resume process in background
 	go func() {

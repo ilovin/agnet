@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,9 +23,10 @@ import (
 )
 
 type handler struct {
-	server *Server
-	conn   *websocket.Conn
-	self   *client
+	server  *Server
+	conn    *websocket.Conn
+	self    *client
+	service AgentService
 }
 
 type providerSnapshot struct {
@@ -227,7 +227,7 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 			ProviderScope:          provider.ProviderScope,
 			ProviderWriteMode:      provider.ProviderWriteMode,
 			ProviderReadOnlyReason: provider.ProviderReadOnlyReason,
-			PermissionMode:         currentPermissionMode(ag.Args),
+			PermissionMode:         h.service.CurrentPermissionMode(ag.Args),
 			LastMessageTime:        lastMsgTimeMs,
 		})
 	}
@@ -261,7 +261,7 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 		_ = json.Unmarshal(b, &args)
 	}
 
-	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model, "")
+	provider, cmd, args, env := h.service.ResolveLaunch(provider, cmd, args, sessionID, model, "")
 
 	if workDir == "" {
 		home, err := os.UserHomeDir()
@@ -282,120 +282,6 @@ func (h *handler) createAgent(req RPCRequest) (string, error) {
 		}
 	}
 	return id, nil
-}
-
-// findExecutable searches for a binary in PATH and common user-local locations.
-// When agentd runs as root, user-installed binaries (e.g. ~/.opencode/bin/opencode)
-// are not in root's PATH, so we check /home/*/ directories as well.
-func findExecutable(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
-		return p
-	}
-	// Scan /home/*/ for common install locations
-	if entries, err := os.ReadDir("/home"); err == nil {
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			candidates := []string{
-				filepath.Join("/home", e.Name(), ".local", "bin", name),
-				filepath.Join("/home", e.Name(), "."+name, "bin", name),
-				filepath.Join("/home", e.Name(), "bin", name),
-			}
-			for _, c := range candidates {
-				if _, err := os.Stat(c); err == nil {
-					return c
-				}
-			}
-		}
-	}
-	return name // fallback to bare name
-}
-
-// currentPermissionMode extracts the --permission-mode value from args.
-func currentPermissionMode(args []string) string {
-	for i, a := range args {
-		if a == "--permission-mode" && i+1 < len(args) {
-			return args[i+1]
-		}
-		if a == "--dangerously-skip-permissions" {
-			return "bypassPermissions"
-		}
-	}
-	return ""
-}
-
-// currentOpenCodeModel extracts the -m value from opencode args.
-func currentOpenCodeModel(args []string) string {
-	for i, a := range args {
-		if a == "-m" && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
-}
-
-func resolveLaunch(provider, cmd string, args []string, sessionID, model, permissionMode string) (string, string, []string, []string) {
-	resolvedProvider := provider
-	resolvedCmd := cmd
-	resolvedArgs := append([]string{}, args...)
-	var env []string
-
-	switch provider {
-	case "opencode":
-		resolvedCmd = findExecutable("opencode")
-		resolvedArgs = []string{}
-		if sessionID != "" {
-			resolvedArgs = []string{"-s", sessionID}
-		}
-		if model != "" {
-			resolvedArgs = append(resolvedArgs, "-m", model)
-		}
-	case "claude", "claude-bedrock", "claude-vertex":
-		resolvedCmd = findExecutable("claude")
-		// -p enables non-interactive print mode where --output-format works
-		// --output-format stream-json gives us structured events for permission handling
-		// --verbose is required for stream-json to work with -p
-		// This is the proper non-interactive mode that avoids TUI menus
-		resolvedArgs = []string{
-			"-p",
-			"--permission-mode", "bypassPermissions",
-			"--output-format", "stream-json",
-			"--include-partial-messages",
-			"--verbose",
-		}
-		if permissionMode != "" {
-			resolvedArgs[2] = permissionMode
-		}
-		if sessionID != "" {
-			resolvedArgs = append(resolvedArgs, "--resume", sessionID)
-		}
-		if model != "" {
-			resolvedArgs = append(resolvedArgs, "--model", model)
-		}
-		// Provider-specific environment variables
-		switch provider {
-		case "claude-bedrock":
-			env = append(env, "CLAUDE_CODE_USE_BEDROCK=1")
-			resolvedProvider = "claude"
-		case "claude-vertex":
-			env = append(env, "CLAUDE_CODE_USE_VERTEX=1")
-			resolvedProvider = "claude"
-		}
-	default:
-		if resolvedCmd == "" {
-			resolvedCmd = "claude"
-			resolvedArgs = []string{"--permission-mode", "bypassPermissions"}
-			if sessionID != "" {
-				resolvedArgs = append(resolvedArgs, "--resume", sessionID)
-			}
-			if model != "" {
-				resolvedArgs = append(resolvedArgs, "--model", model)
-			}
-		}
-	}
-
-	return resolvedProvider, resolvedCmd, resolvedArgs, env
 }
 
 func (h *handler) sessionList(req RPCRequest) RPCResponse {
@@ -577,7 +463,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	// For attached agents with a model change, update settings.json without
 	// restarting the process. Claude reads settings dynamically.
 	if ag.Provider == "claude" && ag.AttachMode() != "" && modelSpecified && !providerSpecified && permissionMode == "" {
-		settingsPath := findClaudeSettings()
+		settingsPath := h.service.FindClaudeSettings()
 		if settingsPath == "" {
 			return errResp(req.ID, -32000, "settings.json not found"), nil
 		}
@@ -646,7 +532,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 		}
 		// Preserve conversation via --resume
 		resumeSessionID, _ := h.server.manager.GetResumeSessionID(id)
-		provider, cmd, args, env = resolveLaunch(launchProvider, ag.Cmd, ag.Args, resumeSessionID, model, permissionMode)
+		provider, cmd, args, env = h.service.ResolveLaunch(launchProvider, ag.Cmd, ag.Args, resumeSessionID, model, permissionMode)
 	}
 
 	// Restart in-place to keep the same agent ID and conversation history
@@ -908,8 +794,8 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 
 	// Build args with resume session ID for conversation continuity.
 	// Preserve the current permission mode from agent's existing args.
-	mode := currentPermissionMode(ag.Args)
-	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
+	mode := h.service.CurrentPermissionMode(ag.Args)
+	provider, cmd, args, env := h.service.ResolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	// Append --file flags for image attachments
 	for _, f := range imageFiles {
@@ -980,8 +866,8 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 
 	// Build args with the message as input.
 	// Preserve the current permission mode from agent's existing args.
-	mode := currentPermissionMode(ag.Args)
-	provider, cmd, args, env := resolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
+	mode := h.service.CurrentPermissionMode(ag.Args)
+	provider, cmd, args, env := h.service.ResolveLaunch(ag.Provider, ag.Cmd, ag.Args, resumeSessionID, "", mode)
 
 	// Append --file flags for image attachments
 	for _, f := range imageFiles {
@@ -1512,62 +1398,8 @@ func findCCSwitchDB() string {
 	return ""
 }
 
-func findClaudeSettings() string {
-	home, _ := os.UserHomeDir()
-	candidates := []string{filepath.Join(home, ".claude", "settings.json")}
-	if entries, err := os.ReadDir("/home"); err == nil {
-		for _, e := range entries {
-			if e.IsDir() {
-				candidates = append(candidates, filepath.Join("/home", e.Name(), ".claude", "settings.json"))
-			}
-		}
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
-	return ""
-}
-
-func providerIDFromConfig(configJSON string, runtimeEnv map[string]any, runtimeModel string) string {
-	if configJSON == "" {
-		return ""
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
-		return ""
-	}
-	cfgEnv, _ := cfg["env"].(map[string]any)
-	providerURL, _ := cfgEnv["ANTHROPIC_BASE_URL"].(string)
-	providerToken, _ := cfgEnv["ANTHROPIC_AUTH_TOKEN"].(string)
-	providerModel, _ := cfg["model"].(string)
-	if providerModel == "" {
-		providerModel, _ = cfgEnv["ANTHROPIC_MODEL"].(string)
-	}
-
-	actualURL, _ := runtimeEnv["ANTHROPIC_BASE_URL"].(string)
-	actualToken, _ := runtimeEnv["ANTHROPIC_AUTH_TOKEN"].(string)
-	actualModel := runtimeModel
-	if actualModel == "" {
-		actualModel, _ = runtimeEnv["ANTHROPIC_MODEL"].(string)
-	}
-
-	if providerURL != "" && providerURL != actualURL {
-		return ""
-	}
-	if providerToken != "" && providerToken != actualToken {
-		return ""
-	}
-	if providerModel != "" && providerModel != actualModel {
-		return ""
-	}
-	id, _ := cfg["id"].(string)
-	return id
-}
-
-func runtimeProviderFromRows(rows []map[string]any) (string, string) {
-	settingsPath := findClaudeSettings()
+func (h *handler) runtimeProviderFromRows(rows []map[string]any) (string, string) {
+	settingsPath := h.service.FindClaudeSettings()
 	if settingsPath == "" {
 		return "", "settings.json not found"
 	}
@@ -1592,7 +1424,7 @@ func runtimeProviderFromRows(rows []map[string]any) (string, string) {
 		}
 		cfg["id"] = r["id"]
 		mergedConfig, _ := json.Marshal(cfg)
-		if id := providerIDFromConfig(string(mergedConfig), runtimeEnv, runtimeModel); id != "" {
+		if id := h.service.ProviderIDFromConfig(string(mergedConfig), runtimeEnv, runtimeModel); id != "" {
 			return id, "matched by settings.json env"
 		}
 	}
@@ -1647,7 +1479,7 @@ func (h *handler) cachedProviderData() ([]map[string]any, RPCResponse, bool, str
 	var currentID, currentReason, runtimeID, runtimeReason string
 	if ok {
 		currentID, currentReason = currentProviderFromRows(rows)
-		runtimeID, runtimeReason = runtimeProviderFromRows(rows)
+		runtimeID, runtimeReason = h.runtimeProviderFromRows(rows)
 	}
 	h.server.providerCache.rows = rows
 	h.server.providerCache.resp = resp
@@ -1785,7 +1617,7 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 		}
 		mode := ag.CurrentPermissionMode()
 		if mode == "" {
-			mode = currentPermissionMode(ag.Args)
+			mode = h.service.CurrentPermissionMode(ag.Args)
 		}
 		params["permissionMode"] = mode
 		provider := h.deriveProviderSnapshot(ag)
@@ -1900,7 +1732,7 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 		return errResp(req.ID, -32000, "parse provider config: "+err.Error()), nil
 	}
 
-	settingsPath := findClaudeSettings()
+	settingsPath := h.service.FindClaudeSettings()
 	if settingsPath == "" {
 		// Create settings.json in the default location
 		home, _ := os.UserHomeDir()
@@ -1979,8 +1811,8 @@ func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
 	var afterSend func()
 	if targetAgent != nil {
 		resumeSessionID, _ := h.server.manager.GetResumeSessionID(agentID)
-		mode := currentPermissionMode(targetAgent.Args)
-		provider, cmd, args, env := resolveLaunch("claude", targetAgent.Cmd, targetAgent.Args, resumeSessionID, model, mode)
+		mode := h.service.CurrentPermissionMode(targetAgent.Args)
+		provider, cmd, args, env := h.service.ResolveLaunch("claude", targetAgent.Cmd, targetAgent.Args, resumeSessionID, model, mode)
 		if err := h.server.manager.RestartInPlace(agentID, provider, cmd, args, env); err != nil {
 			log.Printf("[providerSwitch] restart agent %s: %v", agentID, err)
 		} else {

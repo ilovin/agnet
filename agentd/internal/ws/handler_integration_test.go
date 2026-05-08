@@ -15,7 +15,7 @@ import (
 
 // testHandler creates a handler backed by the given server for direct dispatch testing.
 func testHandler(srv *Server) *handler {
-	return &handler{server: srv}
+	return &handler{server: srv, service: NewAgentService()}
 }
 
 // TestAgentListShowsHasHistoryAfterAttach validates the full end-to-end pipeline
