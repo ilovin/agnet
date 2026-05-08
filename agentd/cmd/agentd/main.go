@@ -187,7 +187,7 @@ func runServer() {
 		w.Write(buf[:sz])
 	})
 
-	srv := ws.New(mgr, cfg.Token)
+	srv := ws.New(mgr, cfg.Token, cfg.NodeID)
 
 	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

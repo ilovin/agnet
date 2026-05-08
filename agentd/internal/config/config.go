@@ -15,6 +15,7 @@ type Config struct {
 	Port    int    `json:"port"`
 	Token   string `json:"token"`
 	DataDir string `json:"data_dir"`
+	NodeID  string `json:"node_id"`
 }
 
 // Load reads config from path. If the file doesn't exist, returns defaults and
@@ -30,6 +31,7 @@ func Load(path string) (*Config, error) {
 			Port:    7373,
 			DataDir: filepath.Join(home, ".agentd", "data"),
 			Token:   randomToken(),
+			NodeID:  "local",
 		}
 		if err2 := os.MkdirAll(filepath.Dir(path), 0700); err2 != nil {
 			return nil, fmt.Errorf("mkdir config dir: %w", err2)

@@ -27,7 +27,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *ws.Server) {
 	t.Helper()
 	s, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	mgr := agent.NewManager(s, t.TempDir())
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); s.Close() })
 	return ts, srv
@@ -266,7 +266,7 @@ func TestAgentListKeepsDistinctPIDsForSharedSession(t *testing.T) {
 		t.Fatalf("attach second agent: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -411,7 +411,7 @@ func TestAgentListIncludesReadOnlyForAttachedAgents(t *testing.T) {
 		t.Fatalf("attach failed: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -541,7 +541,7 @@ func TestAgentStatusChangedEventUsesSharedProviderCacheForManagerCallbacks(t *te
 		t.Fatalf("create agent: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -696,7 +696,7 @@ func TestProviderSwitchRejectsReadOnlyAttachedAgent(t *testing.T) {
 		t.Fatalf("attach failed: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -752,7 +752,7 @@ func TestProviderSwitchRejectsInheritedScope(t *testing.T) {
 		t.Fatalf("update child resume session: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -989,7 +989,7 @@ func TestConversationSendRejectsWatcherAttach(t *testing.T) {
 		t.Fatalf("attach failed: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1047,7 +1047,7 @@ func TestAgentRestartAttachedModelUpdateWritesSettings(t *testing.T) {
 		t.Fatalf("attach failed: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1102,7 +1102,7 @@ func TestAgentRestartAttachedOpenCodeUsesRestartInPlace(t *testing.T) {
 	}
 	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1167,7 +1167,7 @@ func TestAgentRestartAttachedOpenCodeWatcherModeAllowsModelSwitch(t *testing.T) 
 	}
 	ag.SetAttachInputRoute("watcher", true, "watch-only attach", "")
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1218,7 +1218,7 @@ func TestAgentRestartRejectsWatcherAttach(t *testing.T) {
 		t.Fatalf("attach failed: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1350,7 +1350,7 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 			{PID: teamChildPID, Provider: "claude", WorkDir: repoDir},
 		}, nil
 	})
-	server := ws.New(mgr, "testtoken")
+	server := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(server)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1510,7 +1510,7 @@ func TestAgentListExcludesSubAgents(t *testing.T) {
 		t.Fatalf("update sub-agent resume session: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()
@@ -1594,7 +1594,7 @@ func TestSessionCatalogExcludesSubAgents(t *testing.T) {
 		t.Fatalf("update sub-agent resume session: %v", err)
 	}
 
-	srv := ws.New(mgr, "testtoken")
+	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
 		ts.Close()

@@ -234,7 +234,7 @@ func TestStatusChangedParamsIncludesLastMessageTime(t *testing.T) {
 	}
 
 	// 4. Create a WS handler with the manager via a test Server
-	srv := New(mgr, "testtoken")
+	srv := New(mgr, "testtoken", "testnode")
 	h := &handler{server: srv}
 
 	// 5. Call statusChangedParams for the attached agent
@@ -299,7 +299,7 @@ func TestConversationClearResetsState(t *testing.T) {
 		t.Fatalf("setup failed: expected working status")
 	}
 
-	srv := New(mgr, "testtoken")
+	srv := New(mgr, "testtoken", "testnode")
 	h := &handler{server: srv}
 
 	resp := h.conversationClear(RPCRequest{

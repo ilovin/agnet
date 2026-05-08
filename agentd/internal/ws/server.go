@@ -57,6 +57,7 @@ type providerDataCache struct {
 type Server struct {
 	manager *agent.Manager
 	token   string
+	nodeID  string
 
 	mu      sync.RWMutex
 	clients map[*websocket.Conn]*client
@@ -65,10 +66,14 @@ type Server struct {
 	providerDBMu  sync.Mutex
 }
 
-func New(mgr *agent.Manager, token string) *Server {
+func New(mgr *agent.Manager, token string, nodeID string) *Server {
+	if nodeID == "" {
+		nodeID = "local"
+	}
 	srv := &Server{
 		manager:       mgr,
 		token:         token,
+		nodeID:        nodeID,
 		clients:       make(map[*websocket.Conn]*client),
 		providerCache: providerDataCache{},
 	}

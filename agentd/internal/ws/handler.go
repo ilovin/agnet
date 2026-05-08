@@ -695,6 +695,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 		if err := ag.WriteInput("\t"); err != nil {
 			return errResp(req.ID, -32000, "write tab: "+err.Error()), nil
 		}
+		ag.SetCurrentPermissionMode(permissionMode)
 		return okResp(req.ID, map[string]any{"id": id}), nil
 	}
 
@@ -713,6 +714,7 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 		if err := ag.WriteInput("\x1b[Z"); err != nil {
 			return errResp(req.ID, -32000, "write shift-tab: "+err.Error()), nil
 		}
+		ag.SetCurrentPermissionMode(permissionMode)
 		return okResp(req.ID, map[string]any{"id": id}), nil
 	}
 
@@ -2021,7 +2023,10 @@ func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
 }
 
 func (h *handler) statusChangedParams(agentID string, status any) map[string]any {
-	params := map[string]any{"agentId": agentID}
+	params := map[string]any{
+		"agentId": agentID,
+		"nodeId":  h.server.nodeID,
+	}
 	ag := h.server.manager.Get(agentID)
 	if status != nil {
 		switch v := status.(type) {
@@ -2058,7 +2063,11 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 		if reason := ag.AttachReadOnlyReason(); reason != "" {
 			params["readOnlyReason"] = reason
 		}
-		params["permissionMode"] = currentPermissionMode(ag.Args)
+		mode := ag.CurrentPermissionMode()
+		if mode == "" {
+			mode = currentPermissionMode(ag.Args)
+		}
+		params["permissionMode"] = mode
 		provider := h.deriveProviderSnapshot(ag)
 		params["providerState"] = provider.ProviderState
 		params["providerScope"] = provider.ProviderScope

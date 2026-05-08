@@ -65,7 +65,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	defer s.Close()
 	mgr := agent.NewManager(s, t.TempDir())
-	srv := ws.New(mgr, "e2etoken")
+	srv := ws.New(mgr, "e2etoken", "e2enode")
 
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
@@ -121,7 +121,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	defer s.Close()
 	mgr := agent.NewManager(s, t.TempDir())
-	srv := ws.New(mgr, "lifecycletoken")
+	srv := ws.New(mgr, "lifecycletoken", "lifecyclenode")
 
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
