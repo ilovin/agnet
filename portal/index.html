@@ -441,11 +441,28 @@
             statusEl.className = 'local-gw-status success';
         }
 
-        function onLocalQRError() {
+        const GW_PORTS = [7374, 17374];
+        let currentPortIndex = 0;
+
+        function onLocalQRLoad() {
             const statusEl = document.getElementById('local-gw-status');
-            statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
-            statusEl.className = 'local-gw-status error';
-            document.getElementById('qr-local-container').style.display = 'none';
+            statusEl.textContent = '已检测到本地网关，请使用 PhoneTalk App 扫描二维码';
+            statusEl.className = 'local-gw-status success';
+        }
+
+        function onLocalQRError() {
+            currentPortIndex++;
+            if (currentPortIndex < GW_PORTS.length) {
+                const localImg = document.getElementById('qr-local');
+                const remoteImg = document.getElementById('qr-remote');
+                localImg.src = 'http://localhost:' + GW_PORTS[currentPortIndex] + '/qr.png?type=local&t=' + Date.now();
+                remoteImg.src = 'http://localhost:' + GW_PORTS[currentPortIndex] + '/qr.png?type=remote&t=' + Date.now();
+            } else {
+                const statusEl = document.getElementById('local-gw-status');
+                statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
+                statusEl.className = 'local-gw-status error';
+                document.getElementById('qr-local-container').style.display = 'none';
+            }
         }
 
         function onRemoteQRLoad() {
@@ -456,7 +473,7 @@
             document.getElementById('qr-remote-container').style.display = 'none';
         }
 
-        async function tryConnectLocalGW() {
+        function tryConnectLocalGW() {
             const statusEl = document.getElementById('local-gw-status');
             const qrDisplay = document.getElementById('local-qr-display');
             statusEl.textContent = '正在检测本地网关...';
@@ -465,36 +482,11 @@
             document.getElementById('qr-local-container').style.display = 'inline-block';
             document.getElementById('qr-remote-container').style.display = 'none';
 
-            // Probe common ports to find running agentgw
-            const ports = [7374, 17374];
-            let workingPort = null;
-            for (const port of ports) {
-                try {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 1500);
-                    const resp = await fetch('http://localhost:' + port + '/qr.png?type=local', {
-                        signal: controller.signal
-                    });
-                    clearTimeout(timeoutId);
-                    if (resp.ok) {
-                        workingPort = port;
-                        break;
-                    }
-                } catch (e) {
-                    // port not reachable, try next
-                }
-            }
-
+            currentPortIndex = 0;
             const localImg = document.getElementById('qr-local');
             const remoteImg = document.getElementById('qr-remote');
-            if (workingPort) {
-                localImg.src = 'http://localhost:' + workingPort + '/qr.png?type=local&t=' + Date.now();
-                remoteImg.src = 'http://localhost:' + workingPort + '/qr.png?type=remote&t=' + Date.now();
-            } else {
-                // Fallback to default port so onerror fires and shows friendly message
-                localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
-                remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
-            }
+            localImg.src = 'http://localhost:' + GW_PORTS[0] + '/qr.png?type=local&t=' + Date.now();
+            remoteImg.src = 'http://localhost:' + GW_PORTS[0] + '/qr.png?type=remote&t=' + Date.now();
         }
     </script>
 </body>
