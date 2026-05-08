@@ -355,6 +355,10 @@ func rotateToken(existingToken string) {
 func staticHandler(root string) http.Handler {
 	fs := http.FileServer(http.Dir(root))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
 		path := r.URL.Path
 		if path == "/" || path == "/index.html" {
 			indexPath := filepath.Join(root, "index.html")
