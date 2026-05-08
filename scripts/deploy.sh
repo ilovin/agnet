@@ -381,14 +381,19 @@ deploy_portal() {
     fi
 
     local portal_src="./out/portal"
-    if [[ ! -d "$portal_src" ]]; then
-        echo "[deploy-portal] Portal not built, building now..."
-        build_portal || return 1
-    fi
+    # Always rebuild portal to avoid stale cached output
+    rm -rf "$portal_src"
+    build_portal || return 1
 
     echo "[deploy-portal] Deploying portal to $RELEASE_REMOTE_HOST:$PORTAL_REMOTE_DIR..."
-    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "mkdir -p '$PORTAL_REMOTE_DIR'" || return 1
-    scp -o ConnectTimeout=5 -r "$portal_src/"* "$RELEASE_REMOTE_HOST:$PORTAL_REMOTE_DIR/" || return 1
+    # Upload to tmp — PORTAL_REMOTE_DIR may be owned by root
+    local tmpdir="/tmp/phone-talk-portal-$$"
+    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "rm -rf '$tmpdir' && mkdir -p '$tmpdir'" || return 1
+    scp -o ConnectTimeout=5 -r "$portal_src/"* "$RELEASE_REMOTE_HOST:$tmpdir/" || return 1
+    ssh -o ConnectTimeout=5 "$RELEASE_REMOTE_HOST" "
+        sudo rm -rf '$PORTAL_REMOTE_DIR' && sudo mkdir -p '$PORTAL_REMOTE_DIR' && \
+        sudo cp -r '$tmpdir/'* '$PORTAL_REMOTE_DIR/' && rm -rf '$tmpdir'
+    " || return 1
 
     echo "[deploy-portal] Portal deployed successfully"
 }
@@ -408,7 +413,9 @@ deploy_api_service() {
 
     echo "[deploy-api] Deploying API service to $API_REMOTE_HOST:$API_REMOTE_DIR..."
     ssh -o ConnectTimeout=5 "$API_REMOTE_HOST" "mkdir -p '$API_REMOTE_DIR'" || return 1
-    scp -o ConnectTimeout=5 "./api/api-server" "$API_REMOTE_HOST:$API_REMOTE_DIR/" || return 1
+    # Upload to temp first — API_REMOTE_DIR may be owned by root (systemd User=root)
+    scp -o ConnectTimeout=5 "./api/api-server" "$API_REMOTE_HOST:/tmp/api-server" || return 1
+    ssh -o ConnectTimeout=5 "$API_REMOTE_HOST" "sudo mv /tmp/api-server '$API_REMOTE_DIR/api-server' && sudo chmod +x '$API_REMOTE_DIR/api-server'" || return 1
 
     # Create systemd service file
     local service_file="/tmp/phonetalk-api.service"
@@ -606,6 +613,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ./scripts/release.sh
             ;;
         deploy-release)
+            echo "[deploy] Building release..."
+            ./scripts/release.sh --skip-ios
             echo "[deploy] Deploying release artifacts + portal + API..."
             deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
             deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }

@@ -32,6 +32,7 @@ done
 BIN_DIR="$PACKAGE_ROOT/bin"
 OUT_DIR="${REPO_ROOT:+$REPO_ROOT/out}"
 INSTALL_DIR="$HOME/.agentgw"
+CACHE_DIR="$INSTALL_DIR/cache"
 RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
@@ -125,10 +126,10 @@ case "$SUBCMD" in
 esac
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
-info()  { echo -e "${GREEN}✅ $*${NC}"; }
-warn()  { echo -e "${YELLOW}⚠️  $*${NC}"; }
-step()  { echo -e "${CYAN}⚙️  $*${NC}"; }
-  err()   { echo -e "${RED}❌ $*${NC}"; }
+info()  { echo -e "${GREEN}✅ $*${NC}" >&2; }
+warn()  { echo -e "${YELLOW}⚠️  $*${NC}" >&2; }
+step()  { echo -e "${CYAN}⚙️  $*${NC}" >&2; }
+err()   { echo -e "${RED}❌ $*${NC}" >&2; }
 
 # Read a line interactively. Falls back to default when no TTY is available.
 INTERACTIVE=true
@@ -168,152 +169,185 @@ detect_platform() {
 # ── Manifest helpers ───────────────────────────────────────────────
 download_manifest() {
   local manifest_url="${1:-https://api.ilovin.xyz/v1/release/latest}"
-  local tmpfile="/tmp/phone-talk-manifest-$$.json"
+  mkdir -p "$CACHE_DIR"
+  local cached="$CACHE_DIR/manifest.json"
+  local tmpfile="$CACHE_DIR/manifest.json.tmp"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL "$manifest_url" -o "$tmpfile" 2>/dev/null; then
-      echo "$tmpfile"
+      mv "$tmpfile" "$cached"
+      echo "$cached"
       return 0
     fi
-    rm -f "$tmpfile"
   fi
   if command -v wget >/dev/null 2>&1; then
     if wget -q "$manifest_url" -O "$tmpfile" 2>/dev/null; then
-      echo "$tmpfile"
+      mv "$tmpfile" "$cached"
+      echo "$cached"
       return 0
     fi
-    rm -f "$tmpfile"
   fi
   if command -v python3 >/dev/null 2>&1; then
     if python3 -c "import urllib.request; urllib.request.urlretrieve('$manifest_url', '$tmpfile')" 2>/dev/null; then
-      echo "$tmpfile"
+      mv "$tmpfile" "$cached"
+      echo "$cached"
       return 0
     fi
-    rm -f "$tmpfile"
+  fi
+  rm -f "$tmpfile"
+  # Fallback to stale cached manifest
+  if [[ -f "$cached" ]]; then
+    warn "无法下载 manifest，使用本地缓存"
+    echo "$cached"
+    return 0
   fi
   err "需要 curl、wget 或 python3 来下载 manifest (https://api.ilovin.xyz/v1/release/latest)"
   return 1
 }
 
-# Download an artifact from manifest by name. Saves to $2.
-download_artifact() {
-  local name="$1" dest="$2"
-  local platform
-  platform="$(detect_platform)"
-  if [[ "$platform" == "unsupported" ]]; then
-    err "不支持的平台: $(uname -s) $(uname -m)"
+# Compute sha256 of a file. Returns empty string on failure.
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  fi
+}
+
+# Resolve artifact info (url, sha256) from manifest via Python.
+# Usage: resolve_manifest_info <manifest_file> <name> <platform>
+# Prints two lines: url and sha256 (either may be empty).
+resolve_manifest_info() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+m_path, name, plat = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(m_path) as f:
+    m = json.load(f)
+for a in m.get('artifacts', []):
+    if a.get('name') != name:
+        continue
+    for p in a.get('platforms', []):
+        if f"{p['os']}-{p['arch']}" == plat:
+            print(p.get('url', ''))
+            print(p.get('sha256', ''))
+            sys.exit(0)
+PY
+}
+
+# Download a URL to a file. Tries curl, wget, python3 in order.
+_download_file() {
+  local url="$1" dest="$2"
+  local download_ok=false
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then download_ok=true; fi
+  fi
+  if [[ "$download_ok" != true ]] && command -v wget >/dev/null 2>&1; then
+    if wget -q "$url" -O "$dest" 2>/dev/null; then download_ok=true; fi
+  fi
+  if [[ "$download_ok" != true ]] && command -v python3 >/dev/null 2>&1; then
+    if python3 -c "import urllib.request; urllib.request.urlretrieve('$url', '$dest')" 2>/dev/null; then download_ok=true; fi
+  fi
+  if [[ "$download_ok" != true ]]; then
+    rm -f "$dest"
     return 1
+  fi
+  return 0
+}
+
+# Download an artifact from manifest by name. Saves to $2.
+# Optional $3: platform override (e.g. "linux-amd64").
+# Uses $CACHE_DIR for caching; skips download if cached file matches sha256.
+download_artifact() {
+  local name="$1" dest="$2" platform="${3:-}"
+  if [[ -z "$platform" ]]; then
+    platform="$(detect_platform)"
+    if [[ "$platform" == "unsupported" ]]; then
+      err "不支持的平台: $(uname -s) $(uname -m)"
+      return 1
+    fi
   fi
 
   local manifest_file
   manifest_file="$(download_manifest)" || return 1
-  trap 'rm -f "$manifest_file"' EXIT
 
-  local py_script="/tmp/phone-talk-artifact-$$.py"
-  cat > "$py_script" <<PY
-import json,sys
-m=json.load(open(sys.argv[1]))
-plat=sys.argv[2]
-name=sys.argv[3]
-for a in m.get('artifacts',[]):
-    if a.get('name') != name:
-        continue
-    for p in a.get('platforms',[]):
-        if f"{p['os']}-{p['arch']}"==plat:
-            print(p.get('url',''))
-            break
-PY
-  local artifact_url
-  artifact_url="$(python3 "$py_script" "$manifest_file" "$platform" "$name" 2>/dev/null || true)"
-  rm -f "$py_script"
+  # Resolve url + sha256 from manifest
+  local info
+  info="$(resolve_manifest_info "$manifest_file" "$name" "$platform")" || true
+  local artifact_url artifact_sha
+  artifact_url="$(echo "$info" | head -1)"
+  artifact_sha="$(echo "$info" | tail -1)"
 
   if [[ -z "$artifact_url" ]]; then
     warn "未找到 $name ($platform) 的下载包"
     return 1
   fi
 
-  step "下载 $name: $artifact_url"
-  local tmp_bin="/tmp/${name}-download-$$"
-  local download_ok=false
-  if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$artifact_url" -o "$tmp_bin" 2>/dev/null; then
-      download_ok=true
+  # Check cache: if file exists with matching sha256, reuse it
+  mkdir -p "$CACHE_DIR"
+  local cache_key="${name}-${platform}"
+  local cached_file="$CACHE_DIR/$cache_key"
+  if [[ -f "$cached_file" && -n "$artifact_sha" ]]; then
+    local cached_sha
+    cached_sha="$(file_sha256 "$cached_file")"
+    if [[ "$cached_sha" == "$artifact_sha" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      cp "$cached_file" "${dest}.new"
+      mv "${dest}.new" "$dest"
+      chmod +x "$dest"
+      info "$name ($platform) 使用缓存"
+      return 0
     fi
+    # sha mismatch — stale cache, re-download
+    warn "$name ($platform) 缓存失效，重新下载"
   fi
-  if [[ "$download_ok" != true ]] && command -v wget >/dev/null 2>&1; then
-    if wget -q "$artifact_url" -O "$tmp_bin" 2>/dev/null; then
-      download_ok=true
-    fi
-  fi
-  if [[ "$download_ok" != true ]] && command -v python3 >/dev/null 2>&1; then
-    if python3 -c "import urllib.request; urllib.request.urlretrieve('$artifact_url', '$tmp_bin')" 2>/dev/null; then
-      download_ok=true
-    fi
-  fi
-  if [[ "$download_ok" != true ]]; then
-    rm -f "$tmp_bin"
+
+  # Download to cache first
+  step "下载 $name ($platform): ${artifact_url##*/}"
+  if ! _download_file "$artifact_url" "$cached_file.tmp"; then
     err "下载失败: $artifact_url"
     return 1
   fi
 
   # Verify checksum
-  local py_script_sha="/tmp/phone-talk-sha-$$.py"
-  cat > "$py_script_sha" <<PY
-import json,sys
-m=json.load(open(sys.argv[1]))
-plat=sys.argv[2]
-name=sys.argv[3]
-for a in m.get('artifacts',[]):
-    if a.get('name') != name:
-        continue
-    for p in a.get('platforms',[]):
-        if f"{p['os']}-{p['arch']}"==plat:
-            print(p.get('sha256',''))
-            break
-PY
-  local artifact_sha
-  artifact_sha="$(python3 "$py_script_sha" "$manifest_file" "$platform" "$name" 2>/dev/null || true)"
-  rm -f "$py_script_sha"
-
   if [[ -n "$artifact_sha" ]]; then
     local actual_sha
-    if command -v sha256sum >/dev/null 2>&1; then
-      actual_sha="$(sha256sum "$tmp_bin" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-      actual_sha="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
-    else
-      actual_sha=""
-    fi
+    actual_sha="$(file_sha256 "$cached_file.tmp")"
     if [[ -n "$actual_sha" && "$actual_sha" != "$artifact_sha" ]]; then
       err "$name 校验失败！expected $artifact_sha, got $actual_sha"
-      rm -f "$tmp_bin"
+      rm -f "$cached_file.tmp"
       return 1
     fi
   fi
 
-  chmod +x "$tmp_bin"
+  mv "$cached_file.tmp" "$cached_file"
+  chmod +x "$cached_file"
+
+  # Copy to destination
   mkdir -p "$(dirname "$dest")"
-  cp "$tmp_bin" "${dest}.new"
+  cp "$cached_file" "${dest}.new"
   mv "${dest}.new" "$dest"
-  rm -f "$tmp_bin"
-  info "$name 下载完成"
+  chmod +x "$dest"
+  info "$name ($platform) 下载完成"
 }
 
 # Update agentgw from manifest
 self_update() {
   step "检查更新..."
   if [[ -x "$INSTALL_DIR/agentgw" ]]; then
-    local current_version latest_version
+    local current_version latest_version manifest_file
     current_version="$("$INSTALL_DIR/agentgw" version 2>/dev/null | awk '{print $2}' || true)"
-    latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)" 2>/dev/null || true
-    if [[ -n "$current_version" && "$current_version" == "$latest_version" ]]; then
-      info "当前已是最新版本: $current_version"
-      return 0
+    manifest_file="$CACHE_DIR/manifest.json"
+    if [[ -f "$manifest_file" ]]; then
+      latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
+      if [[ -n "$current_version" && "$current_version" == "$latest_version" ]]; then
+        info "当前已是最新版本: $current_version"
+        return 0
+      fi
     fi
   fi
   download_artifact agentgw "$INSTALL_DIR/agentgw"
 }
 
-# Download agentd from manifest
+# Download agentd for the current platform from manifest
 download_agentd() {
   download_artifact agentd "$INSTALL_DIR/agentd"
 }
@@ -423,12 +457,52 @@ sync_web_static() {
       break
     fi
   done
-  if [[ -z "$static_src" ]]; then
+  if [[ -n "$static_src" ]]; then
+    rm -rf "$INSTALL_DIR/static"
+    mkdir -p "$INSTALL_DIR/static"
+    cp -R "$static_src/." "$INSTALL_DIR/static/"
+    return
+  fi
+  # Check cache — skip download if already extracted
+  local cache_key="static-tarball"
+  local cached_tar="$CACHE_DIR/$cache_key"
+  local stamp_file="$CACHE_DIR/$cache_key.stamp"
+  local manifest_file
+  manifest_file="$CACHE_DIR/manifest.json"
+  if [[ -f "$manifest_file" ]]; then
+    local version
+    version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
+    if [[ -f "$stamp_file" && "$(cat "$stamp_file")" == "$version" && -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
+      info "Web 控制台使用缓存 (v${version})"
+      return
+    fi
+  fi
+  # Download static tarball
+  step "下载 Web 控制台..."
+  if [[ -z "$version" ]]; then
+    download_manifest >/dev/null || return
+    version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
+  fi
+  if [[ -z "$version" ]]; then
+    warn "无法获取版本号，跳过 Web 控制台下载"
+    return
+  fi
+  local static_url="https://download.ilovin.xyz/${version}/static.tar.gz"
+  if ! _download_file "$static_url" "$cached_tar.tmp"; then
+    warn "Web 控制台下载失败，跳过"
     return
   fi
   rm -rf "$INSTALL_DIR/static"
   mkdir -p "$INSTALL_DIR/static"
-  cp -R "$static_src/." "$INSTALL_DIR/static/"
+  tar xzf "$cached_tar.tmp" -C "$INSTALL_DIR/static" --strip-components=1 2>/dev/null || {
+    rm -rf "$INSTALL_DIR/static"
+    warn "Web 控制台格式异常，跳过"
+    rm -f "$cached_tar.tmp"
+    return
+  }
+  mv "$cached_tar.tmp" "$cached_tar"
+  echo "$version" > "$stamp_file"
+  info "Web 控制台已下载 (v${version})"
 }
 
 # Sync agentgw token into local agentd config so they stay consistent.
@@ -679,23 +753,18 @@ scan_ssh_nodes() {
     case "$line" in
       Host\ *)
         [[ -n "$host" && -n "$hostname" ]] && echo "${host}|${hostname}|${port}"
-        local -a hosts_arr=()
-        local h first_h="" skip=0
-        # Read Host value into array to avoid glob expansion
-        read -r -a hosts_arr <<<"$(echo "$line" | sed 's/^Host[[:space:]]*//')"
-        for h in "${hosts_arr[@]}"; do
-          if [[ "$h" == *[*?]* || "$h" == !* ]]; then
-            skip=1
-            break
-          fi
-          [[ -z "$first_h" ]] && first_h="$h"
+        local host_val first_h="" token
+        host_val="$(echo "$line" | sed 's/^Host[[:space:]]*//')"
+        while [[ -n "$host_val" ]]; do
+          token="${host_val%% *}"
+          [[ "$token" == "$host_val" ]] && host_val="" || host_val="${host_val#* }"
+          case "$token" in
+            *[*?]* | !*) continue ;;
+            *) first_h="$token"; break ;;
+          esac
         done
-        if [[ "$skip" -eq 0 && -n "$first_h" ]]; then
-          host="$first_h"
-        else
-          host=""
-        fi
-        hostname=""; port="22"
+        host="$first_h"
+        hostname="" port="22"
         ;;
       HostName\ *) hostname="$(echo "$line" | sed 's/^HostName[[:space:]]*//')" ;;
       Port\ *)      port="$(echo "$line" | sed 's/^Port[[:space:]]*//')" ;;
@@ -705,28 +774,51 @@ scan_ssh_nodes() {
 }
 
 # ── Deploy agentd to remote ────────────────────────────────────────
+ensure_agentd_linux_binary() {
+  # Try local artifact first (dev builds)
+  local bin
+  bin="$(resolve_artifact "agentd-linux" linux-amd64/agentd agentd-linux 2>/dev/null)" && { echo "$bin"; return 0; }
+  # Download via cache + manifest (linux-amd64)
+  download_artifact agentd "$INSTALL_DIR/agentd-linux" "linux-amd64" && { echo "$INSTALL_DIR/agentd-linux"; return 0; }
+  return 1
+}
+
 deploy_agentd() {
-  local target="$1" port="${2:-22}" token="${3:-}"
+  local target="$1" port="${2:-22}" token="${3:-}" agentd_linux_bin="${4:-}"
+  local ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
   step "部署 agentd → ${target}..."
 
-  if ! ssh -o ConnectTimeout=5 -o BatchMode=yes -p "$port" "$target" "echo ok" &>/dev/null; then
+  if ! ssh "${ssh_opts[@]}" -p "$port" "$target" "echo ok" &>/dev/null; then
     err "SSH 连接失败: ${target}（需要免密登录）"
     return 1
   fi
 
-  local agentd_linux_bin
-  agentd_linux_bin="$(resolve_artifact "agentd-linux" linux-amd64/agentd agentd-linux)" || return 1
+  if [[ -z "$agentd_linux_bin" || ! -f "$agentd_linux_bin" ]]; then
+    err "找不到 agentd linux 二进制文件"
+    return 1
+  fi
 
-  ssh -o ConnectTimeout=5 -p "$port" "$target" "mkdir -p ~/bin" || return 1
-  scp -o ConnectTimeout=5 -P "$port" "$agentd_linux_bin" "${target}:~/bin/agentd-new" || return 1
+  local file_size
+  file_size="$(ls -lh "$agentd_linux_bin" 2>/dev/null | awk '{print $5}' || true)"
+  info "传输文件: ${agentd_linux_bin##*/} (${file_size})"
 
-  ssh -o ConnectTimeout=5 -p "$port" "$target" \
+  ssh "${ssh_opts[@]}" -p "$port" "$target" "mkdir -p ~/bin" || return 1
+  step "传输 ${agentd_linux_bin##*/} → ${target}..."
+  if ! scp "${ssh_opts[@]}" -P "$port" "$agentd_linux_bin" "${target}:~/bin/agentd-new" 2>/dev/null; then
+    step "SCP 不可用，使用 SSH 管道传输..."
+    cat "$agentd_linux_bin" | ssh "${ssh_opts[@]}" -p "$port" "$target" "cat > ~/bin/agentd-new" || {
+      err "传输失败: ${target} — 请检查网络连接和远程磁盘空间"
+      return 1
+    }
+  fi
+
+  ssh "${ssh_opts[@]}" -p "$port" "$target" \
     "pkill -f 'agentd start' 2>/dev/null; sleep 1" || true
 
   # Write remote config.json with the correct token so agentgw can authenticate
   if [[ -n "$token" ]]; then
-    ssh -o ConnectTimeout=5 -p "$port" "$target" "mkdir -p ~/.agentd"
-    ssh -o ConnectTimeout=5 -p "$port" "$target" "python3 -c '
+    ssh "${ssh_opts[@]}" -p "$port" "$target" "mkdir -p ~/.agentd"
+    ssh "${ssh_opts[@]}" -p "$port" "$target" "python3 -c '
 import json, os
 path = os.path.expanduser(\"~/.agentd/config.json\")
 cfg = {\"port\": 7373, \"data_dir\": os.path.expanduser(\"~/.agentd/data\")}
@@ -740,12 +832,12 @@ with open(path, \"w\") as f:
 '"
   fi
 
-  ssh -o ConnectTimeout=5 -o ServerAliveInterval=5 -p "$port" "$target" \
+  ssh "${ssh_opts[@]}" -p "$port" "$target" \
     "mv ~/bin/agentd-new ~/bin/agentd && chmod +x ~/bin/agentd && \
      bash -c 'nohup ~/bin/agentd start > /tmp/agentd.log 2>&1 </dev/null & disown; exit 0'" || true
   sleep 3
 
-  if ssh -o ConnectTimeout=5 -p "$port" "$target" "pgrep -f 'agentd start'" &>/dev/null; then
+  if ssh "${ssh_opts[@]}" -p "$port" "$target" "pgrep -f 'agentd start'" &>/dev/null; then
     info "agentd 已启动: ${target}"
   else
     warn "agentd 可能未启动，检查: ssh ${target} tail /tmp/agentd.log"
@@ -895,7 +987,7 @@ if ! $LOCAL_ONLY; then
     echo -e "${CYAN}📱 发现远程节点:${NC}"
     IDX=1
     while IFS='|' read -r alias host port; do
-      [[ -z "$alias" || -z "$host" || "$alias" == *[*?]* || "$alias" == !* || "$host" == "127.0.0.1" || "$host" == "localhost" ]] && continue
+      [[ -z "$alias" || -z "$host" || "$alias" == *[*?]* || "$alias" == !* || "$host" == *[*?]* || "$host" == "127.0.0.1" || "$host" == "localhost" ]] && continue
       echo "  [$IDX] ${alias} (${host}:${port})"
       NODES+=("$alias"); NODE_HOSTS+=("$host"); NODE_PORTS+=("$port")
       IDX=$((IDX + 1))
@@ -906,16 +998,37 @@ if ! $LOCAL_ONLY; then
     warn "未在 ~/.ssh/config 发现远程节点"
   fi
 
+  # Collect selected nodes into SELECTED_NODES regardless of deploy success
+  SELECTED_NODES=()
   if [[ -n "$SELECTION" && "$SELECTION" != "0" ]]; then
     for idx in $(echo "$SELECTION" | tr ',' ' '); do
       idx="$(echo "$idx" | tr -d ' ')"
       if [[ "$idx" -ge 1 && "$idx" -le "${#NODES[@]}" ]]; then
-        if deploy_agentd "${NODES[$((idx-1))]}" "${NODE_PORTS[$((idx-1))]}" "$TOKEN"; then
-          DEPLOYED_NODES+=("${NODES[$((idx-1))]}|${NODE_HOSTS[$((idx-1))]}|${NODE_PORTS[$((idx-1))]}")
-        fi
+        SELECTED_NODES+=("${NODES[$((idx-1))]}|${NODE_HOSTS[$((idx-1))]}|${NODE_PORTS[$((idx-1))]}")
       fi
     done
   fi
+
+  # Deploy to selected nodes
+  if [[ ${#SELECTED_NODES[@]} -gt 0 ]]; then
+    local_agentd_linux_bin=""
+    local_agentd_linux_bin="$(ensure_agentd_linux_binary)" || {
+      warn "无法获取 agentd linux 二进制，跳过远程部署"
+      local_agentd_linux_bin=""
+    }
+
+    for node_info in "${SELECTED_NODES[@]}"; do
+      IFS='|' read -r alias host port <<< "$node_info"
+      if [[ -n "$local_agentd_linux_bin" ]]; then
+        deploy_agentd "$alias" "$port" "$TOKEN" "$local_agentd_linux_bin" || warn "部署 ${alias} 失败，但节点仍会添加到配置"
+      else
+        warn "跳过 ${alias} 部署（无 agentd linux 二进制），节点仍会添加到配置"
+      fi
+    done
+  fi
+
+  # All selected nodes go into config.json
+  DEPLOYED_NODES=("${SELECTED_NODES[@]}")
 fi
 
 # ── 3. Resolve tunnel settings / registration ──────────────────────

@@ -359,6 +359,12 @@ fi)
 }
 EOF
 
+# ── Static tarball (for install.sh one-click download) ───────────
+if [[ -d "${RELEASE_DIR}/static" ]]; then
+  tar czf "${RELEASE_DIR}/static.tar.gz" -C "${RELEASE_DIR}" static
+  echo "[release] Created static.tar.gz ($(ls -lh "${RELEASE_DIR}/static.tar.gz" | awk '{print $5}'))"
+fi
+
 # ── Tarball ────────────────────────────────────────────────────────
 echo "[release] Creating tarball..."
 tar czf "release/phone-talk-${VERSION}.tar.gz" -C release "phone-talk-${VERSION}"
