@@ -459,11 +459,37 @@
             document.getElementById('qr-local-container').style.display = 'inline-block';
             document.getElementById('qr-remote-container').style.display = 'none';
 
-            // Force reload images to trigger onload/onerror
+            // Probe common ports to find running agentgw
+            const ports = [7374, 17374];
+            let workingPort = null;
+            for (const port of ports) {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 1500);
+                    const resp = await fetch('http://localhost:' + port + '/qr.png?type=local', {
+                        signal: controller.signal,
+                        method: 'HEAD'
+                    });
+                    clearTimeout(timeoutId);
+                    if (resp.ok) {
+                        workingPort = port;
+                        break;
+                    }
+                } catch (e) {
+                    // port not reachable, try next
+                }
+            }
+
             const localImg = document.getElementById('qr-local');
             const remoteImg = document.getElementById('qr-remote');
-            localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
-            remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
+            if (workingPort) {
+                localImg.src = 'http://localhost:' + workingPort + '/qr.png?type=local&t=' + Date.now();
+                remoteImg.src = 'http://localhost:' + workingPort + '/qr.png?type=remote&t=' + Date.now();
+            } else {
+                // Fallback to default port so onerror fires and shows friendly message
+                localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
+                remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
+            }
         }
     </script>
 </body>
