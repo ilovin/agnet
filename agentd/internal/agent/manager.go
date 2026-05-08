@@ -1751,6 +1751,37 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 	}
 
+	// For opencode: tmux mode takes precedence over watcher mode.
+	// If an agent with the same session already exists (different PID),
+	// resolve the conflict before proceeding.
+	if info.Provider == "opencode" && sessionID != "" {
+		m.mu.RLock()
+		var conflict *Agent
+		for _, existing := range m.agents {
+			if existing.Provider != "opencode" {
+				continue
+			}
+			existingResumeID, _ := m.GetResumeSessionID(existing.ID)
+			if existingResumeID == sessionID && existing.PID != info.PID {
+				conflict = existing
+				break
+			}
+		}
+		m.mu.RUnlock()
+
+		if conflict != nil {
+			isNewTmux := info.AttachMode() == scanner.AttachModeTmux
+			isConflictTmux := conflict.AttachMode() == scanner.AttachModeTmux
+			if isNewTmux && !isConflictTmux {
+				log.Printf("[Attach] Replacing watcher agent %s with tmux agent for session %s", conflict.ID, sessionID)
+				_ = m.Remove(conflict.ID)
+			} else if !isNewTmux && isConflictTmux {
+				log.Printf("[Attach] Skipping non-tmux opencode PID %d: tmux agent %s already owns session %s", info.PID, conflict.ID, sessionID)
+				return nil, fmt.Errorf("tmux agent already exists for session %s", sessionID)
+			}
+		}
+	}
+
 	// Reuse an existing attached agent only when it refers to the same
 	// live process. Different PIDs can legitimately share one session ID,
 	// so session identity alone must not collapse them.

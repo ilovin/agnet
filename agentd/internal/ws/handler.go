@@ -832,7 +832,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
 	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
 
-	// For tmux-attached Claude sessions, write directly to PTY (don't restart)
+	// For tmux-attached sessions, write directly to PTY via tmux send-keys.
 	if isTmuxAttached {
 		// tmux-attached interactive sessions cannot receive --file flags dynamically;
 		// images would be recorded in history but never passed to the CLI process.
@@ -865,6 +865,11 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		}
 		if err := ag.WriteInput(input); err != nil {
 			return errResp(req.ID, -32000, "write to tmux agent: "+err.Error())
+		}
+		// For tmux-attached OpenCode agents, start pane capture to read responses.
+		// Claude tmux agents are handled by the existing ClaudeWatcher.
+		if isOpenCode {
+			go h.captureOpenCodeTmuxResponses(ag, message)
 		}
 		return okResp(req.ID, map[string]any{"id": agentID})
 	}

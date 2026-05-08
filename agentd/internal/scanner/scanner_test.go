@@ -480,3 +480,32 @@ func TestProcessInfoAttachRoutingMetadata(t *testing.T) {
 		}
 	})
 }
+
+func TestDetectProvider(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		args []string
+		want string
+	}{
+		{"native claude binary", "/usr/local/bin/claude", nil, "claude"},
+		{"native opencode binary", "/usr/local/bin/opencode", nil, "opencode"},
+		{"node wrapper with opencode.js", "/usr/bin/node", []string{"/path/to/opencode.js"}, "opencode"},
+		{"node wrapper with opencode in path", "/usr/bin/node", []string{"/home/user/.nvm/versions/node/v20/opencode/bin/opencode"}, "opencode"},
+		{"nodejs wrapper", "/usr/bin/nodejs", []string{"/opt/opencode/dist/index.js"}, "opencode"},
+		{"node without opencode", "/usr/bin/node", []string{"server.js"}, ""},
+		{"node with unrelated arg", "/usr/bin/node", []string{"--max-old-space-size=4096", "app.js"}, ""},
+		{"random binary", "/usr/bin/python3", []string{"script.py"}, ""},
+		{"claude-code binary", "/usr/local/bin/claude-code", nil, "claude"},
+		{"node wrapper case insensitive", "/usr/bin/node", []string{"/path/to/OpenCode.js"}, "opencode"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectProvider(tt.cmd, tt.args)
+			if got != tt.want {
+				t.Fatalf("detectProvider(%q, %v) = %q, want %q", tt.cmd, tt.args, got, tt.want)
+			}
+		})
+	}
+}

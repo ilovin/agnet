@@ -33,3 +33,4 @@ Thumbs.db
 
 # Claude worktrees and project files
 .claude/
+agentd/agentd

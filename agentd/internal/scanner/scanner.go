@@ -35,6 +35,26 @@ const (
 	AttachModeTmux    = "tmux"
 )
 
+// detectProvider identifies whether a process is a Claude or OpenCode agent.
+// It handles both native binaries and Node.js wrappers (e.g. "node /path/to/opencode.js").
+func detectProvider(cmd string, args []string) string {
+	base := filepath.Base(cmd)
+	switch {
+	case strings.HasPrefix(base, "claude"):
+		return "claude"
+	case strings.HasPrefix(base, "opencode"):
+		return "opencode"
+	case base == "node" || base == "nodejs":
+		// Node.js wrapper: check args for opencode reference
+		for _, arg := range args {
+			if strings.Contains(strings.ToLower(arg), "opencode") {
+				return "opencode"
+			}
+		}
+	}
+	return ""
+}
+
 func normalizeTTY(tty string) string {
 	tty = strings.TrimSpace(tty)
 	if tty == "" || tty == "??" {
