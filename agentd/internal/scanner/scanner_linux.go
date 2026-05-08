@@ -54,15 +54,8 @@ func (s *Scanner) scanProcess(pid int) (ProcessInfo, bool) {
 
 	// Check if it's Claude or OpenCode
 	cmd := parts[0]
-	base := filepath.Base(cmd)
-
-	var provider string
-	switch {
-	case strings.HasPrefix(base, "claude"):
-		provider = "claude"
-	case strings.HasPrefix(base, "opencode"):
-		provider = "opencode"
-	default:
+	provider := detectProvider(cmd, parts[1:])
+	if provider == "" {
 		return ProcessInfo{}, false
 	}
 
