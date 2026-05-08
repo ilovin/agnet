@@ -467,8 +467,7 @@
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), 1500);
                     const resp = await fetch('http://localhost:' + port + '/qr.png?type=local', {
-                        signal: controller.signal,
-                        method: 'HEAD'
+                        signal: controller.signal
                     });
                     clearTimeout(timeoutId);
                     if (resp.ok) {
