@@ -758,6 +758,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	agentID, _ := req.Params["agentId"].(string)
 	message, _ := req.Params["message"].(string)
 	raw, _ := req.Params["raw"].(bool)
+	log.Printf("[conversationSend] received: agentId=%s messageLen=%d raw=%v", agentID, len(message), raw)
 	if message == "" {
 		return errResp(req.ID, -32602, "message is required")
 	}
@@ -815,12 +816,14 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	ag := h.server.manager.Get(agentID)
 	if ag == nil {
+		log.Printf("[conversationSend] agent not found: %s", agentID)
 		return errResp(req.ID, -32000, "agent not found")
 	}
 
 	attachMode := ag.AttachMode()
 	isTmuxAttached := attachMode == "tmux"
 	isOpenCode := ag.Provider == "opencode"
+	log.Printf("[conversationSend] agent=%s provider=%s attachMode=%s isTmuxAttached=%v isOpenCode=%v readOnly=%v", agentID, ag.Provider, attachMode, isTmuxAttached, isOpenCode, ag.AttachReadOnly())
 	// Guard against Restart/Start on attached non-tmux agents (read-only watcher attach).
 	// OpenCode agents are exempt: openCodeSendWithResume uses `opencode run --session`,
 	// not PTY input, so the read-only watcher attach does not apply.
@@ -829,6 +832,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		if reason == "" {
 			reason = "attached session is read-only"
 		}
+		log.Printf("[conversationSend] blocking non-tmux non-opencode attached agent: %s", reason)
 		return errResp(req.ID, -32000, reason)
 	}
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
@@ -836,6 +840,7 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 
 	// For tmux-attached sessions, write directly to PTY via tmux send-keys.
 	if isTmuxAttached {
+		log.Printf("[conversationSend] taking tmux path for agent %s", agentID)
 		// tmux-attached interactive sessions cannot receive --file flags dynamically;
 		// images would be recorded in history but never passed to the CLI process.
 		if len(imageFiles) > 0 {
@@ -868,26 +873,26 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 		if err := ag.WriteInput(input); err != nil {
 			return errResp(req.ID, -32000, "write to tmux agent: "+err.Error())
 		}
-		// For tmux-attached OpenCode agents, start pane capture to read responses.
-		// Claude tmux agents are handled by the existing ClaudeWatcher.
-		if isOpenCode {
-			go h.captureOpenCodeTmuxResponses(ag, message)
-		}
+		// OpenCode responses are read by the OpenCodeDBWatcher polling the SQLite DB.
+		// No need for tmux pane capture (which contains TUI noise like plan headers).
 		return okResp(req.ID, map[string]any{"id": agentID})
 	}
 
 	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
 	if isPipeMode {
+		log.Printf("[conversationSend] taking pipe mode path for agent %s", agentID)
 		return h.agentRestartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For fresh Claude agent (no process yet), start with message
 	if isFreshClaude {
+		log.Printf("[conversationSend] taking fresh claude path for agent %s", agentID)
 		return h.agentStartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For OpenCode attached sessions, use resume mode
 	if isOpenCode {
+		log.Printf("[conversationSend] taking opencode resume path for agent %s", agentID)
 		// OpenCode resume mode does not support image attachments.
 		if len(imageFiles) > 0 {
 			return errResp(req.ID, -32000, "opencode sessions do not support image attachments")

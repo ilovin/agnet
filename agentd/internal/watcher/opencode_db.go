@@ -120,6 +120,14 @@ func (w *OpenCodeDBWatcher) Stop() {
 // in Start() to avoid re-processing historical messages.
 func (w *OpenCodeDBWatcher) SetSkipExisting(bool) {}
 
+// ResetOffset resets the message tracking so historical messages are not re-read
+// after a conversation.clear.
+func (w *OpenCodeDBWatcher) ResetOffset() {
+	w.lastMsgID = ""
+	w.streamingMsgID = ""
+	w.streamingMsgText = ""
+}
+
 func (w *OpenCodeDBWatcher) SetWorkDir(dir string) {
 	w.workDir = dir
 }
@@ -339,7 +347,7 @@ func (w *OpenCodeDBWatcher) refreshSession() {
 	if w.workDir == "" || w.onSwitch == nil {
 		return
 	}
-	if time.Since(w.lastSessionCheck) < 15*time.Second {
+	if time.Since(w.lastSessionCheck) < 5*time.Second {
 		return
 	}
 	w.lastSessionCheck = time.Now()

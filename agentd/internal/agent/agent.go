@@ -52,6 +52,8 @@ type Agent struct {
 	attachReadOnlyReason string
 	tmuxTarget           string
 
+	currentPermissionMode string
+
 	// Status change callback (set by Manager)
 	onStatusChange StatusChangeCallback
 }
@@ -109,8 +111,8 @@ func (a *Agent) SetStatus(s Status) {
 	a.setStatus(s)
 }
 
-// ResetWatcherOffset resets the underlying session watcher's file offset
-// so that historical lines are not re-read after a conversation.clear.
+// ResetWatcherOffset resets the underlying session watcher's tracking state
+// so that historical lines/messages are not re-read after a conversation.clear.
 func (a *Agent) ResetWatcherOffset() {
 	a.mu.RLock()
 	w := a.w
@@ -120,6 +122,9 @@ func (a *Agent) ResetWatcherOffset() {
 	}
 	if cw, ok := w.(*watcher.ClaudeWatcher); ok {
 		cw.ResetOffset()
+	}
+	if ow, ok := w.(*watcher.OpenCodeDBWatcher); ok {
+		ow.ResetOffset()
 	}
 }
 
@@ -193,6 +198,18 @@ func (a *Agent) AttachReadOnlyReason() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.attachReadOnlyReason
+}
+
+func (a *Agent) CurrentPermissionMode() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.currentPermissionMode
+}
+
+func (a *Agent) SetCurrentPermissionMode(mode string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.currentPermissionMode = mode
 }
 
 func (a *Agent) setPermissionPromptActive(active bool) {
