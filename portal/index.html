@@ -246,7 +246,7 @@
                 <p>适用于 macOS 和 Linux 的安装</p>
                 <div class="install-command">
                     <button class="copy-btn" onclick="copyCommand(event, 'desktop')">复制</button>
-                    <code id="desktop-command">wget -q -O- https://api.ilovin.xyz/v1/install.sh | bash</code>
+                    <code id="desktop-command">wget https://api.ilovin.xyz/v1/install.sh && bash install.sh</code>
                 </div>
                 <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
             </div>
@@ -254,11 +254,9 @@
             <div class="platform-card" onclick="selectPlatform('android')">
                 <div class="platform-icon">🤖</div>
                 <h2>Android</h2>
-                <p>扫描 QR 码或下载 APK</p>
-                <div class="qr-code" id="android-qr">
-                    QR Code<br>(动态生成)
-                </div>
-                <a href="#" class="download-btn" onclick="downloadFor('android')">下载 APK</a>
+                <p>下载 APK 安装包</p>
+                <a id="apk-link-btn" href="#" class="download-btn" onclick="downloadFor('android')">下载 APK</a>
+                <div id="apk-version" style="font-size: 0.75em; color: #999; margin-top: 8px;"></div>
             </div>
         </div>
 
@@ -277,7 +275,7 @@
                 <div class="step-number">2</div>
                 <div class="step-content">
                     <h3>启动服务</h3>
-                    <p>运行 <code>agentgw start --qr</code> 启动网关，终端会显示连接二维码。</p>
+                    <p>运行 <code>~/.agentgw/agentgw qr</code> 生成连接二维码。</p>
                 </div>
             </div>
 
@@ -412,16 +410,27 @@
             }
         }
 
-        // Dynamic QR code generation for Android
-        async function generateQR() {
-            // Placeholder: would generate QR code pointing to APK download URL
-            const qrElement = document.getElementById('android-qr');
-            qrElement.innerHTML = '<div style="font-size: 0.7em;">QR Code<br>(Generated at build)</div>';
+        // Load latest version and update APK link
+        async function loadLatestVersion() {
+            try {
+                const response = await fetch(`https://${API_DOMAIN}/v1/release/latest`);
+                if (!response.ok) return;
+                const manifest = await response.json();
+                const agentapp = manifest.artifacts?.find(a => a.name === 'agentapp');
+                if (agentapp?.apk?.url) {
+                    document.getElementById('apk-link-btn').href = agentapp.apk.url;
+                    document.getElementById('apk-version').textContent =
+                        `最新版本: ${manifest.version}`;
+                }
+            } catch (error) {
+                console.error('Failed to load manifest:', error);
+            }
         }
 
-        generateQR();
+        loadLatestVersion();
 
         function onLocalQRLoad() {
+            stopGwRetry();
             const statusEl = document.getElementById('local-gw-status');
             statusEl.textContent = '已检测到本地网关，请使用 PhoneTalk App 扫描二维码';
             statusEl.className = 'local-gw-status success';
@@ -442,7 +451,28 @@
             document.getElementById('qr-remote-container').style.display = 'none';
         }
 
+        let _gwRetryTimer = null;
+        let _gwRetryCount = 0;
+        const GW_MAX_RETRIES = 20;
+        const GW_RETRY_INTERVAL = 3000;
+
+        function stopGwRetry() {
+            if (_gwRetryTimer) {
+                clearInterval(_gwRetryTimer);
+                _gwRetryTimer = null;
+            }
+        }
+
+        function probeLocalGW() {
+            const localImg = document.getElementById('qr-local');
+            const remoteImg = document.getElementById('qr-remote');
+            localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
+            remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
+        }
+
         async function tryConnectLocalGW() {
+            stopGwRetry();
+            _gwRetryCount = 0;
             const statusEl = document.getElementById('local-gw-status');
             const qrDisplay = document.getElementById('local-qr-display');
             statusEl.textContent = '正在检测本地网关...';
@@ -451,11 +481,21 @@
             document.getElementById('qr-local-container').style.display = 'inline-block';
             document.getElementById('qr-remote-container').style.display = 'none';
 
-            // Force reload images to trigger onload/onerror
-            const localImg = document.getElementById('qr-local');
-            const remoteImg = document.getElementById('qr-remote');
-            localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
-            remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
+            probeLocalGW();
+            _gwRetryTimer = setInterval(() => {
+                if (_gwRetryCount >= GW_MAX_RETRIES) {
+                    stopGwRetry();
+                    return;
+                }
+                _gwRetryCount++;
+                const s = document.getElementById('local-gw-status');
+                if (!s.classList.contains('success')) {
+                    s.textContent = `正在检测本地网关... (重试 ${_gwRetryCount}/${GW_MAX_RETRIES})`;
+                    probeLocalGW();
+                } else {
+                    stopGwRetry();
+                }
+            }, GW_RETRY_INTERVAL);
         }
     </script>
 </body>
