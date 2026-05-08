@@ -255,9 +255,6 @@
                 <div class="platform-icon">🤖</div>
                 <h2>Android</h2>
                 <p>下载 APK 安装包</p>
-                <div class="qr-code" id="android-qr" style="font-size: 0.75em; color: #666;">
-                    <a id="apk-link-direct" href="https://download.ilovin.xyz/v0.2.4/bin/agentapp-v0.2.4.apk" style="color: #667eea; text-decoration: none;">📱 直接下载 APK</a>
-                </div>
                 <a id="apk-link-btn" href="https://download.ilovin.xyz/v0.2.4/bin/agentapp-v0.2.4.apk" class="download-btn">下载 APK</a>
                 <div id="apk-version" style="font-size: 0.75em; color: #999; margin-top: 8px;"></div>
             </div>
@@ -420,14 +417,16 @@
             }
         }
 
-        // Dynamic QR code generation for Android
-        async function generateQR() {
-            // Placeholder: would generate QR code pointing to APK download URL
-            const qrElement = document.getElementById('android-qr');
-            qrElement.innerHTML = '<div style="font-size: 0.7em;">QR Code<br>(Generated at build)</div>';
+        // Dynamic version display for Android
+        async function loadLatestVersion() {
+            // Placeholder: would fetch latest version from API
+            const versionEl = document.getElementById('apk-version');
+            if (versionEl) {
+                versionEl.textContent = 'v0.2.4';
+            }
         }
 
-        generateQR();
+        loadLatestVersion();
 
         function onLocalQRLoad() {
             const statusEl = document.getElementById('local-gw-status');
