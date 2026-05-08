@@ -88,10 +88,8 @@ func TestAgentListShowsHasHistoryAfterAttach(t *testing.T) {
 	}
 
 	// 7. Call conversation.history
-	req2 := RPCRequest{Method: "conversation.history", ID: "2", Params: map[string]any{
-		"agentId": ag.ID,
-	}}
-	resp2 := h.conversationHistory(req2)
+	req2 := RPCRequest{Method: "conversation.history", ID: "2"}
+	resp2 := h.conversationHistory(req2, ConversationHistoryParams{AgentID: ag.ID})
 	if resp2.Error != nil {
 		t.Fatalf("conversation.history error: %v", resp2.Error)
 	}

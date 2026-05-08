@@ -302,9 +302,9 @@ func TestConversationClearResetsState(t *testing.T) {
 	srv := New(mgr, "testtoken", "testnode")
 	h := &handler{server: srv}
 
-	resp := h.conversationClear(RPCRequest{
-		ID:     1,
-		Params: map[string]any{"agentId": ag.ID, "nodeId": "node1"},
+	resp := h.conversationClear(RPCRequest{ID: 1}, ConversationClearParams{
+		AgentID: ag.ID,
+		NodeID:  "node1",
 	})
 
 	if resp.Error != nil {

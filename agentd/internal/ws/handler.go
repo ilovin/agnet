@@ -85,45 +85,113 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 	case "agent.list":
 		return h.agentList(req), nil
 	case "agent.create":
-		return h.agentCreate(req)
+		var p AgentCreateParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentCreate(req, p)
 	case "agent.stop":
-		return h.agentStop(req)
+		var p AgentStopParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentStop(req, p)
 	case "agent.restart":
-		return h.agentRestart(req)
+		var p AgentRestartParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentRestart(req, p)
 	case "agent.scan":
 		return h.agentScan(req), nil
 	case "agent.attach":
-		return h.agentAttach(req)
+		var p AgentAttachParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentAttach(req, p)
 	case "session.list":
 		return h.sessionList(req), nil
 	case "session.create":
-		return h.sessionCreate(req)
+		var p AgentCreateParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.sessionCreate(req, p)
 	case "session.attach":
-		return h.sessionAttach(req)
+		var p SessionAttachParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.sessionAttach(req, p)
 	case "session.catalog":
 		return h.sessionCatalog(req), nil
 	case "conversation.send":
-		return h.conversationSend(req), nil
+		var p ConversationSendParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationSend(req, p), nil
 	case "conversation.key":
-		return h.conversationKey(req), nil
+		var p ConversationKeyParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationKey(req, p), nil
 	case "conversation.history":
-		return h.conversationHistory(req), nil
+		var p ConversationHistoryParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationHistory(req, p), nil
 	case "conversation.image":
-		return h.conversationImage(req), nil
+		var p ConversationImageParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationImage(req, p), nil
 	case "conversation.permission_response":
-		return h.conversationPermissionResponse(req), nil
+		var p ConversationPermissionResponseParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationPermissionResponse(req, p), nil
 	case "conversation.clear":
-		return h.conversationClear(req), nil
+		var p ConversationClearParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.conversationClear(req, p), nil
 	case "agent.rename":
-		return h.agentRename(req), nil
+		var p AgentRenameParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentRename(req, p), nil
 	case "agent.remove":
-		return h.agentRemove(req), nil
+		var p AgentRemoveParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.agentRemove(req, p), nil
 	case "provider.list":
-		return h.providerList(req), nil
+		var p ProviderListParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.providerList(req, p), nil
 	case "provider.switch":
-		return h.providerSwitch(req)
+		var p ProviderSwitchParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.providerSwitch(req, p)
 	case "provider.add":
-		return h.providerAdd(req), nil
+		var p ProviderAddParams
+		if err := decodeParams(req.Params, &p); err != nil {
+			return errResp(req.ID, -32602, "invalid params"), nil
+		}
+		return h.providerAdd(req, p), nil
 	case "opencode.models":
 		return h.opencodeModels(req), nil
 	case "system.info":
@@ -234,8 +302,8 @@ func (h *handler) agentList(req RPCRequest) RPCResponse {
 	return okResp(req.ID, result)
 }
 
-func (h *handler) agentCreate(req RPCRequest) (RPCResponse, func()) {
-	id, err := h.createAgent(req)
+func (h *handler) agentCreate(req RPCRequest, p AgentCreateParams) (RPCResponse, func()) {
+	id, err := h.createAgent(req, p)
 	if err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
@@ -247,19 +315,14 @@ func (h *handler) agentCreate(req RPCRequest) (RPCResponse, func()) {
 	}
 }
 
-func (h *handler) createAgent(req RPCRequest) (string, error) {
-	name, _ := req.Params["name"].(string)
-	provider, _ := req.Params["provider"].(string)
-	cmd, _ := req.Params["cmd"].(string)
-	workDir, _ := req.Params["workDir"].(string)
-	sessionID, _ := req.Params["sessionId"].(string)
-	model, _ := req.Params["model"].(string)
-
-	var args []string
-	if raw, ok := req.Params["args"]; ok {
-		b, _ := json.Marshal(raw)
-		_ = json.Unmarshal(b, &args)
-	}
+func (h *handler) createAgent(req RPCRequest, p AgentCreateParams) (string, error) {
+	name := p.Name
+	provider := p.Provider
+	cmd := p.Cmd
+	workDir := p.WorkDir
+	sessionID := p.SessionID
+	model := p.Model
+	args := p.Args
 
 	provider, cmd, args, env := resolveLaunch(provider, cmd, args, sessionID, model, "")
 
@@ -503,17 +566,14 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	})
 }
 
-func (h *handler) sessionCreate(req RPCRequest) (RPCResponse, func()) {
-	return h.agentCreate(req)
+func (h *handler) sessionCreate(req RPCRequest, p AgentCreateParams) (RPCResponse, func()) {
+	return h.agentCreate(req, p)
 }
 
-func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
-	// If agentId is provided for an already managed session, treat attach as
-	// selecting that managed agent. Restart the watcher if it isn't running.
-	agentID, _ := req.Params["agentId"].(string)
+func (h *handler) sessionAttach(req RPCRequest, p SessionAttachParams) (RPCResponse, func()) {
+	agentID := p.AgentID
 	if agentID != "" {
 		if ag := h.server.manager.Get(agentID); ag != nil {
-			// If no watcher is running, try to start one
 			if ag.Watcher() == nil {
 				if err := h.server.manager.StartWatcherForAgent(agentID); err != nil {
 					log.Printf("[session.attach] failed to start watcher for %s: %v", agentID, err)
@@ -529,9 +589,17 @@ func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
 		}
 	}
 
-	sessionID, _ := req.Params["sessionId"].(string)
-	if sessionID != "" {
-		id, err := h.createAgent(req)
+	if p.SessionID != "" {
+		createParams := AgentCreateParams{
+			Name:      p.Name,
+			Provider:  p.Provider,
+			Cmd:       p.Cmd,
+			WorkDir:   p.WorkDir,
+			SessionID: p.SessionID,
+			Model:     p.Model,
+			Args:      p.Args,
+		}
+		id, err := h.createAgent(req, createParams)
 		if err != nil {
 			return errResp(req.ID, -32000, err.Error()), nil
 		}
@@ -543,15 +611,16 @@ func (h *handler) sessionAttach(req RPCRequest) (RPCResponse, func()) {
 		}
 	}
 
-	if pid, ok := req.Params["pid"].(float64); ok && int(pid) > 0 {
-		return h.agentAttach(req)
+	if int(p.PID) > 0 {
+		attachParams := AgentAttachParams{PID: p.PID}
+		return h.agentAttach(req, attachParams)
 	}
 
 	return errResp(req.ID, -32602, "pid, sessionId, or agentId is required"), nil
 }
 
-func (h *handler) agentStop(req RPCRequest) (RPCResponse, func()) {
-	id, _ := req.Params["agentId"].(string)
+func (h *handler) agentStop(req RPCRequest, p AgentStopParams) (RPCResponse, func()) {
+	id := p.AgentID
 	if err := h.server.manager.Stop(id); err != nil {
 		return errResp(req.ID, -32000, err.Error()), nil
 	}
@@ -562,17 +631,17 @@ func (h *handler) agentStop(req RPCRequest) (RPCResponse, func()) {
 	}
 }
 
-func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
-	id, _ := req.Params["agentId"].(string)
+func (h *handler) agentRestart(req RPCRequest, p AgentRestartParams) (RPCResponse, func()) {
+	id := p.AgentID
 	ag := h.server.manager.Get(id)
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found"), nil
 	}
-	_, modelSpecified := req.Params["model"]
-	_, providerSpecified := req.Params["provider"]
-	permissionMode, _ := req.Params["permissionMode"].(string)
-	model, _ := req.Params["model"].(string)
-	apiProvider, _ := req.Params["provider"].(string)
+	modelSpecified := p.Model != ""
+	providerSpecified := p.Provider != ""
+	permissionMode := p.PermissionMode
+	model := p.Model
+	apiProvider := p.Provider
 
 	// For attached agents with a model change, update settings.json without
 	// restarting the process. Claude reads settings dynamically.
@@ -668,10 +737,10 @@ func (h *handler) agentRestart(req RPCRequest) (RPCResponse, func()) {
 	}
 }
 
-func (h *handler) conversationSend(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
-	message, _ := req.Params["message"].(string)
-	raw, _ := req.Params["raw"].(bool)
+func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPCResponse {
+	agentID := p.AgentID
+	message := p.Message
+	raw := p.Raw
 	log.Printf("[conversationSend] received: agentId=%s messageLen=%d raw=%v", agentID, len(message), raw)
 	if message == "" {
 		return errResp(req.ID, -32602, "message is required")
@@ -680,51 +749,45 @@ func (h *handler) conversationSend(req RPCRequest) RPCResponse {
 	// Extract image attachments (base64-encoded)
 	var imageFiles []string // temp file paths to pass via --file
 	var imagePaths []string // persisted paths stored in event history
-	if rawImages, ok := req.Params["images"]; ok {
-		if images, ok := rawImages.([]any); ok {
-			dataDir := h.server.manager.DataDir()
-			imgDir := filepath.Join(dataDir, "images", agentID, fmt.Sprintf("%d", time.Now().Unix()))
-			for i, img := range images {
-				imgMap, ok := img.(map[string]any)
-				if !ok {
-					continue
-				}
-				data, _ := imgMap["data"].(string)
-				mimeType, _ := imgMap["mimeType"].(string)
-				if data == "" {
-					continue
-				}
-				ext := ".png"
-				switch mimeType {
-				case "image/jpeg":
-					ext = ".jpg"
-				case "image/gif":
-					ext = ".gif"
-				case "image/webp":
-					ext = ".webp"
-				}
-				decoded, err := base64Decode(data)
-				if err != nil {
-					log.Printf("[conversationSend] decode image %d: %v", i, err)
-					continue
-				}
-				// Persist to dataDir so history can retrieve it later
-				persistedFile := filepath.Join(imgDir, fmt.Sprintf("img%d%s", i, ext))
-				if err := os.MkdirAll(filepath.Dir(persistedFile), 0755); err == nil {
-					if err := os.WriteFile(persistedFile, decoded, 0644); err == nil {
-						imagePaths = append(imagePaths, persistedFile)
-					} else {
-						log.Printf("[conversationSend] persist image %d: %v", i, err)
-					}
-				}
-				// Also write a temp file for --file CLI argument
-				tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("agentd-img-%s-%d%s", agentID[:8], i, ext))
-				if err := os.WriteFile(tmpFile, decoded, 0644); err != nil {
-					log.Printf("[conversationSend] write temp image %d: %v", i, err)
-					continue
-				}
-				imageFiles = append(imageFiles, tmpFile)
+	if len(p.Images) > 0 {
+		dataDir := h.server.manager.DataDir()
+		imgDir := filepath.Join(dataDir, "images", agentID, fmt.Sprintf("%d", time.Now().Unix()))
+		for i, img := range p.Images {
+			data := img.Data
+			mimeType := img.MimeType
+			if data == "" {
+				continue
 			}
+			ext := ".png"
+			switch mimeType {
+			case "image/jpeg":
+				ext = ".jpg"
+			case "image/gif":
+				ext = ".gif"
+			case "image/webp":
+				ext = ".webp"
+			}
+			decoded, err := base64Decode(data)
+			if err != nil {
+				log.Printf("[conversationSend] decode image %d: %v", i, err)
+				continue
+			}
+			// Persist to dataDir so history can retrieve it later
+			persistedFile := filepath.Join(imgDir, fmt.Sprintf("img%d%s", i, ext))
+			if err := os.MkdirAll(filepath.Dir(persistedFile), 0755); err == nil {
+				if err := os.WriteFile(persistedFile, decoded, 0644); err == nil {
+					imagePaths = append(imagePaths, persistedFile)
+				} else {
+					log.Printf("[conversationSend] persist image %d: %v", i, err)
+				}
+			}
+			// Also write a temp file for --file CLI argument
+			tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("agentd-img-%s-%d%s", agentID[:8], i, ext))
+			if err := os.WriteFile(tmpFile, decoded, 0644); err != nil {
+				log.Printf("[conversationSend] write temp image %d: %v", i, err)
+				continue
+			}
+			imageFiles = append(imageFiles, tmpFile)
 		}
 	}
 
@@ -1056,9 +1119,9 @@ func keyToBytes(key string) (string, bool) {
 	}
 }
 
-func (h *handler) conversationKey(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
-	key, _ := req.Params["key"].(string)
+func (h *handler) conversationKey(req RPCRequest, p ConversationKeyParams) RPCResponse {
+	agentID := p.AgentID
+	key := p.Key
 	if key == "" {
 		return errResp(req.ID, -32602, "key is required")
 	}
@@ -1068,8 +1131,8 @@ func (h *handler) conversationKey(req RPCRequest) RPCResponse {
 	}
 
 	repeat := 1
-	if v, ok := req.Params["repeat"].(float64); ok {
-		repeat = int(v)
+	if p.Repeat > 0 {
+		repeat = int(p.Repeat)
 	}
 	if repeat < 1 {
 		repeat = 1
@@ -1093,8 +1156,8 @@ func (h *handler) conversationKey(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
-func (h *handler) conversationImage(req RPCRequest) RPCResponse {
-	imagePath, _ := req.Params["path"].(string)
+func (h *handler) conversationImage(req RPCRequest, p ConversationImageParams) RPCResponse {
+	imagePath := p.Path
 	if imagePath == "" {
 		return errResp(req.ID, -32602, "path is required")
 	}
@@ -1111,24 +1174,22 @@ func (h *handler) conversationImage(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"data": b64})
 }
 
-func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
+func (h *handler) conversationHistory(req RPCRequest, p ConversationHistoryParams) RPCResponse {
+	agentID := p.AgentID
 	var afterSeq uint64
-	if v, ok := req.Params["cursor"].(float64); ok {
-		afterSeq = uint64(v)
+	if p.Cursor > 0 {
+		afterSeq = uint64(p.Cursor)
 	}
 	limit := 200
-	if v, ok := req.Params["limit"].(float64); ok {
-		if iv := int(v); iv > 0 {
-			limit = iv
-		}
+	if p.Limit > 0 {
+		limit = int(p.Limit)
 	}
 	if limit > 1000 {
 		limit = 1000
 	}
 	var beforeSeq uint64
-	if v, ok := req.Params["before"].(float64); ok {
-		beforeSeq = uint64(v)
+	if p.Before > 0 {
+		beforeSeq = uint64(p.Before)
 	}
 
 	ag := h.server.manager.Get(agentID)
@@ -1215,10 +1276,10 @@ func (h *handler) conversationHistory(req RPCRequest) RPCResponse {
 	})
 }
 
-func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
-	requestID, _ := req.Params["requestId"].(string)
-	behavior, _ := req.Params["behavior"].(string) // "allow" or "deny"
+func (h *handler) conversationPermissionResponse(req RPCRequest, p ConversationPermissionResponseParams) RPCResponse {
+	agentID := p.AgentID
+	requestID := p.RequestID
+	behavior := p.Behavior
 
 	if requestID == "" {
 		return errResp(req.ID, -32602, "requestId is required")
@@ -1232,19 +1293,11 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 		return errResp(req.ID, -32000, "agent not found")
 	}
 
-	// Build permission response
 	resp := &agent.PermissionResponse{
 		RequestID: requestID,
 		Behavior:  behavior,
-		Message:   "",
-	}
-
-	if msg, ok := req.Params["message"].(string); ok {
-		resp.Message = msg
-	}
-
-	if updatedInput, ok := req.Params["updatedInput"].(map[string]any); ok {
-		resp.UpdatedInput = updatedInput
+		Message:   p.Message,
+		UpdatedInput: p.UpdatedInput,
 	}
 
 	// Handle the response
@@ -1297,8 +1350,8 @@ func (h *handler) conversationPermissionResponse(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
-func (h *handler) conversationClear(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
+func (h *handler) conversationClear(req RPCRequest, p ConversationClearParams) RPCResponse {
+	agentID := p.AgentID
 	ag := h.server.manager.Get(agentID)
 	if ag == nil {
 		return errResp(req.ID, -32000, "agent not found")
@@ -1307,12 +1360,10 @@ func (h *handler) conversationClear(req RPCRequest) RPCResponse {
 	if err := h.server.manager.ClearConversationEvents(agentID); err != nil {
 		log.Printf("[conversationClear] failed to clear persisted history for %s: %v", agentID, err)
 	}
-	// Reset status to idle so the UI does not block new sends.
 	ag.SetStatus(agent.StatusIdle)
-	// Reset watcher offset so old session-file lines are not re-read.
 	ag.ResetWatcherOffset()
 	h.server.broadcast(event("conversation.cleared", map[string]any{
-		"nodeId":  req.Params["nodeId"],
+		"nodeId":  p.NodeID,
 		"agentId": agentID,
 	}), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
@@ -1381,9 +1432,9 @@ func (h *handler) agentScan(req RPCRequest) RPCResponse {
 	})
 }
 
-func (h *handler) agentRename(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
-	name, _ := req.Params["name"].(string)
+func (h *handler) agentRename(req RPCRequest, p AgentRenameParams) RPCResponse {
+	agentID := p.AgentID
+	name := p.Name
 	if agentID == "" || name == "" {
 		return errResp(req.ID, -32602, "agentId and name are required")
 	}
@@ -1396,8 +1447,8 @@ func (h *handler) agentRename(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
-func (h *handler) agentRemove(req RPCRequest) RPCResponse {
-	agentID, _ := req.Params["agentId"].(string)
+func (h *handler) agentRemove(req RPCRequest, p AgentRemoveParams) RPCResponse {
+	agentID := p.AgentID
 	if agentID == "" {
 		return errResp(req.ID, -32602, "agentId is required")
 	}
@@ -1802,7 +1853,7 @@ func (h *handler) statusChangedParams(agentID string, status any) map[string]any
 	return params
 }
 
-func (h *handler) providerList(req RPCRequest) RPCResponse {
+func (h *handler) providerList(req RPCRequest, p ProviderListParams) RPCResponse {
 	rows, resp, ok, _, _, _, _ := h.cachedProviderData()
 	if !ok {
 		if resp.Error == nil {
@@ -1821,7 +1872,7 @@ func (h *handler) providerList(req RPCRequest) RPCResponse {
 		return resp
 	}
 
-	agentID, _ := req.Params["agentId"].(string)
+	agentID := p.AgentID
 	var targetAgent *agent.Agent
 	if agentID != "" {
 		targetAgent = h.server.manager.Get(agentID)
@@ -1848,13 +1899,13 @@ func (h *handler) providerList(req RPCRequest) RPCResponse {
 	})
 }
 
-func (h *handler) providerSwitch(req RPCRequest) (RPCResponse, func()) {
-	providerID, _ := req.Params["providerId"].(string)
+func (h *handler) providerSwitch(req RPCRequest, p ProviderSwitchParams) (RPCResponse, func()) {
+	providerID := p.ProviderID
 	if providerID == "" {
 		return errResp(req.ID, -32602, "providerId is required"), nil
 	}
 
-	agentID, _ := req.Params["agentId"].(string)
+	agentID := p.AgentID
 	var targetAgent *agent.Agent
 	if agentID != "" {
 		targetAgent = h.server.manager.Get(agentID)
@@ -2078,9 +2129,8 @@ func (h *handler) systemSkills(req RPCRequest) RPCResponse {
 	})
 }
 
-func (h *handler) providerAdd(req RPCRequest) RPCResponse {
-	name, _ := req.Params["name"].(string)
-	if name == "" {
+func (h *handler) providerAdd(req RPCRequest, p ProviderAddParams) RPCResponse {
+	if p.Name == "" {
 		return errResp(req.ID, -32602, "name is required")
 	}
 
@@ -2109,9 +2159,9 @@ func (h *handler) providerAdd(req RPCRequest) RPCResponse {
 	id := generateUUID()
 
 	// Build settings_config from params
-	baseURL, _ := req.Params["baseUrl"].(string)
-	authToken, _ := req.Params["authToken"].(string)
-	model, _ := req.Params["model"].(string)
+	baseURL := p.BaseURL
+	authToken := p.AuthToken
+	model := p.Model
 
 	settingsConfig := map[string]any{}
 	env := map[string]any{}
@@ -2135,13 +2185,13 @@ func (h *handler) providerAdd(req RPCRequest) RPCResponse {
 		`INSERT INTO providers (
 			id, app_type, name, settings_config, created_at, sort_index, meta, is_current, in_failover_queue, cost_multiplier
 		) VALUES (?, ?, ?, ?, ?, ?, '{}', 0, 0, '1.0')`,
-		id, "claude", name, string(settingsJSON), now, 0,
+		id, "claude", p.Name, string(settingsJSON), now, 0,
 	); err != nil {
 		return errResp(req.ID, -32000, "insert provider: "+err.Error())
 	}
 	h.invalidateProviderCache()
 
-	return okResp(req.ID, map[string]any{"ok": true, "id": id, "name": name})
+	return okResp(req.ID, map[string]any{"ok": true, "id": id, "name": p.Name})
 }
 
 func generateUUID() string {
@@ -2181,9 +2231,8 @@ func base64Decode(s string) ([]byte, error) {
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.
-func (h *handler) agentAttach(req RPCRequest) (RPCResponse, func()) {
-	pidFloat, _ := req.Params["pid"].(float64)
-	pid := int(pidFloat)
+func (h *handler) agentAttach(req RPCRequest, p AgentAttachParams) (RPCResponse, func()) {
+	pid := int(p.PID)
 	if pid <= 0 {
 		return errResp(req.ID, -32602, "pid is required"), nil
 	}
