@@ -130,6 +130,24 @@ warn()  { echo -e "${YELLOW}⚠️  $*${NC}"; }
 step()  { echo -e "${CYAN}⚙️  $*${NC}"; }
   err()   { echo -e "${RED}❌ $*${NC}"; }
 
+# Read a line interactively. Falls back to default when no TTY is available.
+read_tty() {
+  local _prompt="$1" _default="$2" _value=""
+  if [[ -t 0 ]]; then
+    # stdin is a TTY — read normally
+    [[ -n "$_prompt" ]] && echo -n "$_prompt" >&2
+    IFS= read -r _value || true
+  elif [[ -r /dev/tty ]]; then
+    # Try the controlling terminal
+    [[ -n "$_prompt" ]] && echo -n "$_prompt" > /dev/tty
+    IFS= read -r _value < /dev/tty || true
+  else
+    # No TTY available — use the default
+    _value="$_default"
+  fi
+  printf '%s\n' "$_value"
+}
+
 # ── Platform detection ─────────────────────────────────────────────
 detect_platform() {
   local os arch
@@ -866,8 +884,7 @@ if ! $LOCAL_ONLY; then
       IDX=$((IDX + 1))
     done <<< "$FOUND"
     echo ""
-    echo -n "选择要部署的节点（逗号分隔, 0=跳过）: "
-    read -r SELECTION
+    SELECTION=$(read_tty "选择要部署的节点（逗号分隔, 0=跳过）: " "")
   else
     warn "未在 ~/.ssh/config 发现远程节点"
   fi
@@ -901,8 +918,7 @@ if [[ -z "$TUNNEL_URL" && -z "$APP_URL" ]]; then
   echo -e "${CYAN}网络模式选择:${NC}"
   echo "  [1] 隧道模式 — 通过 tunnelhub 远程访问（需要注册）"
   echo "  [2] 本地模式 — 仅在局域网内访问，不连接 tunnelhub"
-  echo -n "选择 (默认 1): "
-  read -r MODE_CHOICE
+  MODE_CHOICE=$(read_tty "选择 (默认 1): " "1")
 
   if [[ "${MODE_CHOICE:-1}" == "2" ]]; then
     info "使用本地模式"
@@ -950,8 +966,7 @@ if [[ -n "$HUB_URL" ]]; then
     n=${#CRED_USERS[@]}
     echo "  [$((n+1))] 重新注册（覆盖现有，生成新 token）"
     echo "  [$((n+2))] 本地模式（仅局域网，不连接 tunnelhub）"
-    echo -n "请选择 (默认 1): "
-    read -r CHOICE
+    CHOICE=$(read_tty "请选择 (默认 1): " "1")
     CHOICE="${CHOICE:-1}"
 
     if [[ "$CHOICE" -ge 1 && "$CHOICE" -le "$n" ]]; then
@@ -966,11 +981,9 @@ if [[ -n "$HUB_URL" ]]; then
       else
         echo ""
         warn "重新注册失败（userId 可能已在 hub 上存在）"
-        echo -n "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: "
-        read -r RECOVERY_TOKEN
+        RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
         if [[ -n "$RECOVERY_TOKEN" ]]; then
-          echo -n "输入 userId: "
-          read -r RECOVERY_USER
+          RECOVERY_USER=$(read_tty "输入 userId: " "")
           if [[ -n "$RECOVERY_USER" ]]; then
             save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
             REGISTERED_USER="$RECOVERY_USER"
@@ -996,11 +1009,9 @@ if [[ -n "$HUB_URL" ]]; then
       REGISTERED_TOKEN="$(extract_json_field "$local_auth_path" token)"
     else
       warn "注册失败（userId 可能已在 hub 上存在）"
-      echo -n "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: "
-      read -r RECOVERY_TOKEN
+      RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
       if [[ -n "$RECOVERY_TOKEN" ]]; then
-        echo -n "输入 userId: "
-        read -r RECOVERY_USER
+        RECOVERY_USER=$(read_tty "输入 userId: " "")
         if [[ -n "$RECOVERY_USER" ]]; then
           save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
           REGISTERED_USER="$RECOVERY_USER"
@@ -1224,8 +1235,7 @@ if [[ -n "$TAILSCALE_IP" && -n "$LAN_IP" && "$TAILSCALE_IP" != "$LAN_IP" ]]; the
   echo -e "${CYAN}可用 IP 地址:${NC}"
   echo "  [1] Tailscale: ${TAILSCALE_IP} (推荐，跨网络可用)"
   echo "  [2] LAN:       ${LAN_IP} (仅同网络)"
-  echo -n "选择 (默认 1): "
-  read -r ip_choice
+  ip_choice=$(read_tty "选择 (默认 1): " "1")
   case "${ip_choice:-1}" in
     2) LOCAL_IP="$LAN_IP" ;;
     *) LOCAL_IP="$TAILSCALE_IP" ;;

@@ -251,12 +251,14 @@
                 <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
             </div>
 
-            <div class="platform-card">
+            <div class="platform-card" onclick="selectPlatform('android')">
                 <div class="platform-icon">🤖</div>
                 <h2>Android</h2>
-                <p>下载 APK 安装包</p>
-                <a id="apk-link-btn" href="https://download.ilovin.xyz/v0.2.4/bin/agentapp-v0.2.4.apk" class="download-btn">下载 APK</a>
-                <div id="apk-version" style="font-size: 0.75em; color: #999; margin-top: 8px;"></div>
+                <p>扫描 QR 码或下载 APK</p>
+                <div class="qr-code" id="android-qr">
+                    QR Code<br>(动态生成)
+                </div>
+                <a href="#" class="download-btn" onclick="downloadFor('android')">下载 APK</a>
             </div>
         </div>
 
@@ -267,45 +269,31 @@
                 <div class="step-number">1</div>
                 <div class="step-content">
                     <h3>安装网关</h3>
-                    <p>复制上方命令安装 agentgw。安装脚本会自动检测平台、下载二进制、注册 tunnelhub 并生成 token。</p>
+                    <p>根据上方选择的方式安装 agentgw。安装脚本会自动配置 token 和必要的环境。</p>
                 </div>
             </div>
 
             <div class="guide-step">
                 <div class="step-number">2</div>
                 <div class="step-content">
-                    <h3>启动网关</h3>
-                    <p>运行 <code>~/.agentgw/agentgw start --qr</code> 启动网关。终端会显示连接二维码。</p>
-                    <p style="margin-top: 8px; color: #667eea; font-size: 0.9em;">
-                        <strong>更快捷的方式：</strong>如果网关和本网页在同一台电脑运行，直接点击下方"本机连接"区域的"尝试连接本机 gw"按钮，即可生成二维码并扫码连接。
-                    </p>
+                    <h3>启动服务</h3>
+                    <p>运行 <code>agentgw start --qr</code> 启动网关，终端会显示连接二维码。</p>
                 </div>
             </div>
 
             <div class="guide-step">
                 <div class="step-number">3</div>
                 <div class="step-content">
-                    <h3>手机扫码连接</h3>
-                    <p>安装 APK 后打开 App，点击右上角 "+" → "扫描二维码"。</p>
-                    <p style="margin-top: 8px; color: #666;">
-                        <strong>扫码来源（二选一）：</strong>
-                    </p>
-                    <ul style="margin-top: 4px; padding-left: 20px; color: #666;">
-                        <li><strong>终端二维码：</strong>扫描 agentgw 启动时终端显示的二维码</li>
-                        <li><strong style="color: #667eea;">网页二维码：</strong>点击下方"尝试连接本机 gw"按钮，直接显示本机/远程二维码后扫描</li>
-                    </ul>
+                    <h3>手机连接</h3>
+                    <p>在手机上安装 PhoneTalk App，扫描终端显示的二维码即可连接。</p>
                 </div>
             </div>
 
             <div class="guide-step">
                 <div class="step-number">4</div>
                 <div class="step-content">
-                    <h3>手动连接（备用）</h3>
-                    <p>如果无法扫码，可在 App 中手动添加连接：</p>
-                    <ul style="margin-top: 8px; padding-left: 20px; color: #666;">
-                        <li>URL 格式：<code>wss://tunnel.ilovin.xyz/ws/你的用户名</code></li>
-                        <li>Token：运行 <code>cat ~/.agentgw/local_auth.json</code> 查看</li>
-                    </ul>
+                    <h3>远程管理</h3>
+                    <p>通过 Web UI 或手机 App 管理你的 AI Agent，查看会话、执行命令、监控状态。</p>
                 </div>
             </div>
 
@@ -424,25 +412,14 @@
             }
         }
 
-        // Dynamic version display for Android
-        async function loadLatestVersion() {
-            // Placeholder: would fetch latest version from API
-            const versionEl = document.getElementById('apk-version');
-            if (versionEl) {
-                versionEl.textContent = 'v0.2.4';
-            }
+        // Dynamic QR code generation for Android
+        async function generateQR() {
+            // Placeholder: would generate QR code pointing to APK download URL
+            const qrElement = document.getElementById('android-qr');
+            qrElement.innerHTML = '<div style="font-size: 0.7em;">QR Code<br>(Generated at build)</div>';
         }
 
-        loadLatestVersion();
-
-        function onLocalQRLoad() {
-            const statusEl = document.getElementById('local-gw-status');
-            statusEl.textContent = '已检测到本地网关，请使用 PhoneTalk App 扫描二维码';
-            statusEl.className = 'local-gw-status success';
-        }
-
-        const GW_PORTS = [7374, 17374];
-        let currentPortIndex = 0;
+        generateQR();
 
         function onLocalQRLoad() {
             const statusEl = document.getElementById('local-gw-status');
@@ -451,18 +428,10 @@
         }
 
         function onLocalQRError() {
-            currentPortIndex++;
-            if (currentPortIndex < GW_PORTS.length) {
-                const localImg = document.getElementById('qr-local');
-                const remoteImg = document.getElementById('qr-remote');
-                localImg.src = 'http://localhost:' + GW_PORTS[currentPortIndex] + '/qr.png?type=local&t=' + Date.now();
-                remoteImg.src = 'http://localhost:' + GW_PORTS[currentPortIndex] + '/qr.png?type=remote&t=' + Date.now();
-            } else {
-                const statusEl = document.getElementById('local-gw-status');
-                statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
-                statusEl.className = 'local-gw-status error';
-                document.getElementById('qr-local-container').style.display = 'none';
-            }
+            const statusEl = document.getElementById('local-gw-status');
+            statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
+            statusEl.className = 'local-gw-status error';
+            document.getElementById('qr-local-container').style.display = 'none';
         }
 
         function onRemoteQRLoad() {
@@ -473,7 +442,7 @@
             document.getElementById('qr-remote-container').style.display = 'none';
         }
 
-        function tryConnectLocalGW() {
+        async function tryConnectLocalGW() {
             const statusEl = document.getElementById('local-gw-status');
             const qrDisplay = document.getElementById('local-qr-display');
             statusEl.textContent = '正在检测本地网关...';
@@ -482,11 +451,11 @@
             document.getElementById('qr-local-container').style.display = 'inline-block';
             document.getElementById('qr-remote-container').style.display = 'none';
 
-            currentPortIndex = 0;
+            // Force reload images to trigger onload/onerror
             const localImg = document.getElementById('qr-local');
             const remoteImg = document.getElementById('qr-remote');
-            localImg.src = 'http://localhost:' + GW_PORTS[0] + '/qr.png?type=local&t=' + Date.now();
-            remoteImg.src = 'http://localhost:' + GW_PORTS[0] + '/qr.png?type=remote&t=' + Date.now();
+            localImg.src = 'http://localhost:7374/qr.png?type=local&t=' + Date.now();
+            remoteImg.src = 'http://localhost:7374/qr.png?type=remote&t=' + Date.now();
         }
     </script>
 </body>
