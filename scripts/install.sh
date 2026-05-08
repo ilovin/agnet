@@ -131,19 +131,22 @@ step()  { echo -e "${CYAN}⚙️  $*${NC}"; }
   err()   { echo -e "${RED}❌ $*${NC}"; }
 
 # Read a line interactively. Falls back to default when no TTY is available.
+INTERACTIVE=true
+if [[ ! -t 0 ]] && ! (exec < /dev/tty; test -t 0) 2>/dev/null; then
+  INTERACTIVE=false
+fi
+
 read_tty() {
   local _prompt="$1" _default="$2" _value=""
-  if [[ -t 0 ]]; then
-    # stdin is a TTY — read normally
+  if ! $INTERACTIVE; then
+    info "非交互模式，使用默认值: ${_default:-<空>}" >&2
+    _value="$_default"
+  elif [[ -t 0 ]]; then
     [[ -n "$_prompt" ]] && echo -n "$_prompt" >&2
     IFS= read -r _value || true
-  elif [[ -r /dev/tty ]]; then
-    # Try the controlling terminal
+  else
     [[ -n "$_prompt" ]] && echo -n "$_prompt" > /dev/tty
     IFS= read -r _value < /dev/tty || true
-  else
-    # No TTY available — use the default
-    _value="$_default"
   fi
   printf '%s\n' "$_value"
 }
@@ -164,7 +167,7 @@ detect_platform() {
 
 # ── Manifest helpers ───────────────────────────────────────────────
 download_manifest() {
-  local manifest_url="${1:-https://download.ilovin.xyz/manifest.json}"
+  local manifest_url="${1:-https://api.ilovin.xyz/v1/release/latest}"
   local tmpfile="/tmp/phone-talk-manifest-$$.json"
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL "$manifest_url" -o "$tmpfile" 2>/dev/null; then
@@ -187,71 +190,49 @@ download_manifest() {
     fi
     rm -f "$tmpfile"
   fi
-  err "需要 curl、wget 或 python3 来下载 manifest"
+  err "需要 curl、wget 或 python3 来下载 manifest (https://api.ilovin.xyz/v1/release/latest)"
   return 1
 }
 
-# Download artifact from manifest
-self_update() {
-  step "检查更新..."
-  local platform="$(detect_platform)"
+# Download an artifact from manifest by name. Saves to $2.
+download_artifact() {
+  local name="$1" dest="$2"
+  local platform
+  platform="$(detect_platform)"
   if [[ "$platform" == "unsupported" ]]; then
     err "不支持的平台: $(uname -s) $(uname -m)"
     return 1
   fi
 
   local manifest_file
-  manifest_file="$(download_manifest)" || {
-    warn "无法下载 manifest，跳过更新检查"
-    return 0
-  }
+  manifest_file="$(download_manifest)" || return 1
   trap 'rm -f "$manifest_file"' EXIT
 
-  local latest_version
-  latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
-
-  if [[ -z "$latest_version" ]]; then
-    warn "无法解析 manifest"
-    return 0
-  fi
-
-  local current_version="unknown"
-  if [[ -f "$INSTALL_DIR/agentgw" ]]; then
-    current_version="$("$INSTALL_DIR/agentgw" version 2>/dev/null | awk '{print $2}' || true)"
-  fi
-
-  if [[ "$current_version" == "$latest_version" ]]; then
-    info "当前已是最新版本: $current_version"
-    return 0
-  fi
-
-  step "发现新版本: $current_version -> $latest_version"
-
-  # Find artifact URL for current platform
-  local artifact_url artifact_sha
-  local py_script="/tmp/phone-talk-get-url-$$.py"
-  cat > "$py_script" <<'PY'
+  local py_script="/tmp/phone-talk-artifact-$$.py"
+  cat > "$py_script" <<PY
 import json,sys
 m=json.load(open(sys.argv[1]))
 plat=sys.argv[2]
+name=sys.argv[3]
 for a in m.get('artifacts',[]):
-    if a.get('name') != 'agentgw':
+    if a.get('name') != name:
         continue
     for p in a.get('platforms',[]):
         if f"{p['os']}-{p['arch']}"==plat:
             print(p.get('url',''))
             break
 PY
-  artifact_url="$(python3 "$py_script" "$manifest_file" "$platform" 2>/dev/null || true)"
+  local artifact_url
+  artifact_url="$(python3 "$py_script" "$manifest_file" "$platform" "$name" 2>/dev/null || true)"
   rm -f "$py_script"
 
   if [[ -z "$artifact_url" ]]; then
-    warn "未找到 $platform 的更新包"
-    return 0
+    warn "未找到 $name ($platform) 的下载包"
+    return 1
   fi
 
-  step "下载更新: $artifact_url"
-  local tmp_bin="/tmp/agentgw-update-$$"
+  step "下载 $name: $artifact_url"
+  local tmp_bin="/tmp/${name}-download-$$"
   local download_ok=false
   if command -v curl >/dev/null 2>&1; then
     if curl -fsSL "$artifact_url" -o "$tmp_bin" 2>/dev/null; then
@@ -274,21 +255,23 @@ PY
     return 1
   fi
 
-  # Verify checksum if available
-  local py_script_sha="/tmp/phone-talk-get-sha-$$.py"
-  cat > "$py_script_sha" <<'PY'
+  # Verify checksum
+  local py_script_sha="/tmp/phone-talk-sha-$$.py"
+  cat > "$py_script_sha" <<PY
 import json,sys
 m=json.load(open(sys.argv[1]))
 plat=sys.argv[2]
+name=sys.argv[3]
 for a in m.get('artifacts',[]):
-    if a.get('name') != 'agentgw':
+    if a.get('name') != name:
         continue
     for p in a.get('platforms',[]):
         if f"{p['os']}-{p['arch']}"==plat:
             print(p.get('sha256',''))
             break
 PY
-  artifact_sha="$(python3 "$py_script_sha" "$manifest_file" "$platform" 2>/dev/null || true)"
+  local artifact_sha
+  artifact_sha="$(python3 "$py_script_sha" "$manifest_file" "$platform" "$name" 2>/dev/null || true)"
   rm -f "$py_script_sha"
 
   if [[ -n "$artifact_sha" ]]; then
@@ -298,25 +281,41 @@ PY
     elif command -v shasum >/dev/null 2>&1; then
       actual_sha="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
     else
-      warn "缺少 sha256sum/shasum，跳过校验和验证"
       actual_sha=""
     fi
     if [[ -n "$actual_sha" && "$actual_sha" != "$artifact_sha" ]]; then
-      err "校验失败！expected $artifact_sha, got $actual_sha"
+      err "$name 校验失败！expected $artifact_sha, got $actual_sha"
       rm -f "$tmp_bin"
       return 1
     fi
-    if [[ -n "$actual_sha" ]]; then
-      info "校验和验证通过"
-    fi
   fi
 
-  # Atomic replace
   chmod +x "$tmp_bin"
-  cp "$tmp_bin" "$INSTALL_DIR/agentgw.new"
-  mv "$INSTALL_DIR/agentgw.new" "$INSTALL_DIR/agentgw"
+  mkdir -p "$(dirname "$dest")"
+  cp "$tmp_bin" "${dest}.new"
+  mv "${dest}.new" "$dest"
   rm -f "$tmp_bin"
-  info "更新完成: $latest_version"
+  info "$name 下载完成"
+}
+
+# Update agentgw from manifest
+self_update() {
+  step "检查更新..."
+  if [[ -x "$INSTALL_DIR/agentgw" ]]; then
+    local current_version latest_version
+    current_version="$("$INSTALL_DIR/agentgw" version 2>/dev/null | awk '{print $2}' || true)"
+    latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)" 2>/dev/null || true
+    if [[ -n "$current_version" && "$current_version" == "$latest_version" ]]; then
+      info "当前已是最新版本: $current_version"
+      return 0
+    fi
+  fi
+  download_artifact agentgw "$INSTALL_DIR/agentgw"
+}
+
+# Download agentd from manifest
+download_agentd() {
+  download_artifact agentd "$INSTALL_DIR/agentd"
 }
 
 # ── Service helpers ────────────────────────────────────────────────
@@ -401,9 +400,12 @@ detect_binary() {
 
 # Detect local agentgw binary for current platform
 sync_local_agentgw_binary() {
+  mkdir -p "$INSTALL_DIR"
+  if [[ -x "$INSTALL_DIR/agentgw" ]]; then
+    return 0
+  fi
   local bin
   bin="$(detect_binary)" || exit 1
-  mkdir -p "$INSTALL_DIR"
   cp "$bin" "$INSTALL_DIR/agentgw"
   chmod +x "$INSTALL_DIR/agentgw"
 }
@@ -498,11 +500,21 @@ restart_services() {
   local gw_bin="$INSTALL_DIR/agentgw"
 
   local local_bin
-  local_bin="$(detect_local_agentd)"
+  local_bin="$(detect_local_agentd 2>/dev/null)" || true
   if [[ -z "$local_bin" || ! -f "$local_bin" ]]; then
-    warn "未找到本地 agentd 二进制文件，跳过 agentd 启动"
-    warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux|-linux-amd64]"
-  else
+    if [[ -x "$INSTALL_DIR/agentd" ]]; then
+      local_bin="$INSTALL_DIR/agentd"
+    else
+      step "本地未找到 agentd，尝试从远程下载..."
+      if download_agentd; then
+        local_bin="$INSTALL_DIR/agentd"
+      else
+        warn "agentd 下载失败，跳过 agentd 启动"
+        local_bin=""
+      fi
+    fi
+  fi
+  if [[ -n "$local_bin" && -f "$local_bin" ]]; then
     sync_local_agentd_token
     step "启动本地 agentd (${local_bin##*/})..."
     nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
@@ -651,7 +663,7 @@ esac
 # ── 0. Read existing config (port etc.) ────────────────────────────
 mkdir -p "$INSTALL_DIR"
 if [[ -f "$INSTALL_DIR/config.json" ]]; then
-  EXISTING_PORT="$(grep '^port:' "$INSTALL_DIR/config.json" 2>/dev/null | head -1 | sed 's/.*port:[[:space:]]*//')" || true
+  EXISTING_PORT="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('port',''))" "$INSTALL_DIR/config.json" 2>/dev/null || true)"
   if [[ -n "$EXISTING_PORT" ]]; then
     GW_PORT="$EXISTING_PORT"
   fi
@@ -798,6 +810,10 @@ register_with_hub() {
   local gw_bin="$1"
   local hub_url="$2"
   [[ -z "$hub_url" ]] && return 0
+  if ! $INTERACTIVE; then
+    warn "非交互模式，跳过 tunnelhub 注册"
+    return 1
+  fi
   step "注册 agentgw 到 tunnelhub..."
   if "$gw_bin" login --hub "$hub_url"; then
     return 0
@@ -857,8 +873,9 @@ if [[ ! -f "$GW_BIN" ]]; then
   fi
 fi
 if [[ ! -f "$GW_BIN" ]]; then
-  err "找不到适合当前平台的 agentgw"
+  err "找不到适合当前平台的 agentgw，且自动更新失败"
   echo "  平台: $(uname -s)/$(uname -m)"
+  echo "  请手动下载: https://api.ilovin.xyz/v1/release/latest"
   exit 1
 fi
 info "平台: $(uname -s)/$(uname -m)"
@@ -1147,11 +1164,21 @@ EOF
 chmod 600 "$RUNTIME_ENV_FILE"
 
 # ── 7. Start local agentd ─────────────────────────────────────────
-local_bin="$(detect_local_agentd)"
+local_bin="$(detect_local_agentd 2>/dev/null)" || true
 if [[ -z "$local_bin" || ! -f "$local_bin" ]]; then
-  warn "未找到本地 agentd 二进制文件，跳过本地 agentd 启动"
-  warn "预期位置: $SCRIPT_DIR/../agentd/agentd[-darwin|-linux]"
-else
+  if [[ -x "$INSTALL_DIR/agentd" ]]; then
+    local_bin="$INSTALL_DIR/agentd"
+  else
+    step "本地未找到 agentd，尝试从远程下载..."
+    if download_agentd; then
+      local_bin="$INSTALL_DIR/agentd"
+    else
+      warn "agentd 下载失败，跳过本地 agentd"
+      local_bin=""
+    fi
+  fi
+fi
+if [[ -n "$local_bin" && -f "$local_bin" ]]; then
   sync_local_agentd_token
   step "启动本地 agentd (${local_bin##*/})..."
   nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
