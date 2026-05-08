@@ -345,50 +345,11 @@ List<SessionCandidate> parseSessionCandidates(dynamic result) {
                   const [])
             : const []);
 
-  final rawClaude = result is Map<String, dynamic>
-      ? (result['claudeFiles'] as List?) ?? const []
-      : const [];
-
-  final rawOpencode = result is Map<String, dynamic>
-      ? (result['opencodeFiles'] as List?) ?? const []
-      : const [];
-
   final attachable = rawAttachable.whereType<Map>().map(
     (e) => SessionCandidate.fromJson(Map<String, dynamic>.from(e)),
   );
 
-  final claudeFiles = rawClaude.whereType<Map>().map((e) {
-    final m = Map<String, dynamic>.from(e);
-    return SessionCandidate(
-      pid: null,
-      provider: 'claude',
-      workDir: m['workDir'] as String? ?? '',
-      sessionId: m['id'] as String?,
-      terminal: null,
-      attachMode: '',
-      isReadOnly: false,
-      readOnlyReason: '',
-    );
-  });
-
-  // Include OpenCode file sessions - these can be resumed even without a running process
-  final opencodeFiles = rawOpencode.whereType<Map>().map((e) {
-    final m = Map<String, dynamic>.from(e);
-    final sessionId = m['id'] as String? ?? '';
-    return SessionCandidate(
-      pid: null,
-      provider: 'opencode',
-      workDir: '',
-      sessionId: sessionId,
-      terminal: null,
-      attachMode: '',
-      isReadOnly: false,
-      readOnlyReason: '',
-      projectName: shortSessionId(sessionId),
-    );
-  });
-
-  return [...attachable, ...claudeFiles, ...opencodeFiles];
+  return [...attachable];
 }
 
 String managedVisibilityKey(AgentModel agent) {
@@ -519,32 +480,6 @@ List<DashboardSessionTarget> buildVisibleDashboardSessions(NodeState state) {
 }
 
 
-class OpencodeFileCandidate {
-  final String id;
-  final String name;
-
-  const OpencodeFileCandidate({required this.id, required this.name});
-
-  factory OpencodeFileCandidate.fromJson(Map<String, dynamic> json) =>
-      OpencodeFileCandidate(
-        id: json['id'] as String? ?? '',
-        name: json['name'] as String? ?? (json['id'] as String? ?? ''),
-      );
-}
-
-List<OpencodeFileCandidate> parseOpencodeFiles(dynamic result) {
-  final rawList = result is List
-      ? result
-      : (result is Map<String, dynamic>
-            ? (result['opencodeFiles'] as List?) ?? const []
-            : const []);
-
-  return rawList
-      .whereType<Map>()
-      .map((e) => OpencodeFileCandidate.fromJson(Map<String, dynamic>.from(e)))
-      .where((e) => e.id.isNotEmpty)
-      .toList();
-}
 
 class DashboardScreen extends ConsumerStatefulWidget {
   const DashboardScreen({super.key});
@@ -2205,7 +2140,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
 
     List<AgentModel> managedAgents = [];
     List<SessionCandidate> sessions = [];
-    List<OpencodeFileCandidate> opencodeFiles = [];
     bool autoAttachDone = false;
 
     List<AgentModel> normalizeManaged(List<AgentModel> input) {
@@ -2370,7 +2304,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       setState(() {
         managedAgents = fetchedManaged;
         sessions = fetchedSessions;
-        opencodeFiles = const [];
       });
     }
 
@@ -2476,7 +2409,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
         managedAgents,
       );
       print('[SessionManager] visible sessions count=${sessions.length}');
-      opencodeFiles = const [];
     } catch (e, st) {
       print('[SessionManager] init error: $e');
       print('[SessionManager] stack: $st');
@@ -2502,8 +2434,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
               width: double.maxFinite,
               child:
                   (managedAgents.isEmpty &&
-                      sessions.isEmpty &&
-                      opencodeFiles.isEmpty)
+                      sessions.isEmpty)
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 16),
                       child: Text('暂无会话', style: TextStyle(color: Colors.grey)),
@@ -2519,34 +2450,65 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                             ),
                             const SizedBox(height: 8),
                             ...managedAgents.map((a) {
-                              return ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: Icon(
-                                  providerIcon(a.provider),
-                                  size: 18,
-                                  color: providerColor(a.provider),
-                                ),
-                                title: Text(
-                                  _agentDisplayTitle(a),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(
-                                  _agentSubtitleText(a),
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: AgentStatusTheme.getColor(a.status),
+                              return Dismissible(
+                                key: ValueKey(a.id),
+                                direction: DismissDirection.endToStart,
+                                background: Container(
+                                  alignment: Alignment.centerRight,
+                                  padding: const EdgeInsets.only(right: 16),
+                                  color: Colors.red,
+                                  child: const Text(
+                                    '取消管理',
+                                    style: TextStyle(color: Colors.white),
                                   ),
                                 ),
-                                trailing: const Text('进入'),
-                                onTap: () {
-                                  Navigator.pop(ctx);
-                                  context.push(
-                                    '/agent/${widget.node.id}/${a.id}',
-                                  );
+                                confirmDismiss: (_) async {
+                                  try {
+                                    await client.call('agent.remove', {'agentId': a.id});
+                                    return true;
+                                  } catch (e) {
+                                    if (ctx.mounted) {
+                                      ScaffoldMessenger.of(ctx).showSnackBar(
+                                        SnackBar(content: Text('取消管理失败: $e')),
+                                      );
+                                    }
+                                    return false;
+                                  }
                                 },
+                                onDismissed: (_) {
+                                  setState(() {
+                                    managedAgents.removeWhere((m) => m.id == a.id);
+                                  });
+                                },
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                  leading: Icon(
+                                    providerIcon(a.provider),
+                                    size: 18,
+                                    color: providerColor(a.provider),
+                                  ),
+                                  title: Text(
+                                    _agentDisplayTitle(a),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    _agentSubtitleText(a),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: AgentStatusTheme.getColor(a.status),
+                                    ),
+                                  ),
+                                  trailing: const Text('进入'),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    context.push(
+                                      '/agent/${widget.node.id}/${a.id}',
+                                    );
+                                  },
+                                ),
                               );
                             }),
                           ],
@@ -2617,50 +2579,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                               );
                             }),
                           ],
-                          if (opencodeFiles.isNotEmpty) ...[
-                            const Padding(
-                              padding: EdgeInsets.symmetric(vertical: 8),
-                              child: Divider(height: 1),
-                            ),
-                            const Text(
-                              'OpenCode 历史会话文件',
-                              style: TextStyle(fontWeight: FontWeight.w600),
-                            ),
-                            const SizedBox(height: 8),
-                            ...opencodeFiles.map(
-                              (f) => ListTile(
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
-                                leading: const Icon(Icons.history, size: 18),
-                                title: Text(f.name),
-                                subtitle: const Text('不一定在运行，可恢复为托管会话'),
-                                trailing: TextButton(
-                                  onPressed: () async {
-                                    final ok = await confirmAction(
-                                      ctx,
-                                      '恢复会话',
-                                      '将从历史文件恢复 ${f.name}，是否继续？',
-                                    );
-                                    if (!ok || !ctx.mounted) return;
-                                    final err = await _restoreOpencodeFile(
-                                      ref,
-                                      f.id,
-                                    );
-                                    if (!ctx.mounted) return;
-                                    ScaffoldMessenger.of(ctx).showSnackBar(
-                                      SnackBar(
-                                        content: Text(
-                                          err == null ? '恢复成功' : '恢复失败: $err',
-                                        ),
-                                      ),
-                                    );
-                                    await fetchCatalog(setState, ctx);
-                                  },
-                                  child: const Text('恢复'),
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
@@ -2716,25 +2634,6 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       return null;
     } catch (e) {
       debugPrint('session.attach error: $e');
-      return e.toString();
-    }
-  }
-
-  Future<String?> _restoreOpencodeFile(WidgetRef ref, String sessionId) async {
-    final client = ref.read(connectionProvider);
-    if (client == null) return 'not connected';
-    try {
-      await client.call('session.create', {
-        'nodeId': widget.node.id,
-        'provider': 'opencode',
-        'sessionId': sessionId,
-        'name': 'opencode-$sessionId',
-        'workDir': '',
-      });
-      await _refreshAgents(ref);
-      return null;
-    } catch (e) {
-      debugPrint('opencode restore error: $e');
       return e.toString();
     }
   }

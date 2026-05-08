@@ -102,8 +102,6 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.sessionAttach(req)
 	case "session.catalog":
 		return h.sessionCatalog(req), nil
-	case "opencode.discover":
-		return h.opencodeDiscover(req), nil
 	case "conversation.send":
 		return h.conversationSend(req), nil
 	case "conversation.key":
@@ -422,65 +420,6 @@ func toAnySlice(v any) []any {
 	return out
 }
 
-func catalogSessionID(v any) string {
-	entry, ok := v.(map[string]any)
-	if !ok {
-		return ""
-	}
-	if sessionID, _ := entry["sessionId"].(string); sessionID != "" {
-		return sessionID
-	}
-	if sessionID, _ := entry["id"].(string); sessionID != "" {
-		return sessionID
-	}
-	sessionFile, _ := entry["sessionFile"].(string)
-	if sessionFile == "" {
-		return ""
-	}
-	base := filepath.Base(sessionFile)
-	if strings.HasSuffix(base, ".jsonl") {
-		return strings.TrimSuffix(base, ".jsonl")
-	}
-	if strings.HasSuffix(base, ".json") {
-		return strings.TrimSuffix(base, ".json")
-	}
-	return ""
-}
-
-func filterLiveClaudeFileSessions(attachableProcesses, claudeFiles []any) []any {
-	liveClaudeSessionIDs := make(map[string]struct{})
-	for _, raw := range attachableProcesses {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		provider, _ := entry["provider"].(string)
-		if !strings.EqualFold(provider, "claude") {
-			continue
-		}
-		sessionID := catalogSessionID(entry)
-		if sessionID == "" {
-			continue
-		}
-		liveClaudeSessionIDs[strings.ToLower(sessionID)] = struct{}{}
-	}
-	if len(liveClaudeSessionIDs) == 0 {
-		return claudeFiles
-	}
-
-	filtered := make([]any, 0, len(claudeFiles))
-	for _, raw := range claudeFiles {
-		sessionID := catalogSessionID(raw)
-		if sessionID != "" {
-			if _, ok := liveClaudeSessionIDs[strings.ToLower(sessionID)]; ok {
-				continue
-			}
-		}
-		filtered = append(filtered, raw)
-	}
-	return filtered
-}
-
 func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 	type managedAgent struct {
 		ID          string `json:"id"`
@@ -555,37 +494,12 @@ func (h *handler) sessionCatalog(req RPCRequest) RPCResponse {
 		return attachableResp
 	}
 
-	opencodeResp := h.opencodeDiscover(req)
-	if opencodeResp.Error != nil {
-		return opencodeResp
-	}
-
-	claudeResp := h.claudeDiscover(req)
-	if claudeResp.Error != nil {
-		return claudeResp
-	}
-
 	attachable, _ := attachableResp.Result.(map[string]any)
-	opencodeFiles, _ := opencodeResp.Result.(map[string]any)
-	claudeFiles, _ := claudeResp.Result.(map[string]any)
-
 	attachableProcesses := toAnySlice(attachable["processes"])
-	filteredAttachable := make([]any, 0, len(attachableProcesses))
-	for _, raw := range attachableProcesses {
-		_, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		filteredAttachable = append(filteredAttachable, raw)
-	}
-	files := toAnySlice(opencodeFiles["sessions"])
-	claude := filterLiveClaudeFileSessions(filteredAttachable, toAnySlice(claudeFiles["sessions"]))
 
 	return okResp(req.ID, map[string]any{
-		"managed":       managed,
-		"attachable":    filteredAttachable,
-		"opencodeFiles": files,
-		"claudeFiles":   claude,
+		"managed":    managed,
+		"attachable": attachableProcesses,
 	})
 }
 
@@ -1404,205 +1318,6 @@ func (h *handler) conversationClear(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{"ok": true})
 }
 
-// opencodeDiscover scans for available opencode sessions on the machine.
-// It scans both the current user's home directory and all other users' home directories
-// (useful when agentd runs as root but sessions are in user directories).
-func (h *handler) opencodeDiscover(req RPCRequest) RPCResponse {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return errResp(req.ID, -32000, "cannot get home dir: "+err.Error())
-	}
-
-	type sessionInfo struct {
-		ID         string    `json:"id"`
-		Name       string    `json:"name"`
-		ModifiedAt time.Time `json:"modifiedAt"`
-		Size       int64     `json:"size"`
-	}
-
-	// Build list of directories to scan.
-	// OpenCode may store sessions under session_diff or session subdirectories.
-	opencodeStorageDirs := []string{
-		filepath.Join(home, ".local", "share", "opencode", "storage"),
-		filepath.Join(home, "Library", "Application Support", "opencode", "storage"),
-		filepath.Join(home, "Library", "Application Support", "OpenCode", "storage"),
-	}
-
-	// On Linux, also scan all user home directories under /home
-	// This allows agentd running as root to find sessions from all users
-	if _, err := os.Stat("/home"); err == nil {
-		entries, err := os.ReadDir("/home")
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				userHome := filepath.Join("/home", entry.Name())
-				opencodeStorageDirs = append(opencodeStorageDirs, filepath.Join(userHome, ".local", "share", "opencode", "storage"))
-			}
-		}
-	}
-
-	// Expand storage dirs into candidate session subdirectories
-	var sessionDirs []string
-	for _, storageDir := range opencodeStorageDirs {
-		sessionDirs = append(sessionDirs,
-			filepath.Join(storageDir, "session_diff"),
-			filepath.Join(storageDir, "session"),
-		)
-	}
-
-	sessionsByID := make(map[string]sessionInfo)
-	for _, sessionDir := range sessionDirs {
-		entries, err := os.ReadDir(sessionDir)
-		if err != nil {
-			continue
-		}
-
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			if !strings.HasSuffix(name, ".json") {
-				continue
-			}
-			sessionID := strings.TrimSuffix(name, ".json")
-			// Accept any session file; ses_ prefix is common but not guaranteed
-			if sessionID == "" {
-				continue
-			}
-
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-
-			candidate := sessionInfo{
-				ID:         sessionID,
-				Name:       sessionID,
-				ModifiedAt: info.ModTime(),
-				Size:       info.Size(),
-			}
-			if existing, ok := sessionsByID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
-				sessionsByID[sessionID] = candidate
-			}
-		}
-	}
-
-	sessions := make([]sessionInfo, 0, len(sessionsByID))
-	for _, s := range sessionsByID {
-		sessions = append(sessions, s)
-	}
-
-	return okResp(req.ID, map[string]any{
-		"sessions": sessions,
-	})
-}
-
-func (h *handler) claudeDiscover(req RPCRequest) RPCResponse {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return errResp(req.ID, -32000, "cannot get home dir: "+err.Error())
-	}
-
-	type sessionInfo struct {
-		ID          string    `json:"id"`
-		Name        string    `json:"name"`
-		WorkDir     string    `json:"workDir"`
-		ProjectName string    `json:"projectName,omitempty"`
-		SessionFile string    `json:"sessionFile"`
-		ModifiedAt  time.Time `json:"modifiedAt"`
-		Size        int64     `json:"size"`
-	}
-
-	// extractProjectName extracts a human-readable project name from directory name
-	// e.g., "-Users-fengming-xie-Downloads" -> "Downloads"
-
-	extractProjectName := func(dirName string) string {
-		// Remove leading dash
-		s := strings.TrimPrefix(dirName, "-")
-		// Split by "-" and take the last part
-		parts := strings.Split(s, "-")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
-		}
-		return dirName
-	}
-	projectsDir := filepath.Join(home, ".claude", "projects")
-
-	// Collect all projects dirs to scan (current user + /home/*)
-	projectsDirs := []string{projectsDir}
-	if _, err := os.Stat("/home"); err == nil {
-		entries, err := os.ReadDir("/home")
-		if err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-				userProjects := filepath.Join("/home", entry.Name(), ".claude", "projects")
-				if _, err := os.Stat(userProjects); err == nil {
-					projectsDirs = append(projectsDirs, userProjects)
-				}
-			}
-		}
-	}
-
-	sessionsByID := make(map[string]sessionInfo)
-	cutoff := time.Now().Add(-7 * 24 * time.Hour) // Only include sessions from the last 7 days
-	for _, pDir := range projectsDirs {
-		projectEntries, err := os.ReadDir(pDir)
-		if err != nil {
-			continue
-		}
-		for _, project := range projectEntries {
-			if !project.IsDir() {
-				continue
-			}
-			projectPath := filepath.Join(pDir, project.Name())
-			entries, err := os.ReadDir(projectPath)
-			if err != nil {
-				continue
-			}
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-					continue
-				}
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				// Skip old sessions
-				if info.ModTime().Before(cutoff) {
-					continue
-				}
-				sessionID := strings.TrimSuffix(entry.Name(), ".jsonl")
-				if sessionID == "" {
-					continue
-				}
-				candidate := sessionInfo{
-					ID:          sessionID,
-					Name:        sessionID,
-					WorkDir:     project.Name(),
-					ProjectName: extractProjectName(project.Name()),
-					SessionFile: filepath.Join(projectPath, entry.Name()),
-					ModifiedAt:  info.ModTime(),
-					Size:        info.Size(),
-				}
-				if existing, ok := sessionsByID[sessionID]; !ok || candidate.ModifiedAt.After(existing.ModifiedAt) {
-					sessionsByID[sessionID] = candidate
-				}
-			}
-		}
-	}
-
-	sessions := make([]sessionInfo, 0, len(sessionsByID))
-	for _, s := range sessionsByID {
-		sessions = append(sessions, s)
-	}
-
-	return okResp(req.ID, map[string]any{"sessions": sessions})
-}
 
 // agentScan discovers all existing Claude/OpenCode processes on the system.
 func (h *handler) agentScan(req RPCRequest) RPCResponse {
