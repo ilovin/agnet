@@ -274,10 +274,10 @@
             <div class="guide-step">
                 <div class="step-number">2</div>
                 <div class="step-content">
-                    <h3>启动并获取二维码</h3>
-                    <p>运行 <code>~/.agentgw/agentgw start --qr</code> 启动网关，<strong>终端会显示连接二维码</strong>。请直接扫描终端中的二维码。</p>
+                    <h3>启动网关</h3>
+                    <p>运行 <code>~/.agentgw/agentgw start --qr</code> 启动网关。终端会显示连接二维码。</p>
                     <p style="margin-top: 8px; color: #667eea; font-size: 0.9em;">
-                        <strong>提示：</strong>如果二维码已滚动消失，运行 <code>~/.agentgw/agentgw qr</code> 可重新显示。
+                        <strong>更快捷的方式：</strong>如果网关和本网页在同一台电脑运行，直接点击下方"本机连接"区域的"尝试连接本机 gw"按钮，即可生成二维码并扫码连接。
                     </p>
                 </div>
             </div>
@@ -285,8 +285,15 @@
             <div class="guide-step">
                 <div class="step-number">3</div>
                 <div class="step-content">
-                    <h3>手机连接</h3>
-                    <p>安装 APK 后打开 App，点击右上角 "+" → "扫描二维码"，对准终端显示的二维码即可自动连接。</p>
+                    <h3>手机扫码连接</h3>
+                    <p>安装 APK 后打开 App，点击右上角 "+" → "扫描二维码"。</p>
+                    <p style="margin-top: 8px; color: #666;">
+                        <strong>扫码来源（二选一）：</strong>
+                    </p>
+                    <ul style="margin-top: 4px; padding-left: 20px; color: #666;">
+                        <li><strong>终端二维码：</strong>扫描 agentgw 启动时终端显示的二维码</li>
+                        <li><strong style="color: #667eea;">网页二维码：</strong>点击下方"尝试连接本机 gw"按钮，直接显示本机/远程二维码后扫描</li>
+                    </ul>
                 </div>
             </div>
 
