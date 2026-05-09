@@ -907,6 +907,7 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	}
 	h.server.broadcast(event("conversation.message", broadcastData), nil)
 
+	ag.SetStatus(agent.StatusWorking)
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	return okResp(req.ID, map[string]any{"id": ag.ID})
@@ -967,6 +968,7 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 		return errResp(req.ID, -32000, "start with message: "+err.Error())
 	}
 
+	ag.SetStatus(agent.StatusWorking)
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
 
 	return okResp(req.ID, map[string]any{"id": ag.ID})

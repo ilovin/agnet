@@ -1822,6 +1822,26 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			existing.Watcher().Stop()
 			existing.setWatcher(nil)
 		}
+
+		// Load historical events on re-attach so conversation.history has data.
+		if info.Provider == "opencode" && sessionID != "" {
+			if historyEvents, err := watcher.OpenCodeDBHistory(sessionID); err == nil && len(historyEvents) > 0 {
+				log.Printf("[ReAttach] Loaded %d historical events for OpenCode agent %s", len(historyEvents), existing.ID)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(existing.ID, existing, data)
+				}
+			}
+		} else if info.Provider == "claude" && sessionFile != "" {
+			if historyEvents, err := watcher.LoadClaudeJSONLHistory(sessionFile); err == nil && len(historyEvents) > 0 {
+				log.Printf("[ReAttach] Loaded %d historical events for Claude agent %s", len(historyEvents), existing.ID)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(existing.ID, existing, data)
+				}
+			}
+		}
+
 		if !isDisplayOnly && (sessionFile != "" || info.Provider == "opencode") {
 			cb := m.makeWatcherCallback(existing.ID, existing)
 			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)

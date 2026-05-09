@@ -69,7 +69,8 @@ class NodesNotifier extends StateNotifier<NodeState> {
     for (final rpcAgent in rpcAgents) {
       final prev = existing[rpcAgent.id];
       if (prev != null) {
-        // Preserve WS-updated dynamic fields, update static fields from RPC
+        // Use RPC status as authoritative source; WS events are for real-time
+        // updates between RPC refreshes, but RPC represents current ground truth.
         merged.add(AgentModel(
           id: rpcAgent.id,
           nodeId: rpcAgent.nodeId,
@@ -82,19 +83,19 @@ class NodesNotifier extends StateNotifier<NodeState> {
           attachMode: rpcAgent.attachMode,
           projectName: rpcAgent.projectName,
           sessionId: rpcAgent.sessionId,
-          // Dynamic fields preserved from WS (local state)
-          status: prev.status,
-          runtimeState: prev.runtimeState,
-          sessionState: prev.sessionState,
-          sessionStateReason: prev.sessionStateReason,
-          sessionControl: prev.sessionControl,
-          providerState: prev.providerState,
-          providerScope: prev.providerScope,
-          providerWriteMode: prev.providerWriteMode,
-          providerReadOnlyReason: prev.providerReadOnlyReason,
-          permissionMode: prev.permissionMode,
-          isReadOnly: prev.isReadOnly,
-          readOnlyReason: prev.readOnlyReason,
+          // Dynamic fields from RPC (authoritative)
+          status: rpcAgent.status,
+          runtimeState: rpcAgent.runtimeState,
+          sessionState: rpcAgent.sessionState,
+          sessionStateReason: rpcAgent.sessionStateReason,
+          sessionControl: rpcAgent.sessionControl,
+          providerState: rpcAgent.providerState,
+          providerScope: rpcAgent.providerScope,
+          providerWriteMode: rpcAgent.providerWriteMode,
+          providerReadOnlyReason: rpcAgent.providerReadOnlyReason,
+          permissionMode: rpcAgent.permissionMode,
+          isReadOnly: rpcAgent.isReadOnly,
+          readOnlyReason: rpcAgent.readOnlyReason,
           lastMessageTime: (rpcAgent.lastMessageTime != null &&
                   (prev.lastMessageTime == null || rpcAgent.lastMessageTime! > prev.lastMessageTime!))
               ? rpcAgent.lastMessageTime

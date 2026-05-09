@@ -17,6 +17,7 @@ cd "$(dirname "$0")/.."
 AGENTD_DIR="./agentd"
 AGENTGW_DIR="./agentgw"
 AGENTAPP_DIR="./agentapp"
+AGENTCLI_DIR="./agentcli"
 
 # Colors for output
 RED='\033[0;31m'
@@ -65,8 +66,8 @@ EOF
 }
 
 run_unit_tests() {
-  local agentd_ok=0 agentgw_ok=0
-  local agentd_output="" agentgw_output=""
+  local agentd_ok=0 agentgw_ok=0 agentcli_ok=0
+  local agentd_output="" agentgw_output="" agentcli_output=""
 
   echo "[test] Running Go unit tests..."
   echo ""
@@ -93,6 +94,16 @@ run_unit_tests() {
   fi
   echo ""
 
+  echo "[test] agentcli: go test ./..."
+  if agentcli_output=$(cd "$AGENTCLI_DIR" && go test ./... 2>&1); then
+    agentcli_ok=1
+    echo -e "${GREEN}[test] agentcli: PASS${NC}"
+  else
+    echo -e "${RED}[test] agentcli: FAIL${NC}"
+    echo "$agentcli_output"
+  fi
+  echo ""
+
   # Consolidated summary
   echo "========================================"
   echo "           TEST SUMMARY"
@@ -108,9 +119,15 @@ run_unit_tests() {
   else
     echo -e "  agentgw : ${RED}FAIL${NC}"
   fi
+
+  if [[ $agentcli_ok -eq 1 ]]; then
+    echo -e "  agentcli: ${GREEN}PASS${NC}"
+  else
+    echo -e "  agentcli: ${RED}FAIL${NC}"
+  fi
   echo "========================================"
 
-  if [[ $agentd_ok -eq 1 && $agentgw_ok -eq 1 ]]; then
+  if [[ $agentd_ok -eq 1 && $agentgw_ok -eq 1 && $agentcli_ok -eq 1 ]]; then
     echo -e "${GREEN}All tests passed.${NC}"
     return 0
   else

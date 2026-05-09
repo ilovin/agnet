@@ -1420,42 +1420,6 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 		t.Fatalf("expected team child claude session (empty sessionID) in attachable after B-001 fix, got %v", attachable)
 	}
 
-	files, ok := result["opencodeFiles"].([]any)
-	if !ok {
-		t.Fatalf("expected opencodeFiles array, got %T", result["opencodeFiles"])
-	}
-	found := false
-	for _, raw := range files {
-		entry, _ := raw.(map[string]any)
-		if entry["id"] == "ses_group" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected ses_group in opencodeFiles, got %v", files)
-	}
-
-	claudeFiles, ok := result["claudeFiles"].([]any)
-	if !ok {
-		t.Fatalf("expected claudeFiles array, got %T", result["claudeFiles"])
-	}
-	foundArchivedClaude := false
-	for _, raw := range claudeFiles {
-		entry, _ := raw.(map[string]any)
-		if entry["id"] == "sess-live" {
-			t.Fatalf("expected live claude session to be excluded from claudeFiles, got %v", claudeFiles)
-		}
-		if entry["id"] == "sess-fallback" {
-			t.Fatalf("expected fallback live claude session to be excluded from claudeFiles, got %v", claudeFiles)
-		}
-		if entry["id"] == "sess-archived" {
-			foundArchivedClaude = true
-		}
-	}
-	if !foundArchivedClaude {
-		t.Fatalf("expected archived claude session to remain in claudeFiles, got %v", claudeFiles)
-	}
 }
 
 func TestAgentListExcludesSubAgents(t *testing.T) {

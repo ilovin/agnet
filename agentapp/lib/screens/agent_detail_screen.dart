@@ -1000,6 +1000,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   Timer? _pollTimer;
   bool _pollingNewEvents = false;
 
+  // Cached message processing results to avoid O(n) recomputation on every build.
+  // These are rebuilt whenever _rawEvents changes.
+  List<ChatMessage> _cachedReversed = [];
+  int _cachedLastAssistantIndex = -1;
+
   // Permission handling mode (mobile-friendly option)
   // true = auto-resolve (default for mobile), false = manual confirmation
   bool _autoResolvePermissions = true;
@@ -1040,11 +1045,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _oldestSeq = oldestConversationSeq(cachedEvents);
         _hasMoreHistory = _oldestSeq > 1;
         _initialLoading = false;
+        _rebuildMessageCache();
       });
       _touchMessageCache(cachedEvents: cachedEvents);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToBottom(force: true, animate: false);
-      });
     }
 
     // Load fresh data in background
@@ -1089,6 +1092,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     _lastError = null;
     _pollingNewEvents = false;
     _agentName = null;
+    _rebuildMessageCache();
     final cachedEntry = _messageCache[_cacheKey];
     if (cachedEntry != null && cachedEntry.events.isNotEmpty) {
       final cachedEvents = List<Map<String, dynamic>>.from(cachedEntry.events);
@@ -1097,11 +1101,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _oldestSeq = oldestConversationSeq(cachedEvents);
       _hasMoreHistory = _oldestSeq > 1;
       _initialLoading = false;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _scrollToBottom(force: true, animate: false);
-        }
-      });
+      _rebuildMessageCache();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -1126,6 +1126,25 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   String get _cacheKey => '${widget.nodeId}:${widget.agentId}';
 
+  /// Rebuilds cached message processing results from _rawEvents.
+  /// Must be called after any mutation to _rawEvents (inside setState is fine).
+  void _rebuildMessageCache() {
+    final messages = collapseConsecutiveActivityBlocks(
+      convertEventsToMessages(_rawEvents),
+    );
+    _cachedReversed = messages.reversed.toList();
+    int lastAssistantIndex = -1;
+    for (int i = 0; i < _cachedReversed.length; i++) {
+      if (_cachedReversed[i].role == 'assistant' &&
+          !_cachedReversed[i].isToolCall &&
+          !_cachedReversed[i].isActivityBlock) {
+        lastAssistantIndex = i;
+        break;
+      }
+    }
+    _cachedLastAssistantIndex = lastAssistantIndex;
+  }
+
   void _onPushEvent(WsMessage event) {
     if (event.method != 'conversation.cleared') return;
     final params = event.params as Map<String, dynamic>?;
@@ -1139,6 +1158,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _oldestSeq = 0;
       _hasMoreHistory = true;
       _loading = false;
+      _rebuildMessageCache();
     });
     _touchMessageCache(cachedEvents: []);
     ref.read(conversationProvider.notifier).clear(nodeId, agentId);
@@ -1167,8 +1187,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   void _handleScroll() {
     if (!_scrollCtrl.hasClients) return;
     _lastUserScroll = DateTime.now();
-    final distance = _scrollCtrl.position.maxScrollExtent - _scrollCtrl.offset;
-    final shouldStick = distance < 120;
+    // Reversed ListView: offset 0 = bottom (newest), maxScrollExtent = top (oldest)
+    final shouldStick = _scrollCtrl.offset < 120;
     final showJump = !shouldStick;
     if (shouldStick != _stickToBottom || showJump != _showJumpToLatest) {
       setState(() {
@@ -1176,8 +1196,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _showJumpToLatest = showJump;
       });
     }
-    // Trigger load-more when scrolled near the top
-    if (_scrollCtrl.offset < 200 && !_loadingOlder && _hasMoreHistory) {
+    // Load older when near the top (near maxScrollExtent in reversed list)
+    if (_scrollCtrl.position.maxScrollExtent - _scrollCtrl.offset < 200 && !_loadingOlder && _hasMoreHistory) {
       _loadOlderHistory();
     }
   }
@@ -1226,6 +1246,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           _initialLoading = false;
           _lastError = null;
           _isLoadingFreshData = false;
+          _rebuildMessageCache();
         });
 
         _touchMessageCache();
@@ -1305,11 +1326,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final client = ref.read(connectionProvider);
     if (client == null) return;
 
-    final prevOffset = _scrollCtrl.hasClients ? _scrollCtrl.offset : 0.0;
-    final prevMax = _scrollCtrl.hasClients
-        ? _scrollCtrl.position.maxScrollExtent
-        : 0.0;
-
     setState(() {
       _loadingOlder = true;
     });
@@ -1340,19 +1356,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         _oldestSeq = ((_rawEvents.first['seq'] as num?)?.toInt() ?? _oldestSeq);
         _hasMoreHistory = _oldestSeq > 1 && older.length >= _pageSize;
         _loadingOlder = false;
+        _rebuildMessageCache();
       });
       _touchMessageCache();
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!_scrollCtrl.hasClients) return;
-        final newMax = _scrollCtrl.position.maxScrollExtent;
-        final delta = newMax - prevMax;
-        final target = (prevOffset + delta).clamp(
-          _scrollCtrl.position.minScrollExtent,
-          _scrollCtrl.position.maxScrollExtent,
-        );
-        _scrollCtrl.jumpTo(target);
-      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1393,6 +1399,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           _oldestSeq = 0;
           _hasMoreHistory = true;
           _initialLoading = true;
+          _rebuildMessageCache();
         });
         _loadHistory();
         return;
@@ -1410,6 +1417,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               _hasMoreHistory = _oldestSeq > 1;
             }
             _lastError = null;
+            _rebuildMessageCache();
           });
           _touchMessageCache();
           _scrollToBottom();
@@ -1451,6 +1459,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 'permissionRequest': perm,
               });
             }
+            _rebuildMessageCache();
           });
           _touchMessageCache();
         }
@@ -1934,7 +1943,6 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollCtrl.hasClients) return;
       if (!force && !_stickToBottom) return;
-      // Don't auto-scroll if user scrolled or tapped recently
       if (!force) {
         final now = DateTime.now();
         if (_lastUserScroll != null &&
@@ -1946,13 +1954,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           return;
         }
       }
-      final offset = _scrollCtrl.position.maxScrollExtent;
+      // Reversed ListView: bottom is offset 0
+      // Skip if already at bottom to avoid visual jitter
+      if (_scrollCtrl.offset <= 1) return;
       if (!animate) {
-        _scrollCtrl.jumpTo(offset);
+        _scrollCtrl.jumpTo(0);
         return;
       }
       _scrollCtrl.animateTo(
-        offset,
+        0,
         duration: const Duration(milliseconds: 200),
         curve: Curves.easeOut,
       );
@@ -2007,23 +2017,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final agents = nodeState.agentsFor(widget.nodeId);
     final agent = agents.where((a) => a.id == widget.agentId).firstOrNull;
 
-    final messages = collapseConsecutiveActivityBlocks(
-      convertEventsToMessages(_rawEvents),
-    );
+    // Use cached message processing results (rebuilt only when _rawEvents changes)
+    final reversed = _cachedReversed;
+    final lastAssistantIndex = _cachedLastAssistantIndex;
     final showPermissionOverlay = hasPendingPermissionPrompt(_rawEvents);
     final provider = agent?.provider ?? '';
-
-    // Find the last assistant text message index for highlighting.
-    // Skip tool calls/results and activity blocks — only highlight real text.
-    int lastAssistantIndex = -1;
-    for (int i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role == 'assistant' &&
-          !messages[i].isToolCall &&
-          !messages[i].isActivityBlock) {
-        lastAssistantIndex = i;
-        break;
-      }
-    }
 
     final activeMode = agent == null
         ? ''
@@ -2156,7 +2154,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                           ),
                         ),
                       )
-                    : messages.isEmpty
+                    : reversed.isEmpty
                     ? const Center(
                         child: Text(
                           '暂无对话',
@@ -2173,18 +2171,20 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                         child: SelectionArea(
                           child: NotificationListener<ScrollNotification>(
                           onNotification: (notification) {
+                            // Reversed: load older near maxScrollExtent (top)
                             if (notification is ScrollUpdateNotification &&
-                                notification.metrics.pixels <=
-                                    notification.metrics.minScrollExtent + 24) {
+                                notification.metrics.maxScrollExtent -
+                                    notification.metrics.pixels <= 24) {
                               _loadOlderHistory();
                             }
                             return false;
                           },
                           child: ListView.builder(
                             controller: _scrollCtrl,
+                            reverse: true,
                             padding: const EdgeInsets.all(12),
                             itemCount:
-                                messages.length +
+                                reversed.length +
                                 (_loadingOlder ? 1 : 0) +
                                 (!_initialLoading && _isLoadingFreshData
                                     ? 1
@@ -2207,11 +2207,10 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                   ),
                                 );
                               }
-                              if (_loadingOlder &&
-                                  i ==
-                                      (!_initialLoading && _isLoadingFreshData
-                                          ? 1
-                                          : 0)) {
+                              final msgOffset = (!_initialLoading && _isLoadingFreshData ? 1 : 0);
+                              final total = reversed.length + msgOffset + (_loadingOlder ? 1 : 0);
+                              // Loading older at top (last index in reversed list)
+                              if (_loadingOlder && i == total - 1) {
                                 return const Padding(
                                   padding: EdgeInsets.only(bottom: 8),
                                   child: Center(
@@ -2225,18 +2224,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                   ),
                                 );
                               }
-                              final idx =
-                                  i -
-                                  (!_initialLoading && _isLoadingFreshData
-                                      ? 1
-                                      : 0) -
-                                  (_loadingOlder ? 1 : 0);
+                              final idx = i - msgOffset;
                               return MessageBubble(
-                                message: messages[idx],
+                                message: reversed[idx],
                                 isLastAssistant: idx == lastAssistantIndex,
                                 showTimestamp: _showTimestamps,
                                 onResolvePermissionPrompt:
-                                    messages[idx].isPermissionPrompt
+                                    reversed[idx].isPermissionPrompt
                                     ? _resolvePermissionPrompt
                                     : null,
                                 onToggleExpand: () {

@@ -51,36 +51,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     context.go('/connections');
   }
 
-  /// ws://host:port/ws  ->  http://host:port
-  String? _httpBase(String wsUrl) {
-    try {
-      final uri = Uri.parse(wsUrl);
-      final scheme = uri.scheme == 'wss' ? 'https' : 'http';
-      final defaultPort = uri.scheme == 'wss' ? 443 : 80;
-      if (uri.port > 0 && uri.port != defaultPort) {
-        return '$scheme://${uri.host}:${uri.port}';
-      }
-      return '$scheme://${uri.host}';
-    } catch (_) {
-      return null;
-    }
-  }
 
   Future<void> _checkForUpdate(BuildContext context) async {
-    final client = ref.read(connectionProvider);
-    if (client == null) {
-      _snack('请先连接到网关');
-      return;
-    }
-
-    final base = _httpBase(client.url);
-    if (base == null) {
-      _snack('无法解析网关地址');
-      return;
-    }
-
-    // Fetch version info first
-    if (!context.mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -96,23 +68,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
 
     try {
-      final versionUrl = Uri.parse('$base/apk/version?token=${Uri.encodeComponent(client.token)}');
-      final resp = await http.get(versionUrl).timeout(const Duration(seconds: 10));
+      const manifestUrl = 'https://download.ilovin.xyz/v1/release/latest';
+      final resp = await http.get(Uri.parse(manifestUrl)).timeout(const Duration(seconds: 15));
 
       if (!context.mounted) return;
-      Navigator.pop(context); // dismiss checking dialog
+      Navigator.pop(context);
 
       if (resp.statusCode != 200) {
-        _snack(resp.statusCode == 404 ? '网关上没有 APK 文件' : 'HTTP ${resp.statusCode}');
+        _snack('获取更新信息失败: HTTP ${resp.statusCode}');
         return;
       }
 
-      final info = jsonDecode(resp.body) as Map<String, dynamic>;
-      final size = info['size'] as int? ?? 0;
-      final modifiedAt = info['modifiedAt'] as String? ?? '';
+      final manifest = jsonDecode(resp.body) as Map<String, dynamic>;
+      final version = manifest['version'] as String? ?? '';
+      final buildDate = manifest['buildDate'] as String? ?? '';
+      final artifacts = manifest['artifacts'] as List<dynamic>? ?? [];
+
+      Map<String, dynamic>? apkInfo;
+      for (final a in artifacts) {
+        if ((a as Map<String, dynamic>)['name'] == 'agentapp') {
+          apkInfo = a['apk'] as Map<String, dynamic>?;
+          break;
+        }
+      }
+      if (apkInfo == null) {
+        _snack('更新信息中未找到 APK');
+        return;
+      }
+
+      final apkUrl = apkInfo['url'] as String? ?? '';
+      final size = apkInfo['size'] as int? ?? 0;
+      if (apkUrl.isEmpty) {
+        _snack('更新信息中未找到下载链接');
+        return;
+      }
 
       if (!context.mounted) return;
-      _showDownloadDialog(context, base, client.token, size, modifiedAt);
+      _showDownloadDialog(context, apkUrl, size, buildDate, version);
     } catch (e) {
       if (context.mounted) Navigator.pop(context);
       _snack('检查更新失败: $e');
@@ -121,18 +113,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   void _showDownloadDialog(
     BuildContext context,
-    String base,
-    String token,
+    String apkUrl,
     int totalSize,
-    String modifiedAt,
+    String buildDate,
+    String version,
   ) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => _DownloadDialog(
-        apkUrl: '$base/apk?token=${Uri.encodeComponent(token)}',
+        apkUrl: apkUrl,
         totalSize: totalSize,
-        modifiedAt: modifiedAt,
+        modifiedAt: buildDate,
+        version: version,
       ),
     );
   }
@@ -284,11 +277,13 @@ class _DownloadDialog extends StatefulWidget {
   final String apkUrl;
   final int totalSize;
   final String modifiedAt;
+  final String version;
 
   const _DownloadDialog({
     required this.apkUrl,
     required this.totalSize,
     required this.modifiedAt,
+    required this.version,
   });
 
   @override
@@ -453,7 +448,7 @@ class _DownloadDialogState extends State<_DownloadDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('更新 APK'),
+      title: Text(widget.version.isNotEmpty ? '更新 ${widget.version}' : '更新 APK'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,

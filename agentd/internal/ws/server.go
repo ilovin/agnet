@@ -83,6 +83,7 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 		if isUpdate, _ := data["_update"].(bool); isUpdate {
 			params := map[string]any{
 				"agentId": agentID,
+				"nodeId":  nodeID,
 				"msg_id":  data["msg_id"],
 				"text":    data["text"],
 				"seq":     data["seq"],
@@ -96,6 +97,7 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 		}
 		params := map[string]any{
 			"agentId": agentID,
+			"nodeId":  nodeID,
 			"role":    data["role"],
 			"text":    data["text"],
 		}

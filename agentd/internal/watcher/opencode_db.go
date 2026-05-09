@@ -32,8 +32,9 @@ type OpenCodeDBWatcher struct {
 	// Streaming message tracking: opencode writes parts progressively,
 	// so the most recent message may receive new parts between polls.
 	// We keep re-querying it until a newer message appears.
-	streamingMsgID   string // msgID of the message still receiving parts
-	streamingMsgText string // last emitted text for the streaming message
+	streamingMsgID      string // msgID of the message still receiving parts
+	streamingMsgText    string // last emitted text for the streaming message
+	streamingUnchanged  int    // consecutive polls with unchanged text
 }
 
 // NewOpenCodeDBWatcher creates a watcher that reads conversation data from
@@ -123,9 +124,20 @@ func (w *OpenCodeDBWatcher) SetSkipExisting(bool) {}
 // ResetOffset resets the message tracking so historical messages are not re-read
 // after a conversation.clear.
 func (w *OpenCodeDBWatcher) ResetOffset() {
-	w.lastMsgID = ""
 	w.streamingMsgID = ""
 	w.streamingMsgText = ""
+	// Seed lastMsgID to the latest message so we don't re-process history after clear
+	if w.dbPath != "" {
+		if db, err := w.getDB(); err == nil {
+			var lastID string
+			if err := db.QueryRow(
+				`SELECT id FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1`,
+				w.sessionID,
+			).Scan(&lastID); err == nil && lastID != "" {
+				w.lastMsgID = lastID
+			}
+		}
+	}
 }
 
 func (w *OpenCodeDBWatcher) SetWorkDir(dir string) {
@@ -257,7 +269,14 @@ func (w *OpenCodeDBWatcher) poll() {
 				if part.Text != "" {
 					textParts = append(textParts, part.Text)
 				}
-			case "tool-invocation", "tool-result":
+			case "reasoning":
+				if part.Text != "" {
+					textParts = append(textParts, part.Text)
+				}
+				hasToolUse = true
+			case "step-start", "step-finish":
+				hasToolUse = true
+			case "tool-invocation", "tool-result", "tool":
 				hasToolUse = true
 			}
 		}
@@ -312,9 +331,20 @@ func (w *OpenCodeDBWatcher) poll() {
 	if last.id == w.streamingMsgID {
 		// Same message as last poll — check if text changed
 		if last.text == w.streamingMsgText {
-			return // no change, skip
+			w.streamingUnchanged++
+			if w.streamingUnchanged >= 10 && last.role == "assistant" {
+				// No text change for ~30s — treat as complete
+				s := StatusStandby
+				w.callback(ConversationEvent{StatusChange: &s})
+				w.lastMsgID = last.id
+				w.streamingMsgID = ""
+				w.streamingMsgText = ""
+				w.streamingUnchanged = 0
+			}
+			return
 		}
 		// Text updated — emit update event
+		w.streamingUnchanged = 0
 		w.streamingMsgText = last.text
 		if last.text != "" {
 			ev := ConversationEvent{
@@ -345,6 +375,13 @@ func (w *OpenCodeDBWatcher) poll() {
 			ev.StatusChange = &s
 		}
 		w.callback(ev)
+	} else if last.role == "assistant" {
+		s := StatusWorking
+		w.callback(ConversationEvent{
+			Role:         last.role,
+			MsgID:        last.id,
+			StatusChange: &s,
+		})
 	}
 }
 

@@ -2670,6 +2670,19 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
+  Widget _buildUnreadBadge() {
+    final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, widget.agent.id)] ?? 0;
+    if (unreadCount == 0) return const SizedBox.shrink();
+    return Container(
+      width: 10,
+      height: 10,
+      decoration: const BoxDecoration(
+        color: Colors.red,
+        shape: BoxShape.circle,
+      ),
+    );
+  }
+
   Widget _buildStatusTime(BuildContext context) {
     final agent = widget.agent;
     final statusText =
@@ -2943,24 +2956,34 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 ),
               ),
             )
-          : InkWell(
-              onTap: () {
-                final t = agent.lastMessageTime;
-                if (t != null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('最后消息：${_formatRelativeTime(t)}'),
-                      duration: const Duration(seconds: 2),
-                    ),
-                  );
-                }
-              },
-              onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
-              borderRadius: BorderRadius.circular(16),
-              child: Padding(
-                padding: const EdgeInsets.all(2),
-                child: Icon(sessionLogo, color: providerColor(agent.provider), size: 18),
-              ),
+          : Stack(
+              clipBehavior: Clip.none,
+              children: [
+                InkWell(
+                  onTap: () {
+                    final t = agent.lastMessageTime;
+                    if (t != null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('最后消息：${_formatRelativeTime(t)}'),
+                          duration: const Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  },
+                  onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
+                  borderRadius: BorderRadius.circular(16),
+                  child: Padding(
+                    padding: const EdgeInsets.all(2),
+                    child: Icon(sessionLogo, color: providerColor(agent.provider), size: 18),
+                  ),
+                ),
+                Positioned(
+                  right: -2,
+                  top: -2,
+                  child: _buildUnreadBadge(),
+                ),
+              ],
             ),
       title: _buildTitleRow(context, displayTitle),
       subtitle: previewLines.isNotEmpty

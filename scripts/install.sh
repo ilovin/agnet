@@ -36,7 +36,7 @@ CACHE_DIR="$INSTALL_DIR/cache"
 RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
 AGENTD_REMOTE_DIR="~/bin"
 AGENTD_PORT=7373
-GW_PORT=7376
+GW_PORT=7374
 # Domain defaults injected at build time via -ldflags, fallback to tunnel.ilovin.xyz
 DEFAULT_HUB_DOMAIN="${DEFAULT_HUB_DOMAIN:-tunnel.ilovin.xyz}"
 DEFAULT_HUB_URL="https://${DEFAULT_HUB_DOMAIN}"
