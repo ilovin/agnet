@@ -1865,6 +1865,15 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			}
 			existingResumeID, _ := m.GetResumeSessionID(existing.ID)
 			if existingResumeID == sessionID {
+				if !isProcessRunning(existing.PID, existing.Provider) {
+					log.Printf("[Attach] Skipping CONFLICT with dead agent %s (PID %d, session %s); removing stale agent",
+						existing.ID, existing.PID, sessionID)
+					existing.setStatus(StatusStopped)
+					existing.setProcess(nil)
+					_ = m.store.DeleteAgent(existing.ID)
+					delete(m.agents, existing.ID)
+					continue
+				}
 				log.Printf("[Attach] CONFLICT: existing agent %s (PID %d) already maps to session %s; new PID %d will be display-only",
 					existing.ID, existing.PID, sessionID, info.PID)
 				isDisplayOnly = true
@@ -2060,6 +2069,14 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			ag.EventBuf().Reset()
 			if err := m.ClearConversationEvents(agentID); err != nil {
 				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+			}
+			// Load history for the new session so conversation.history has data
+			if historyEvents, err := watcher.OpenCodeDBHistory(newSessionID); err == nil && len(historyEvents) > 0 {
+				log.Printf("[Watcher] Loaded %d historical events for session switch %s → %s", len(historyEvents), sessionID, newSessionID)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(agentID, ag, data)
+				}
 			}
 			m.mu.RLock()
 			onOut := m.onOutput
@@ -2305,15 +2322,53 @@ func (m *Manager) PeriodicScanAndAttach() {
 }
 
 // CleanupDeadAgents removes agents whose underlying process is no longer running.
+// When a dead agent is removed, any display-only agents sharing the same session
+// are promoted to full agents with a watcher.
 func (m *Manager) CleanupDeadAgents() {
 	m.mu.Lock()
+	var removedSessions []string
 	for id, ag := range m.agents {
 		if ag.PID > 0 && !isProcessRunning(ag.PID, ag.Provider) {
 			log.Printf("[PeriodicScan] Cleaning up dead agent %s (%s, PID %d)", ag.ID, ag.Name, ag.PID)
+			resumeID, _ := m.GetResumeSessionID(ag.ID)
+			if resumeID != "" {
+				removedSessions = append(removedSessions, resumeID)
+			}
 			ag.setStatus(StatusStopped)
 			ag.setProcess(nil)
 			_ = m.store.DeleteAgent(ag.ID)
 			delete(m.agents, id)
+		}
+	}
+
+	// Promote display-only agents whose conflicting session was just freed.
+	for _, sessionID := range removedSessions {
+		for _, ag := range m.agents {
+			if ag.Watcher() != nil || ag.PID <= 0 {
+				continue
+			}
+			agentResumeID, _ := m.GetResumeSessionID(ag.ID)
+			if agentResumeID != sessionID {
+				continue
+			}
+			if !isProcessRunning(ag.PID, ag.Provider) {
+				continue
+			}
+			log.Printf("[PeriodicScan] Promoting display-only agent %s (PID %d) for freed session %s", ag.ID, ag.PID, sessionID)
+			info := scanner.ProcessInfo{
+				PID:      ag.PID,
+				Provider: ag.Provider,
+				WorkDir:  ag.WorkDir,
+			}
+			sessionFile := info.FindSessionFile()
+			cb := m.makeWatcherCallback(ag.ID, ag)
+			w := m.newSessionWatcher(ag.Provider, sessionID, sessionFile, ag.WorkDir, ag.PID, cb, ag.ID)
+			if err := w.Start(); err != nil {
+				log.Printf("[PeriodicScan] Warning: watcher start failed for promoted agent %s: %v", ag.ID, err)
+			} else {
+				ag.setWatcher(w)
+				log.Printf("[PeriodicScan] Promoted agent %s (PID %d) with watcher for session %s", ag.ID, ag.PID, sessionID)
+			}
 		}
 	}
 	m.mu.Unlock()

@@ -249,7 +249,7 @@ func TestAgentList(t *testing.T) {
 	_ = agents
 }
 
-func TestAgentListKeepsDistinctPIDsForSharedSession(t *testing.T) {
+func TestAgentListDeadConflictReplacedByNewPID(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -259,6 +259,9 @@ func TestAgentListKeepsDistinctPIDsForSharedSession(t *testing.T) {
 	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}
+	// PID 1001 is dead; PID 1002 is also dead.
+	// When 1002 attaches, the dead 1001 agent is cleaned up (dead-PID CONFLICT skip),
+	// leaving only the 1002 agent.
 	if _, err := mgr.Attach(scanner.ProcessInfo{PID: 1001, Provider: "claude", WorkDir: t.TempDir(), SessionFile: sessionFile}); err != nil {
 		t.Fatalf("attach first agent: %v", err)
 	}
@@ -283,19 +286,13 @@ func TestAgentListKeepsDistinctPIDsForSharedSession(t *testing.T) {
 	if err := json.Unmarshal(b, &agents); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
-	if len(agents) != 2 {
-		t.Fatalf("expected 2 agents, got %d", len(agents))
+	// Dead PID 1001 was cleaned up when 1002 attached; only 1002 remains.
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (dead conflict cleaned up), got %d", len(agents))
 	}
-	seen := map[int]bool{}
-	for _, ag := range agents {
-		pid, _ := ag["pid"].(float64)
-		seen[int(pid)] = true
-		if got := ag["sessionId"]; got != "attached" {
-			t.Fatalf("expected sessionId=attached, got %#v", got)
-		}
-	}
-	if !seen[1001] || !seen[1002] {
-		t.Fatalf("expected both pids to remain visible, got %#v", seen)
+	pid, _ := agents[0]["pid"].(float64)
+	if int(pid) != 1002 {
+		t.Fatalf("expected surviving agent to have PID 1002, got %d", int(pid))
 	}
 }
 
@@ -1371,8 +1368,8 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected managed array, got %T", result["managed"])
 	}
-	if len(managed) < 3 {
-		t.Fatalf("expected at least 3 managed items, got %v", managed)
+	if len(managed) < 2 {
+		t.Fatalf("expected at least 2 managed items, got %v", managed)
 	}
 	managedSharedPIDs := map[int]bool{}
 	for _, raw := range managed {
@@ -1383,8 +1380,12 @@ func TestSessionCatalogReturnsGroupedData(t *testing.T) {
 			}
 		}
 	}
-	if !managedSharedPIDs[4001] || !managedSharedPIDs[4002] {
-		t.Fatalf("expected both shared-session PIDs in managed, got %v", managed)
+	// PID 4001 is dead; cleaned up when 4002 attached. Only 4002 should survive.
+	if !managedSharedPIDs[4002] {
+		t.Fatalf("expected PID 4002 in managed shared-session agents, got %v", managedSharedPIDs)
+	}
+	if managedSharedPIDs[4001] {
+		t.Fatalf("expected dead PID 4001 to be cleaned up, but it survived")
 	}
 
 	attachable, ok := result["attachable"].([]any)

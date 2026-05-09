@@ -220,7 +220,7 @@ func TestAttachSamePIDSwitchesSessionAndClearsHistory(t *testing.T) {
 	}
 }
 
-func TestAttachSameSessionDifferentPIDCreatesSeparateAgents(t *testing.T) {
+func TestAttachSameSessionDifferentPIDDeadConflictCleanedUp(t *testing.T) {
 	m := newTestManager(t)
 	repoDir := t.TempDir()
 	sessionFile := filepath.Join(repoDir, "sess-live.jsonl")
@@ -251,9 +251,14 @@ func TestAttachSameSessionDifferentPIDCreatesSeparateAgents(t *testing.T) {
 		t.Fatalf("expected separate agents for different pids sharing one session, got same id %s", first.ID)
 	}
 
+	// First agent (PID 6864) is dead, so the CONFLICT check should have cleaned it up.
+	// Second agent (PID 7777) takes over with a watcher.
 	agents := m.List()
-	if len(agents) != 2 {
-		t.Fatalf("expected 2 managed agents, got %d", len(agents))
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (dead first agent cleaned up), got %d", len(agents))
+	}
+	if agents[0].ID != second.ID {
+		t.Fatalf("expected second agent to survive, got %s", agents[0].ID)
 	}
 }
 
