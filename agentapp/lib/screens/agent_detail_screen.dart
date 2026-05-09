@@ -17,6 +17,7 @@ import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/unread_provider.dart';
+import '../providers/draft_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
@@ -1030,6 +1031,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     super.initState();
     _scrollCtrl.addListener(_handleScroll);
 
+    // Restore draft text if any
+    final draft = ref.read(draftProvider.notifier).getDraft(widget.nodeId, widget.agentId);
+    if (draft.isNotEmpty) {
+      _inputCtrl.text = draft;
+      _inputCtrl.selection = TextSelection.collapsed(offset: draft.length);
+    }
+
     ref.read(unreadProvider.notifier).markAsRead(widget.nodeId, widget.agentId);
 
     _pruneMessageCache();
@@ -1113,6 +1121,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   @override
   void dispose() {
+    // Persist draft text for this agent before disposing
+    final draft = _inputCtrl.text;
+    if (draft.isNotEmpty) {
+      ref.read(draftProvider.notifier).setDraft(widget.nodeId, widget.agentId, draft);
+    } else {
+      ref.read(draftProvider.notifier).clearDraft(widget.nodeId, widget.agentId);
+    }
+
     _pollTimer?.cancel();
     _scrollCtrl.removeListener(_handleScroll);
     final client = ref.read(connectionProvider);
@@ -1517,6 +1533,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         return;
       }
       _inputCtrl.clear();
+      ref.read(draftProvider.notifier).clearDraft(widget.nodeId, widget.agentId);
       setState(() => _lastError = null);
       try {
         await client.call(
@@ -1579,6 +1596,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     }
 
     _inputCtrl.clear();
+    ref.read(draftProvider.notifier).clearDraft(widget.nodeId, widget.agentId);
     final images = List<Map<String, String>>.from(_pendingImages);
     setState(() {
       _loading = true;
