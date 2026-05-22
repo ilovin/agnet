@@ -22,6 +22,7 @@ source scripts/build.sh
 # LOCAL_BIN, LINUX_BIN, GW_BIN, APK_OUTPUT, etc.
 
 REMOTE_HOST="${REMOTE_HOST:-ws}"
+AGENTGW_CONFIG="${AGENTGW_CONFIG:-$HOME/.agentgw/config.json}"
 REMOTE_LOG="/tmp/agentd.log"
 
 # ── Release deployment config ─────────────────────────────────────────
@@ -278,6 +279,85 @@ normalize_linux_arch() {
     esac
 }
 
+is_local_target() {
+    local host="${1:-}"
+    local host_lc
+    host_lc="$(echo "$host" | tr '[:upper:]' '[:lower:]')"
+    [[ -z "$host_lc" || "$host_lc" == "localhost" || "$host" == "127.0.0.1" || "$host" == "::1" ]]
+}
+
+resolve_remote_targets() {
+    local config_path="$AGENTGW_CONFIG"
+    local -a targets=()
+    local raw_targets=""
+    local host
+
+    if [[ -f "$config_path" ]]; then
+        raw_targets="$(python3 - "$config_path" <<'PY' 2>/dev/null || true
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+
+nodes = cfg.get('nodes', [])
+if not isinstance(nodes, list):
+    sys.exit(0)
+
+for node in nodes:
+    if not isinstance(node, dict):
+        continue
+
+    ssh_alias = node.get('ssh_alias')
+    host = node.get('host')
+    ssh_alias = ssh_alias.strip() if isinstance(ssh_alias, str) else ''
+    host = host.strip() if isinstance(host, str) else ''
+
+    if (ssh_alias and ssh_alias.lower() in {'localhost', '127.0.0.1', '::1'}) or (host and host.lower() in {'localhost', '127.0.0.1', '::1'}):
+        continue
+
+    target = ssh_alias or host
+    if target:
+        print(target)
+PY
+)"
+
+        while IFS= read -r host; do
+            if [[ -n "$host" ]] && ! is_local_target "$host"; then
+                targets+=("$host")
+            fi
+        done <<< "$raw_targets"
+    fi
+
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        echo "$REMOTE_HOST"
+        return
+    fi
+
+    local seen="|"
+    local target
+    for target in "${targets[@]}"; do
+        if [[ "$seen" != *"|$target|"* ]]; then
+            echo "$target"
+            seen+="$target|"
+        fi
+    done
+}
+
+print_remote_targets() {
+    local -a targets=()
+    local t
+    while IFS= read -r t; do
+        targets+=("$t")
+    done < <(resolve_remote_targets)
+    echo "[deploy] Resolved remote targets (${#targets[@]}):"
+    for t in "${targets[@]}"; do
+        echo "  - $t"
+    done
+}
+
 resolve_remote_agentd_binary() {
     local remote_arch="$1"
     local remote_bin=""
@@ -312,17 +392,18 @@ deploy_local() {
     echo "[deploy] Local runtime artifacts ready"
 }
 
-deploy_remote() {
-    echo "[deploy] Deploying to $REMOTE_HOST (as user, NOT sudo)..."
+deploy_remote_host() {
+    local target_host="$1"
+    echo "[deploy] Deploying to $target_host (as user, NOT sudo)..."
 
     local remote_arch_raw remote_arch remote_bin
-    remote_arch_raw="$(ssh -o ConnectTimeout=5 "$REMOTE_HOST" "uname -m" 2>/dev/null | tr -d '[:space:]' || true)"
+    remote_arch_raw="$(ssh -o ConnectTimeout=5 "$target_host" "uname -m" 2>/dev/null | tr -d '[:space:]' || true)"
     remote_arch="$(normalize_linux_arch "$remote_arch_raw")"
     if [[ -z "$remote_arch" ]]; then
-        echo "[deploy] ERROR: Unsupported remote architecture '$remote_arch_raw'"
+        echo "[deploy] ERROR: Unsupported remote architecture '$remote_arch_raw' on $target_host"
         return 1
     fi
-    echo "[deploy] Remote architecture: $remote_arch_raw -> $remote_arch"
+    echo "[deploy] Remote architecture on $target_host: $remote_arch_raw -> $remote_arch"
     remote_bin="$(resolve_remote_agentd_binary "$remote_arch")" || {
         echo "[deploy] ERROR: Failed to prepare agentd binary for linux-$remote_arch"
         return 1
@@ -330,10 +411,10 @@ deploy_remote() {
 
     # Sync token from agentgw config to remote agentd so auth stays consistent
     local token
-    token="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('token',''))" ~/.agentgw/config.json 2>/dev/null || true)"
+    token="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('token',''))" "$AGENTGW_CONFIG" 2>/dev/null || true)"
     if [[ -n "$token" ]]; then
-        echo "[deploy] Syncing token to remote agentd config..."
-        ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/.agentd && python3 -c \"
+        echo "[deploy] Syncing token to remote agentd config on $target_host..."
+        ssh -o ConnectTimeout=5 "$target_host" "mkdir -p ~/.agentd && python3 -c \"
 import json, os
 path = os.path.expanduser('~/.agentd/config.json')
 cfg = {'port': 7373, 'data_dir': os.path.expanduser('~/.agentd/data')}
@@ -343,24 +424,47 @@ if os.path.exists(path):
 cfg['token'] = '$token'
 with open(path, 'w') as f:
     json.dump(cfg, f, indent=2)
-    f.write('\n')
+    f.write('\\n')
 \"" || true
     fi
 
-    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/bin" || return 1
-    scp -o ConnectTimeout=5 "$remote_bin" "$REMOTE_HOST:~/bin/agentd-new" || return 1
+    ssh -o ConnectTimeout=5 "$target_host" "mkdir -p ~/bin" || return 1
+    scp -o ConnectTimeout=5 "$remote_bin" "$target_host:~/bin/agentd-new" || return 1
 
-    echo "[deploy] Stopping remote agentd..."
-    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "pkill -f '[a]gentd start' 2>/dev/null; sudo pkill -f '[a]gentd start' 2>/dev/null; sleep 1" || true
+    echo "[deploy] Stopping remote agentd on $target_host..."
+    ssh -o ConnectTimeout=5 "$target_host" "pkill -f '[a]gentd start' 2>/dev/null; sudo pkill -f '[a]gentd start' 2>/dev/null; sleep 1" || true
 
-    echo "[deploy] Replacing binary and starting remote agentd..."
-    ssh -o ConnectTimeout=5 -o ServerAliveInterval=5 "$REMOTE_HOST" \
+    echo "[deploy] Replacing binary and starting remote agentd on $target_host..."
+    ssh -o ConnectTimeout=5 -o ServerAliveInterval=5 "$target_host" \
         "mv ~/bin/agentd-new ~/bin/agentd && chmod +x ~/bin/agentd && \
          bash -c 'nohup ~/bin/agentd start > $REMOTE_LOG 2>&1 </dev/null & \
                    disown; exit 0'" || true
     sleep 3
-    echo "[deploy] Checking remote status..."
-    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "if pgrep -u \$(whoami) -f 'agentd start' > /dev/null; then echo 'OK (running as user)'; else echo 'WARN: may be running as root'; fi; tail -3 $REMOTE_LOG" || true
+    echo "[deploy] Checking remote status on $target_host..."
+    ssh -o ConnectTimeout=5 "$target_host" "if pgrep -u \$(whoami) -f 'agentd start' > /dev/null; then echo 'OK (running as user)'; else echo 'WARN: may be running as root'; fi; tail -3 $REMOTE_LOG" || true
+}
+
+deploy_remote() {
+    deploy_remote_host "$REMOTE_HOST"
+}
+
+deploy_remote_targets_parallel() {
+    local -a targets=() pids=()
+    local target
+    while IFS= read -r target; do
+        targets+=("$target")
+    done < <(resolve_remote_targets)
+
+    for target in "${targets[@]}"; do
+        deploy_remote_host "$target" &
+        pids+=("$!")
+    done
+
+    local failed=0 pid
+    for pid in "${pids[@]}"; do
+        wait "$pid" || failed=1
+    done
+    [[ $failed -eq 0 ]]
 }
 
 
@@ -368,6 +472,20 @@ deploy_all() {
     local local_pid remote_pid runtime_pid local_ok=0 remote_ok=0 runtime_ok=0
     deploy_local & local_pid=$!
     deploy_remote & remote_pid=$!
+    wait "$local_pid" && local_ok=1 || true
+    wait "$remote_pid" && remote_ok=1 || true
+    if [[ $local_ok -eq 1 ]]; then
+        deploy_local_runtime & runtime_pid=$!
+        wait "$runtime_pid" && runtime_ok=1 || true
+    fi
+    [[ $local_ok -eq 1 && $remote_ok -eq 1 && $runtime_ok -eq 1 ]]
+}
+
+
+deploy_server_bin() {
+    local local_pid remote_pid runtime_pid local_ok=0 remote_ok=0 runtime_ok=0
+    deploy_local & local_pid=$!
+    deploy_remote_targets_parallel & remote_pid=$!
     wait "$local_pid" && local_ok=1 || true
     wait "$remote_pid" && remote_ok=1 || true
     if [[ $local_ok -eq 1 ]]; then
@@ -513,9 +631,10 @@ Go binaries are rebuilt only when the source-content hash changes.
 TARGETS:
   all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
   build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
-  server           Build all Go binaries, deploy local + remote, restart agentgw (no mobile)
+  server           Build all Go binaries, deploy local + ALL configured remote nodes in parallel, restart agentgw (no mobile)
   local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
-  ws               Build matching Linux agentd by remote arch, deploy to remote \$REMOTE_HOST, restart agentgw
+  ws               Build matching Linux agentd by remote arch, deploy to single remote \$REMOTE_HOST, restart agentgw
+  targets          Print resolved remote deployment targets from \$AGENTGW_CONFIG (nodes[].ssh_alias/host)
   apk              Build APK only and auto-install to connected Android devices
   ipa              Build IPA only and auto-install to connected iOS devices
   flutter-android  Use \`flutter install\` to flash Android (auto-detects device)
@@ -533,7 +652,8 @@ TARGETS:
   help             Show this help message
 
 ENVIRONMENT:
-  REMOTE_HOST            Remote SSH host for 'ws' target (default: ws)
+  REMOTE_HOST            Remote SSH host fallback when no non-local nodes are resolved (default: ws)
+  AGENTGW_CONFIG         Agentgw config path for resolving server/bin remote targets (default: ~/.agentgw/config.json)
   RELEASE_REMOTE_HOST    Remote SSH host for release deployment (default: same as REMOTE_HOST)
   RELEASE_REMOTE_DIR     Remote directory for release artifacts (default: /opt/phonetalk/releases)
   API_REMOTE_HOST        Remote SSH host for API deployment (default: same as RELEASE_REMOTE_HOST)
@@ -630,9 +750,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         devices)
             detect_devices
             ;;
+        targets)
+            print_remote_targets
+            ;;
         server|bin)
             build_go_all
-            deploy_all
+            deploy_server_bin
             restart_agentgw
             ;;
         local)
