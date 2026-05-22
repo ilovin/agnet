@@ -28,6 +28,7 @@ OPTIONS:
   --skip-apk     Skip Flutter Android APK build
   --skip-ios     Skip iOS IPA build
   --publish      Upload artifacts to OSS and refresh CDN
+  --skip-npm     Skip npm publish step
   --dry-run      Show what would be uploaded without actually uploading
   --version V    Override version (default: auto-detected from agentgw)
   -h, --help     Show this help message and exit
@@ -65,6 +66,7 @@ SKIP_APK=false
 SKIP_IOS=false
 PUBLISH=false
 DRY_RUN=false
+SKIP_NPM=false
 
 auto_increment_version() {
   local bump="${RELEASE_BUMP:-patch}"
@@ -116,6 +118,7 @@ for arg in "$@"; do
     --skip-apk) SKIP_APK=true ;;
     --skip-ios) SKIP_IOS=true ;;
     --publish) PUBLISH=true ;;
+    --skip-npm) SKIP_NPM=true ;;
     --dry-run) DRY_RUN=true ;;
   esac
 done
@@ -427,6 +430,50 @@ if $PUBLISH || $DRY_RUN; then
       echo "[release] CDN cache refresh placeholder (implement with your CDN provider API)"
     fi
   fi
+fi
+
+# ── npm publish (optional) ─────────────────────────────────────────
+NPM_DIR="npm/agnet"
+if ! $SKIP_NPM && [[ -d "$NPM_DIR" ]]; then
+  echo ""
+  echo "[release] Publishing to npm..."
+
+  # Update version in package.json
+  V="${VERSION#v}"
+  python3 -c "
+import json
+with open('$NPM_DIR/package.json') as f:
+    p = json.load(f)
+p['version'] = '$V'
+with open('$NPM_DIR/package.json', 'w') as f:
+    json.dump(p, f, indent=2)
+    f.write('\n')
+"
+
+  # Populate platform binaries
+  rm -rf "$NPM_DIR/platform"
+  mkdir -p "$NPM_DIR/platform/darwin-arm64" "$NPM_DIR/platform/linux-amd64"
+  cp "$GW_BIN" "$NPM_DIR/platform/darwin-arm64/agentgw"
+  cp "$LOCAL_BIN" "$NPM_DIR/platform/darwin-arm64/agentd"
+  cp "$GW_LINUX_BIN" "$NPM_DIR/platform/linux-amd64/agentgw"
+  cp "$LINUX_BIN" "$NPM_DIR/platform/linux-amd64/agentd"
+  chmod +x "$NPM_DIR/platform/"*/*
+
+  # Copy install.sh and static
+  cp scripts/install.sh "$NPM_DIR/install.sh"
+  if [[ -d "$WEB_STATIC_DIR" ]]; then
+    rm -rf "$NPM_DIR/static"
+    cp -r "$WEB_STATIC_DIR" "$NPM_DIR/static"
+  fi
+
+  if $DRY_RUN; then
+    echo "  [dry-run] would run: cd $NPM_DIR && npm publish --access public"
+  else
+    (cd "$NPM_DIR" && npm publish --access public)
+    echo "[release] Published @ai-alignment/agnet@$V to npm"
+  fi
+else
+  echo "[release] Skipping npm publish (--skip-npm or no $NPM_DIR)"
 fi
 
 echo ""

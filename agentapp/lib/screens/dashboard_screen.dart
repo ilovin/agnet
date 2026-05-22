@@ -208,6 +208,8 @@ Color providerColor(String provider) {
       return const Color(0xFFF97316); // Claude orange
     case 'opencode':
       return const Color(0xFF3B82F6); // OpenCode blue
+    case 'hermes':
+      return const Color(0xFF8B5CF6); // Hermes purple
     default:
       return Colors.grey;
   }
@@ -215,6 +217,8 @@ Color providerColor(String provider) {
 
 IconData providerIcon(String provider) {
   switch (provider.toLowerCase()) {
+    case 'hermes':
+      return Icons.flutter_dash;
     case 'opencode':
       return Icons.terminal;
     default:
@@ -245,6 +249,9 @@ List<Map<String, String>> getDefaultModels(String provider) {
         'name': 'Claude 3.5 Sonnet (Vertex)',
       },
       {'id': 'claude-3-5-haiku@20241022', 'name': 'Claude 3.5 Haiku (Vertex)'},
+    ],
+    'hermes': [
+      {'id': 'default', 'name': 'Hermes (default)'},
     ],
   };
 
@@ -2010,27 +2017,48 @@ class _NodeCardState extends ConsumerState<NodeCard> {
       modelCtrl.text = defaultModels.first['id'] ?? '';
     }
 
-    // Fetch home directory from agentd
-    Future<void> fetchHomeDir() async {
+    // Suggested directories from agentd
+    List<Map<String, dynamic>> suggestedDirs = [];
+    String homeDir = '';
+    bool dirsLoaded = false;
+
+    Future<void> fetchSuggestedDirs() async {
       final client = ref.read(connectionProvider);
       if (client == null) return;
       try {
-        final result = await client.call('system.info', {
+        final result = await client.call('system.suggest_dirs', {
           'nodeId': widget.node.id,
         });
         if (result is Map<String, dynamic>) {
-          final homeDir = result['homeDir'] as String?;
-          if (homeDir != null && homeDir.isNotEmpty) {
+          homeDir = result['homeDir'] as String? ?? '';
+          final dirs = result['dirs'] as List? ?? [];
+          suggestedDirs = dirs
+              .map((d) => Map<String, dynamic>.from(d as Map))
+              .toList();
+          dirsLoaded = true;
+          if (cwdCtrl.text.isEmpty && homeDir.isNotEmpty) {
             cwdCtrl.text = homeDir;
           }
         }
       } catch (e) {
-        debugPrint('Failed to fetch home dir: $e');
+        debugPrint('Failed to fetch suggested dirs: $e');
+        // Fallback: try system.info for home dir
+        try {
+          final result = await client.call('system.info', {
+            'nodeId': widget.node.id,
+          });
+          if (result is Map<String, dynamic>) {
+            homeDir = result['homeDir'] as String? ?? '';
+            if (cwdCtrl.text.isEmpty && homeDir.isNotEmpty) {
+              cwdCtrl.text = homeDir;
+            }
+          }
+        } catch (_) {}
       }
     }
 
-    // Fetch home directory when dialog opens
-    fetchHomeDir();
+    // Fetch dirs when dialog opens
+    fetchSuggestedDirs();
 
     showDialog(
       context: context,
@@ -2050,18 +2078,57 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                     hintText: 'claude-1',
                   ),
                 ),
-                TextField(
-                  controller: cwdCtrl,
-                  decoration: const InputDecoration(
-                    labelText: '工作目录',
-                    hintText: '/home/user/proj',
-                  ),
+                Autocomplete<String>(
+                  initialValue: TextEditingValue(text: cwdCtrl.text),
+                  fieldViewBuilder: (context, fieldCtrl, focusNode, onSubmitted) {
+                    // Sync back to cwdCtrl
+                    fieldCtrl.addListener(() {
+                      cwdCtrl.text = fieldCtrl.text;
+                    });
+                    return TextField(
+                      controller: fieldCtrl,
+                      focusNode: focusNode,
+                      decoration: InputDecoration(
+                        labelText: '工作目录',
+                        hintText: homeDir.isNotEmpty ? homeDir : '/home/user/proj',
+                        suffixIcon: dirsLoaded
+                            ? const Icon(Icons.folder_open, size: 20)
+                            : const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                      ),
+                    );
+                  },
+                  optionsBuilder: (textEditingValue) {
+                    if (textEditingValue.text.isEmpty) {
+                      return suggestedDirs.map((d) => d['path'] as String);
+                    }
+                    final input = textEditingValue.text.toLowerCase();
+                    return suggestedDirs
+                        .map((d) => d['path'] as String)
+                        .where((p) => p.toLowerCase().contains(input));
+                  },
+                  onSelected: (selection) {
+                    cwdCtrl.text = selection;
+                  },
+                  displayStringForOption: (option) {
+                    final dir = suggestedDirs.firstWhere(
+                      (d) => d['path'] == option,
+                      orElse: () => {'display': option, 'hasGit': false},
+                    );
+                    final display = dir['display'] as String? ?? option;
+                    final hasGit = dir['hasGit'] as bool? ?? false;
+                    return hasGit ? '$display (git)' : display;
+                  },
                 ),
                 const SizedBox(height: 8),
                 SegmentedButton<String>(
                   segments: const [
                     ButtonSegment(value: 'claude', label: Text('Claude')),
                     ButtonSegment(value: 'opencode', label: Text('OpenCode')),
+                    ButtonSegment(value: 'hermes', label: Text('Hermes')),
                   ],
                   selected: {provider},
                   onSelectionChanged: (s) => setState(() {
@@ -2102,14 +2169,27 @@ class _NodeCardState extends ConsumerState<NodeCard> {
             ),
             FilledButton(
               onPressed: () async {
-                Navigator.pop(context);
                 final client = ref.read(connectionProvider);
                 if (client == null) return;
+                final workDir = cwdCtrl.text.trim();
+                if (workDir.isEmpty) return;
+
+                // Ensure work directory exists
+                try {
+                  await client.call('system.mkdir', {
+                    'nodeId': widget.node.id,
+                    'path': workDir,
+                  });
+                } catch (e) {
+                  debugPrint('mkdir result: $e');
+                }
+
+                Navigator.pop(context);
 
                 final params = <String, dynamic>{
                   'nodeId': widget.node.id,
                   'name': nameCtrl.text.trim(),
-                  'workDir': cwdCtrl.text.trim(),
+                  'workDir': workDir,
                   'provider': provider,
                 };
                 final sessionId = sessionCtrl.text.trim();

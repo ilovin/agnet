@@ -38,6 +38,22 @@ Uri connectionProbeUri(String wsUrl) {
   return uri.replace(scheme: scheme);
 }
 
+String normalizeGatewayWsUrl(String rawUrl) {
+  final trimmed = rawUrl.trim();
+  Uri uri;
+  try {
+    uri = Uri.parse(trimmed);
+  } catch (_) {
+    return trimmed;
+  }
+
+  final isWsScheme = uri.scheme == 'ws' || uri.scheme == 'wss';
+  final isRootPath = uri.path.isEmpty || uri.path == '/';
+  if (!isWsScheme || !isRootPath) return trimmed;
+
+  return uri.replace(path: '/ws').toString();
+}
+
 bool shouldProbeConnectionError(Object error) {
   final lower = error.toString().toLowerCase();
   if (isDefinitiveConnectionError(error)) return false;
@@ -394,22 +410,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
         } catch (_) {}
       };
 
-      // Load agents for each node
-      for (final n in nodes) {
-        final nodeId = (n as Map<String, dynamic>)['id'] as String;
-        try {
-          final ar = await client.call('agent.list', {'nodeId': nodeId});
-          final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
-          ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
-        } catch (_) {}
-      }
-
-      // Auto-check and attach latest sessions for each node
-      for (final n in nodes) {
-        final nodeId = (n as Map<String, dynamic>)['id'] as String;
-        await _autoAttachLatestSessions(nodeId);
-      }
-
+      // Navigate immediately; dashboard _refreshAllNodes loads agents lazily
       if (mounted) {
         setState(() {
           _connecting = false;
@@ -463,43 +464,6 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
       probeResult = await _probeConnection(cfg);
     }
     return friendlyConnectError(error, cfg, probeResult: probeResult);
-  }
-
-  Future<void> _autoAttachLatestSessions(String nodeId) async {
-    final client = ref.read(connectionProvider);
-    if (client == null) return;
-
-    try {
-      final result = await client.call('session.catalog', {'nodeId': nodeId});
-      final sessions = parseSessionCandidates(result);
-      final candidate = pickPreferredAutoAttachCandidate(sessions);
-      if (candidate == null) return;
-
-      final provider = candidate.provider;
-      final pid = candidate.pid ?? 0;
-      if (pid <= 0) return;
-
-      debugPrint('Auto-attaching writable session: $provider PID $pid');
-
-      final params = <String, dynamic>{
-        'nodeId': nodeId,
-        'provider': provider,
-        'pid': pid,
-        'workDir': candidate.workDir,
-        'name': '$provider-attached-$pid',
-      };
-
-      await client.call('session.attach', params);
-
-      // Refresh agents list
-      final ar = await client.call('agent.list', {'nodeId': nodeId});
-      final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
-      ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
-
-      debugPrint('Auto-attach successful for PID $pid');
-    } catch (e) {
-      debugPrint('Auto-attach latest sessions error: $e');
-    }
   }
 
   @override
@@ -751,7 +715,7 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
     });
     try {
       final cfg = ConnectionConfig(
-        url: _urlCtrl.text.trim(),
+        url: normalizeGatewayWsUrl(_urlCtrl.text),
         token: _tokenCtrl.text.trim(),
       );
       Navigator.of(context).pop();
@@ -786,7 +750,7 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
             controller: _urlCtrl,
             decoration: const InputDecoration(
               labelText: 'Gateway URL',
-              hintText: 'ws://192.168.1.x:7374',
+              hintText: 'ws://192.168.1.x:7374/ws',
               border: OutlineInputBorder(),
             ),
             keyboardType: TextInputType.url,
@@ -855,7 +819,7 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
     });
     try {
       final cfg = ConnectionConfig(
-        url: _urlCtrl.text.trim(),
+        url: normalizeGatewayWsUrl(_urlCtrl.text),
         token: _tokenCtrl.text.trim(),
       );
       Navigator.of(context).pop();
@@ -890,7 +854,7 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
             controller: _urlCtrl,
             decoration: const InputDecoration(
               labelText: 'Gateway URL',
-              hintText: 'ws://192.168.1.x:7374',
+              hintText: 'ws://192.168.1.x:7374/ws',
               border: OutlineInputBorder(),
             ),
             keyboardType: TextInputType.url,

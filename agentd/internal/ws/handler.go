@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -196,6 +197,10 @@ func (h *handler) dispatch(req RPCRequest) (RPCResponse, func()) {
 		return h.opencodeModels(req), nil
 	case "system.info":
 		return h.systemInfo(req), nil
+	case "system.suggest_dirs":
+		return h.systemSuggestDirs(req), nil
+	case "system.mkdir":
+		return h.systemMkdir(req), nil
 	case "system.skills":
 		return h.systemSkills(req), nil
 	case "rpc.ping":
@@ -1893,6 +1898,108 @@ func (h *handler) systemInfo(req RPCRequest) RPCResponse {
 	return okResp(req.ID, map[string]any{
 		"homeDir": home,
 	})
+}
+
+func (h *handler) systemSuggestDirs(req RPCRequest) RPCResponse {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return errResp(req.ID, -32000, "cannot get home dir: "+err.Error())
+	}
+
+	type dirEntry struct {
+		Path        string `json:"path"`
+		Display     string `json:"display"`
+		HasGit      bool   `json:"hasGit"`
+		IsDirectory bool   `json:"isDirectory"`
+	}
+
+	var result []dirEntry
+
+	// Scan common project parent directories
+	parentDirs := []string{
+		home,
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "Documents", "project"),
+		filepath.Join(home, "Repo"),
+		filepath.Join(home, "Projects"),
+		filepath.Join(home, "workspace"),
+		filepath.Join(home, "code"),
+		filepath.Join(home, "src"),
+		filepath.Join(home, "Downloads"),
+	}
+
+	seen := map[string]bool{}
+	for _, parent := range parentDirs {
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			fullPath := filepath.Join(parent, name)
+			if seen[fullPath] {
+				continue
+			}
+			seen[fullPath] = true
+
+			rel, _ := filepath.Rel(home, fullPath)
+			if rel == "" {
+				rel = name
+			}
+
+			hasGit := false
+			if fi, err := os.Stat(filepath.Join(fullPath, ".git")); err == nil && fi.IsDir() {
+				hasGit = true
+			}
+
+			result = append(result, dirEntry{
+				Path:        fullPath,
+				Display:     "~/" + rel,
+				HasGit:      hasGit,
+				IsDirectory: true,
+			})
+		}
+	}
+
+	// Sort: git repos first, then alphabetical
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].HasGit != result[j].HasGit {
+			return result[i].HasGit
+		}
+		return result[i].Display < result[j].Display
+	})
+
+	return okResp(req.ID, map[string]any{
+		"homeDir": home,
+		"dirs":    result,
+	})
+}
+
+func (h *handler) systemMkdir(req RPCRequest) RPCResponse {
+	path, _ := req.Params["path"].(string)
+	if path == "" {
+		return errResp(req.ID, -32602, "path is required")
+	}
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return errResp(req.ID, -32000, "parent directory does not exist: "+filepath.Dir(path))
+	}
+	if !info.IsDir() {
+		return errResp(req.ID, -32000, "parent is not a directory: "+filepath.Dir(path))
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		if os.IsExist(err) {
+			return okResp(req.ID, map[string]any{"ok": true, "existed": true})
+		}
+		return errResp(req.ID, -32000, "mkdir failed: "+err.Error())
+	}
+	return okResp(req.ID, map[string]any{"ok": true, "created": true})
 }
 
 func (h *handler) systemSkills(req RPCRequest) RPCResponse {

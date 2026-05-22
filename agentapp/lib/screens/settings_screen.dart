@@ -13,6 +13,8 @@ import '../providers/connection_provider.dart';
 import '../providers/theme_provider.dart';
 import '../providers/color_mode_provider.dart';
 import '../providers/unread_provider.dart';
+import '../providers/nodes_provider.dart';
+import '../providers/conversation_provider.dart';
 import '../models/connection_config.dart';
 import '../services/apk_downloader.dart';
 
@@ -25,6 +27,7 @@ class SettingsScreen extends ConsumerStatefulWidget {
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<ConnectionConfig> _saved = [];
+  bool _connecting = false;
 
   @override
   void initState() {
@@ -135,6 +138,47 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  Future<void> _switchConnection(ConnectionConfig cfg) async {
+    setState(() => _connecting = true);
+    try {
+      // Disconnect current if any
+      ref.read(connectionProvider.notifier).disconnect();
+
+      await ref.read(connectionProvider.notifier).connect(cfg);
+
+      final client = ref.read(connectionProvider);
+      if (client == null) throw Exception('连接未建立');
+
+      final result = await client.call('node.list', {});
+      final nodes = (result is List ? result : (result['nodes'] as List?) ?? []);
+      ref.read(nodesProvider.notifier).loadNodes(nodes);
+
+      client.onEvent((event) {
+        ref.read(nodesProvider.notifier).handleEvent(event);
+        ref.read(conversationProvider.notifier).handleEvent(event);
+        if (ref.read(unreadSettingProvider)) {
+          ref.read(unreadProvider.notifier).handleEvent(event);
+        }
+      });
+
+      ref.read(nodesProvider.notifier).onAgentsRefresh = (nodeId) async {
+        try {
+          final ar = await client.call('agent.list', {'nodeId': nodeId});
+          final agents = (ar is List ? ar : (ar['agents'] as List?) ?? []);
+          ref.read(nodesProvider.notifier).loadAgents(nodeId, agents);
+        } catch (_) {}
+      };
+
+      if (mounted) {
+        _snack('已连接到 ${cfg.url}');
+      }
+    } catch (e) {
+      if (mounted) _snack('连接失败: $e');
+    } finally {
+      if (mounted) setState(() => _connecting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final client = ref.watch(connectionProvider);
@@ -160,16 +204,37 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           if (_saved.isEmpty)
             const ListTile(title: Text('暂无保存的连接', style: TextStyle(color: Colors.grey)))
           else
-            ..._saved.asMap().entries.map(
-                  (e) => ListTile(
-                    leading: const Icon(Icons.hub_outlined),
-                    title: Text(e.value.url),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
-                      onPressed: () => _delete(e.key),
-                    ),
-                  ),
+            ..._saved.asMap().entries.map((e) {
+              final cfg = e.value;
+              final isCurrent = client != null && client.url == cfg.url;
+              return ListTile(
+                leading: isCurrent
+                    ? const Icon(Icons.check_circle, color: Colors.green)
+                    : const Icon(Icons.hub_outlined),
+                title: Text(
+                  cfg.url,
+                  style: isCurrent ? const TextStyle(fontWeight: FontWeight.bold) : null,
                 ),
+                subtitle: isCurrent ? const Text('当前连接') : null,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_connecting)
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, color: Colors.red),
+                        onPressed: () => _delete(e.key),
+                      ),
+                  ],
+                ),
+                onTap: _connecting || isCurrent ? null : () => _switchConnection(cfg),
+              );
+            }),
           const Divider(),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -262,7 +327,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
           const ListTile(
             leading: Icon(Icons.info_outline),
-            title: Text('Agent Manager'),
+            title: Text('Agnet'),
             subtitle: Text('v0.2.2 — Multi-AI-Agent Remote Manager'),
           ),
         ],

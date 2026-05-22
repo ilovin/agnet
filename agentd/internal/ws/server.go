@@ -95,6 +95,17 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 			}, nil)
 			return
 		}
+		if data["type"] == "conversation.cleared" {
+			srv.broadcast(RPCEvent{
+				JSONRPC: "2.0",
+				Method:  "conversation.cleared",
+				Params: map[string]any{
+					"agentId": agentID,
+					"nodeId":  nodeID,
+				},
+			}, nil)
+			return
+		}
 		params := map[string]any{
 			"agentId": agentID,
 			"nodeId":  nodeID,

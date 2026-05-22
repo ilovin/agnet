@@ -62,7 +62,7 @@ class AgentApp extends ConsumerWidget {
     );
     final themeMode = themeModeFromSetting(ref.watch(themeModeProvider));
     return MaterialApp.router(
-      title: 'Agent Manager',
+      title: 'Agnet',
       theme: ThemeData(
         colorScheme: colorScheme,
         useMaterial3: true,

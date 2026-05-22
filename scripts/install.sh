@@ -40,7 +40,7 @@ GW_PORT=7374
 # Domain defaults injected at build time via -ldflags, fallback to tunnel.ilovin.xyz
 DEFAULT_HUB_DOMAIN="${DEFAULT_HUB_DOMAIN:-tunnel.ilovin.xyz}"
 DEFAULT_HUB_URL="https://${DEFAULT_HUB_DOMAIN}"
-SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://download.ilovin.xyz/install.sh}"
+SCRIPT_UPDATE_URL="${SCRIPT_UPDATE_URL:-https://api.ilovin.xyz/v1/install.sh}"
 TOKEN=""
 LOCAL_ONLY=false
 OPEN_BROWSER=true
@@ -48,7 +48,6 @@ HUB_URL="$DEFAULT_HUB_URL"
 TUNNEL_URL=""
 APP_URL=""
 REGISTERED_USER=""
-REGISTERED_TOKEN=""
 
 # REALITY defaults (matching tunnelhub server config)
 REALITY_PUB="${AGENTGW_REALITY_PUB:-}"
@@ -65,6 +64,7 @@ COMMANDS:
   restart   Alias for start
   stop      Stop local agentgw and local agentd
   status    Check whether local agentgw and agentd are running
+  purge     Remove all local + remote agentgw/agentd data (requires confirmation)
   update    Self-update install script from remote, then re-exec
   help      Show this help message
 
@@ -99,7 +99,7 @@ EOF
 # Sub-command handling
 SUBCMD="${1:-}"
 case "$SUBCMD" in
-  start|restart|stop|status|update|help|--help|-h)
+  start|restart|stop|status|purge|update|help|--help|-h)
     # Subcommands bypass normal flag parsing
     ;;
   *)
@@ -173,15 +173,15 @@ download_manifest() {
   mkdir -p "$CACHE_DIR"
   local cached="$CACHE_DIR/manifest.json"
   local tmpfile="$CACHE_DIR/manifest.json.tmp"
-  if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$manifest_url" -o "$tmpfile" 2>/dev/null; then
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q --no-check-certificate "$manifest_url" -O "$tmpfile" 2>/dev/null; then
       mv "$tmpfile" "$cached"
       echo "$cached"
       return 0
     fi
   fi
-  if command -v wget >/dev/null 2>&1; then
-    if wget -q "$manifest_url" -O "$tmpfile" 2>/dev/null; then
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$manifest_url" -o "$tmpfile" 2>/dev/null; then
       mv "$tmpfile" "$cached"
       echo "$cached"
       return 0
@@ -238,14 +238,26 @@ PY
 _download_file() {
   local url="$1" dest="$2"
   local download_ok=false
-  if command -v curl >/dev/null 2>&1; then
-    if curl -fsSL "$url" -o "$dest" 2>/dev/null; then download_ok=true; fi
+  if command -v wget >/dev/null 2>&1; then
+    local wget_err
+    wget_err="$(wget -q --no-check-certificate "$url" -O "$dest" 2>&1)" && download_ok=true
+    if [[ "$download_ok" != true ]]; then
+      warn "wget 失败: $wget_err"
+    fi
   fi
-  if [[ "$download_ok" != true ]] && command -v wget >/dev/null 2>&1; then
-    if wget -q "$url" -O "$dest" 2>/dev/null; then download_ok=true; fi
+  if [[ "$download_ok" != true ]] && command -v curl >/dev/null 2>&1; then
+    local curl_err
+    curl_err="$(curl -fsSL "$url" -o "$dest" 2>&1)" && download_ok=true
+    if [[ "$download_ok" != true ]]; then
+      warn "curl 失败: $curl_err"
+    fi
   fi
   if [[ "$download_ok" != true ]] && command -v python3 >/dev/null 2>&1; then
-    if python3 -c "import urllib.request; urllib.request.urlretrieve('$url', '$dest')" 2>/dev/null; then download_ok=true; fi
+    local py_err
+    py_err="$(python3 -c "import urllib.request; urllib.request.urlretrieve('$url', '$dest')" 2>&1)" && download_ok=true
+    if [[ "$download_ok" != true ]]; then
+      warn "python3 失败: $py_err"
+    fi
   fi
   if [[ "$download_ok" != true ]]; then
     rm -f "$dest"
@@ -333,16 +345,15 @@ download_artifact() {
 # Update agentgw from manifest
 self_update() {
   step "检查更新..."
-  if [[ -x "$INSTALL_DIR/agentgw" ]]; then
-    local current_version latest_version manifest_file
+  local manifest_file
+  manifest_file="$(download_manifest)" || true
+  if [[ -x "$INSTALL_DIR/agentgw" && -n "$manifest_file" ]]; then
+    local current_version latest_version
     current_version="$("$INSTALL_DIR/agentgw" version 2>/dev/null | awk '{print $2}' || true)"
-    manifest_file="$CACHE_DIR/manifest.json"
-    if [[ -f "$manifest_file" ]]; then
-      latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
-      if [[ -n "$current_version" && "$current_version" == "$latest_version" ]]; then
-        info "当前已是最新版本: $current_version"
-        return 0
-      fi
+    latest_version="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('version',''))" "$manifest_file" 2>/dev/null || true)"
+    if [[ -n "$current_version" && "$current_version" == "$latest_version" ]]; then
+      info "当前已是最新版本: $current_version"
+      return 0
     fi
   fi
   download_artifact agentgw "$INSTALL_DIR/agentgw"
@@ -470,9 +481,6 @@ detect_binary() {
 # Detect local agentgw binary for current platform
 sync_local_agentgw_binary() {
   mkdir -p "$INSTALL_DIR"
-  if [[ -x "$INSTALL_DIR/agentgw" ]]; then
-    return 0
-  fi
   local bin
   bin="$(detect_binary)" || exit 1
   cp "$bin" "$INSTALL_DIR/agentgw"
@@ -755,6 +763,62 @@ case "$SUBCMD" in
     show_status
     exit 0
     ;;
+  purge)
+    echo ""
+    echo -e "${RED}⚠️  即将删除 agentgw / agentd 的所有本地和远程数据:${NC}"
+    echo "  本地: $INSTALL_DIR ~/.agentd /tmp/agentgw.log /tmp/agentd-local.log"
+    echo "  远程: ~/bin/agentd ~/.agentd (config.json 中的所有节点)"
+    echo ""
+    CONFIRM=$(read_tty "确认删除？输入 YES 继续: " "")
+    if [[ "$CONFIRM" != "YES" ]]; then
+      info "已取消"
+      exit 0
+    fi
+
+    # Stop local services first
+    stop_services
+
+    # Purge remote nodes from config.json
+    CFG="$INSTALL_DIR/config.json"
+    if [[ -f "$CFG" ]]; then
+      REMOTE_NODES="$(python3 - "$CFG" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    cfg = json.load(f)
+for n in cfg.get("nodes", []):
+    h = n.get("host", "")
+    if h and h not in ("localhost", "127.0.0.1", "::1"):
+        alias = n.get("ssh_alias", h)
+        port = n.get("ssh_port", 22)
+        print(f"{alias}|{h}|{port}")
+PY
+)"
+      if [[ -n "$REMOTE_NODES" ]]; then
+        echo ""
+        while IFS='|' read -r alias host port; do
+          [[ -z "$host" ]] && continue
+          ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes)
+          step "清理远程节点: ${alias} (${host})..."
+          ssh "${ssh_opts[@]}" -p "$port" "$alias" "
+            pkill -f 'agentd start' 2>/dev/null; sleep 1
+            rm -f ~/bin/agentd
+            rm -rf ~/.agentd
+          " 2>/dev/null && info "已清理: ${alias}" || warn "无法连接: ${alias}"
+        done <<< "$REMOTE_NODES"
+      fi
+    fi
+
+    # Purge local
+    step "清理本地数据..."
+    rm -rf "$INSTALL_DIR"
+    rm -rf ~/.agentd
+    rm -f /tmp/agentgw.log /tmp/agentd-local.log
+    info "本地数据已清除"
+
+    echo ""
+    info "purge 完成"
+    exit 0
+    ;;
   update)
     update_script_and_reexec "$@"
     # If script update failed, still update agentgw binary
@@ -996,6 +1060,10 @@ echo ""
 
 # ── 1. Detect binary ──────────────────────────────────────────────
 GW_BIN="$(detect_binary)" || true
+if [[ ! -f "$GW_BIN" && -x "$INSTALL_DIR/agentgw" ]]; then
+  GW_BIN="$INSTALL_DIR/agentgw"
+  info "使用已安装的 agentgw"
+fi
 if [[ ! -f "$GW_BIN" ]]; then
   step "本地未找到 agentgw，尝试从远程下载..."
   if self_update; then
@@ -1011,9 +1079,142 @@ fi
 info "平台: $(uname -s)/$(uname -m)"
 info "agentgw 来源: $GW_BIN"
 
-# ── 1.5 Resolve token early ───────────────────────────────────────
-# Token must be resolved BEFORE deploying remote nodes so that
-# deploy_agentd can write the correct token to remote config.
+# ── 2. Resolve network mode + token ────────────────────────────────
+# Decide tunnel vs local FIRST, then derive a single token that all
+# components (agentd, agentgw, QR codes) will share.
+
+if [[ -z "$HUB_URL" ]]; then
+  HUB_URL="${AGENTGW_HUB:-$DEFAULT_HUB_URL}"
+fi
+if [[ -z "$TUNNEL_URL" ]]; then
+  TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
+fi
+if [[ -z "$APP_URL" ]]; then
+  APP_URL="${AGENTGW_APP_URL:-}"
+fi
+
+# Interactive mode selection
+if [[ -z "$TUNNEL_URL" && -z "$APP_URL" ]]; then
+  echo ""
+  echo -e "${CYAN}网络模式选择:${NC}"
+  echo "  [1] 隧道模式 — 通过 tunnelhub 远程访问（需要注册）"
+  echo "  [2] 本地模式 — 仅在局域网内访问，不连接 tunnelhub"
+  MODE_CHOICE=$(read_tty "选择 (默认 1): " "1")
+
+  if [[ "${MODE_CHOICE:-1}" == "2" ]]; then
+    info "使用本地模式"
+    HUB_URL=""
+    TUNNEL_URL=""
+    APP_URL=""
+  fi
+fi
+
+# Tunnel mode: handle credentials → token comes from hub
+if [[ -n "$HUB_URL" ]]; then
+  local_auth_path="$INSTALL_DIR/local_auth.json"
+  oauth_path="$INSTALL_DIR/oauth.json"
+  CRED_USERS=()
+  CRED_TOKENS=()
+  CRED_SOURCES=()
+
+  if [[ -f "$local_auth_path" ]]; then
+    u="$(extract_json_field "$local_auth_path" userId)"
+    t="$(extract_json_field "$local_auth_path" token)"
+    if [[ -n "$u" && -n "$t" ]]; then
+      CRED_USERS+=("$u")
+      CRED_TOKENS+=("$t")
+      CRED_SOURCES+=("local_auth.json")
+    fi
+  fi
+
+  if [[ -f "$oauth_path" ]]; then
+    u="$(extract_json_field "$oauth_path" userId)"
+    t="$(extract_json_field "$oauth_path" accessToken)"
+    if [[ -n "$u" && -n "$t" ]]; then
+      CRED_USERS+=("$u")
+      CRED_TOKENS+=("$t")
+      CRED_SOURCES+=("oauth.json")
+    fi
+  fi
+
+  if [[ ${#CRED_USERS[@]} -gt 0 ]]; then
+    echo ""
+    echo -e "${CYAN}检测到本地已保存的凭据:${NC}"
+    for i in "${!CRED_USERS[@]}"; do
+      idx=$((i + 1))
+      echo "  [$idx] User: ${CRED_USERS[i]} (来源: ${CRED_SOURCES[i]})"
+    done
+    n=${#CRED_USERS[@]}
+    echo "  [$((n+1))] 重新注册（覆盖现有，生成新 token）"
+    echo "  [$((n+2))] 本地模式（仅局域网，不连接 tunnelhub）"
+    CHOICE=$(read_tty "请选择 (默认 1): " "1")
+    CHOICE="${CHOICE:-1}"
+
+    if [[ "$CHOICE" -ge 1 && "$CHOICE" -le "$n" ]]; then
+      idx=$((CHOICE - 1))
+      REGISTERED_USER="${CRED_USERS[idx]}"
+      TOKEN="${CRED_TOKENS[idx]}"
+      info "使用本地凭据: $REGISTERED_USER"
+    elif [[ "$CHOICE" == "$((n+1))" ]]; then
+      if register_with_hub "$GW_BIN" "$HUB_URL"; then
+        REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
+        TOKEN="$(extract_json_field "$local_auth_path" token)"
+      else
+        echo ""
+        warn "重新注册失败（userId 可能已在 hub 上存在）"
+        RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
+        if [[ -n "$RECOVERY_TOKEN" ]]; then
+          RECOVERY_USER=$(read_tty "输入 userId: " "")
+          if [[ -n "$RECOVERY_USER" ]]; then
+            save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
+            REGISTERED_USER="$RECOVERY_USER"
+            TOKEN="$RECOVERY_TOKEN"
+            info "已恢复凭据: $RECOVERY_USER"
+          fi
+        else
+          HUB_URL=""
+          TUNNEL_URL=""
+          APP_URL=""
+          warn "切换到本地模式"
+        fi
+      fi
+    else
+      HUB_URL=""
+      TUNNEL_URL=""
+      APP_URL=""
+      info "切换到本地模式"
+    fi
+  else
+    if register_with_hub "$GW_BIN" "$HUB_URL"; then
+      REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
+      TOKEN="$(extract_json_field "$local_auth_path" token)"
+    else
+      warn "注册失败（userId 可能已在 hub 上存在）"
+      RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
+      if [[ -n "$RECOVERY_TOKEN" ]]; then
+        RECOVERY_USER=$(read_tty "输入 userId: " "")
+        if [[ -n "$RECOVERY_USER" ]]; then
+          save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
+          REGISTERED_USER="$RECOVERY_USER"
+          TOKEN="$RECOVERY_TOKEN"
+          info "已恢复凭据: $RECOVERY_USER"
+        fi
+      else
+        HUB_URL=""
+        TUNNEL_URL=""
+        APP_URL=""
+        warn "切换到本地模式"
+      fi
+    fi
+  fi
+
+  if [[ -z "$APP_URL" && -n "$HUB_URL" ]]; then
+    APP_URL="${HUB_URL%/}"
+  fi
+fi
+
+# Local mode (or tunnel registration failed → fell back): resolve token
+# from existing config or generate a fresh one.
 if [[ -z "$TOKEN" && -f "$INSTALL_DIR/config.json" ]]; then
   EXISTING_TOKEN="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('token',''))" "$INSTALL_DIR/config.json" 2>/dev/null || true)"
   if [[ -n "$EXISTING_TOKEN" ]]; then
@@ -1026,7 +1227,7 @@ if [[ -z "$TOKEN" ]]; then
   info "生成新 Token: ${TOKEN:0:12}..."
 fi
 
-# ── 2. Scan & deploy remote nodes ─────────────────────────────────
+# ── 3. Scan & deploy remote nodes ─────────────────────────────────
 NODES=() NODE_HOSTS=() NODE_PORTS=()
 SELECTION=""
 DEPLOYED_NODES=()
@@ -1082,147 +1283,6 @@ if ! $LOCAL_ONLY; then
 
   # All selected nodes go into config.json
   DEPLOYED_NODES=("${SELECTED_NODES[@]}")
-fi
-
-# ── 3. Resolve tunnel settings / registration ──────────────────────
-if [[ -z "$HUB_URL" ]]; then
-  HUB_URL="${AGENTGW_HUB:-$DEFAULT_HUB_URL}"
-fi
-if [[ -z "$TUNNEL_URL" ]]; then
-  TUNNEL_URL="${AGENTGW_TUNNEL_URL:-}"
-fi
-if [[ -z "$APP_URL" ]]; then
-  APP_URL="${AGENTGW_APP_URL:-}"
-fi
-
-# Interactive mode selection
-if [[ -z "$TUNNEL_URL" && -z "$APP_URL" ]]; then
-  echo ""
-  echo -e "${CYAN}网络模式选择:${NC}"
-  echo "  [1] 隧道模式 — 通过 tunnelhub 远程访问（需要注册）"
-  echo "  [2] 本地模式 — 仅在局域网内访问，不连接 tunnelhub"
-  MODE_CHOICE=$(read_tty "选择 (默认 1): " "1")
-
-  if [[ "${MODE_CHOICE:-1}" == "2" ]]; then
-    info "使用本地模式"
-    HUB_URL=""
-    TUNNEL_URL=""
-    APP_URL=""
-  fi
-fi
-
-# Tunnel mode: handle credentials
-if [[ -n "$HUB_URL" ]]; then
-  local_auth_path="$INSTALL_DIR/local_auth.json"
-  oauth_path="$INSTALL_DIR/oauth.json"
-  CRED_USERS=()
-  CRED_TOKENS=()
-  CRED_SOURCES=()
-
-  if [[ -f "$local_auth_path" ]]; then
-    u="$(extract_json_field "$local_auth_path" userId)"
-    t="$(extract_json_field "$local_auth_path" token)"
-    if [[ -n "$u" && -n "$t" ]]; then
-      CRED_USERS+=("$u")
-      CRED_TOKENS+=("$t")
-      CRED_SOURCES+=("local_auth.json")
-    fi
-  fi
-
-  if [[ -f "$oauth_path" ]]; then
-    u="$(extract_json_field "$oauth_path" userId)"
-    t="$(extract_json_field "$oauth_path" accessToken)"
-    if [[ -n "$u" && -n "$t" ]]; then
-      CRED_USERS+=("$u")
-      CRED_TOKENS+=("$t")
-      CRED_SOURCES+=("oauth.json")
-    fi
-  fi
-
-  if [[ ${#CRED_USERS[@]} -gt 0 ]]; then
-    echo ""
-    echo -e "${CYAN}检测到本地已保存的凭据:${NC}"
-    for i in "${!CRED_USERS[@]}"; do
-      idx=$((i + 1))
-      echo "  [$idx] User: ${CRED_USERS[i]} (来源: ${CRED_SOURCES[i]})"
-    done
-    n=${#CRED_USERS[@]}
-    echo "  [$((n+1))] 重新注册（覆盖现有，生成新 token）"
-    echo "  [$((n+2))] 本地模式（仅局域网，不连接 tunnelhub）"
-    CHOICE=$(read_tty "请选择 (默认 1): " "1")
-    CHOICE="${CHOICE:-1}"
-
-    if [[ "$CHOICE" -ge 1 && "$CHOICE" -le "$n" ]]; then
-      idx=$((CHOICE - 1))
-      REGISTERED_USER="${CRED_USERS[idx]}"
-      REGISTERED_TOKEN="${CRED_TOKENS[idx]}"
-      info "使用本地凭据: $REGISTERED_USER"
-    elif [[ "$CHOICE" == "$((n+1))" ]]; then
-      if register_with_hub "$GW_BIN" "$HUB_URL"; then
-        REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
-        REGISTERED_TOKEN="$(extract_json_field "$local_auth_path" token)"
-      else
-        echo ""
-        warn "重新注册失败（userId 可能已在 hub 上存在）"
-        RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
-        if [[ -n "$RECOVERY_TOKEN" ]]; then
-          RECOVERY_USER=$(read_tty "输入 userId: " "")
-          if [[ -n "$RECOVERY_USER" ]]; then
-            save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
-            REGISTERED_USER="$RECOVERY_USER"
-            REGISTERED_TOKEN="$RECOVERY_TOKEN"
-            info "已恢复凭据: $RECOVERY_USER"
-          fi
-        else
-          HUB_URL=""
-          TUNNEL_URL=""
-          APP_URL=""
-          warn "切换到本地模式"
-        fi
-      fi
-    else
-      HUB_URL=""
-      TUNNEL_URL=""
-      APP_URL=""
-      info "切换到本地模式"
-    fi
-  else
-    if register_with_hub "$GW_BIN" "$HUB_URL"; then
-      REGISTERED_USER="$(extract_json_field "$local_auth_path" userId)"
-      REGISTERED_TOKEN="$(extract_json_field "$local_auth_path" token)"
-    else
-      warn "注册失败（userId 可能已在 hub 上存在）"
-      RECOVERY_TOKEN=$(read_tty "输入已有 token 恢复凭据（或按 Enter 切换到本地模式）: " "")
-      if [[ -n "$RECOVERY_TOKEN" ]]; then
-        RECOVERY_USER=$(read_tty "输入 userId: " "")
-        if [[ -n "$RECOVERY_USER" ]]; then
-          save_local_auth "$RECOVERY_USER" "$RECOVERY_TOKEN"
-          REGISTERED_USER="$RECOVERY_USER"
-          REGISTERED_TOKEN="$RECOVERY_TOKEN"
-          info "已恢复凭据: $RECOVERY_USER"
-        fi
-      else
-        HUB_URL=""
-        TUNNEL_URL=""
-        APP_URL=""
-        warn "切换到本地模式"
-      fi
-    fi
-  fi
-
-  if [[ -z "$APP_URL" && -n "$HUB_URL" ]]; then
-    APP_URL="${HUB_URL%/}"
-  fi
-  if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
-    TOKEN="$REGISTERED_TOKEN"
-  fi
-fi
-
-# ── 4. Token (already resolved in step 1.5) ──────────────────────
-# Token may be overridden by REGISTERED_TOKEN from tunnelhub registration
-if [[ -z "$TOKEN" && -n "$REGISTERED_TOKEN" ]]; then
-  TOKEN="$REGISTERED_TOKEN"
-  info "使用注册 Token: ${TOKEN:0:12}..."
 fi
 
 # ── 5. Config ─────────────────────────────────────────────────────
@@ -1458,7 +1518,7 @@ echo ""
 if [[ -n "$REMOTE_WS_URL" ]]; then
   echo -e "${CYAN}🌐 远程连接（通过 tunnelhub）:${NC}"
   echo "  URL:   ${REMOTE_WS_URL}"
-  echo "  Token: ${REGISTERED_TOKEN:-$TOKEN}"
+  echo "  Token: ${TOKEN}"
   if [[ -n "$TUNNEL_USER" ]]; then
     echo "  User:  ${TUNNEL_USER}"
   fi
@@ -1480,9 +1540,9 @@ echo "  Token: ${TOKEN}"
 if [[ -n "$REMOTE_WS_URL" ]]; then
   echo ""
   echo -e "${CYAN}[远程] 跨网络使用:${NC}"
-  generate_qr "${REMOTE_WS_URL}|${REGISTERED_TOKEN:-$TOKEN}"
+  generate_qr "${REMOTE_WS_URL}|${TOKEN}"
   echo "  URL:   ${REMOTE_WS_URL}"
-  echo "  Token: ${REGISTERED_TOKEN:-$TOKEN}"
+  echo "  Token: ${TOKEN}"
 fi
 
 # Open browser

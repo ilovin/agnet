@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PhoneTalk - 下载</title>
+    <title>Agnet - 下载</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%23667eea'/%3E%3Cstop offset='100%25' stop-color='%23764ba2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='6' fill='url(%23g)'/%3E%3Ctext x='16' y='23' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold' font-size='20'%3EA%3C/text%3E%3C/svg%3E">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -204,6 +205,36 @@
         .local-gw-status.success {
             color: #27ae60;
         }
+        .local-gw-start-cmd {
+            margin-top: 12px;
+            display: none;
+            background: #2d2d2d;
+            border-radius: 8px;
+            padding: 12px 15px;
+            color: #e0e0e0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            position: relative;
+            text-align: left;
+        }
+        .local-gw-start-cmd code {
+            word-break: break-all;
+        }
+        .copy-cmd-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            background: #555;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85em;
+        }
+        .copy-cmd-btn:hover {
+            background: #667eea;
+        }
         #local-qr-display {
             margin-top: 15px;
             display: none;
@@ -218,7 +249,7 @@
         }
         .qr-container {
             display: inline-block;
-            margin: 0 10px;
+            margin: 0 40px;
             text-align: center;
         }
         .qr-label {
@@ -235,7 +266,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>PhoneTalk</h1>
+            <h1>Agnet</h1>
             <p>远程管理 AI Agent 的工具集</p>
         </header>
 
@@ -246,7 +277,7 @@
                 <p>适用于 macOS 和 Linux 的安装</p>
                 <div class="install-command">
                     <button class="copy-btn" onclick="copyCommand(event, 'desktop')">复制</button>
-                    <code id="desktop-command">wget https://api.ilovin.xyz/v1/install.sh && bash install.sh</code>
+                    <code id="desktop-command">wget --no-check-certificate https://api.ilovin.xyz/v1/install.sh && bash install.sh</code>
                 </div>
                 <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
             </div>
@@ -283,7 +314,7 @@
                 <div class="step-number">3</div>
                 <div class="step-content">
                     <h3>手机连接</h3>
-                    <p>在手机上安装 PhoneTalk App，扫描终端显示的二维码即可连接。</p>
+                    <p>在手机上安装 Agnet App，扫描终端显示的二维码即可连接。</p>
                 </div>
             </div>
 
@@ -300,6 +331,10 @@
                 <p style="color:#666;margin-bottom:15px;font-size:0.9em;">在同一台电脑上启动 agentgw 后，点击下方按钮生成连接二维码</p>
                 <button class="local-gw-btn" onclick="tryConnectLocalGW()">尝试连接本机 gw</button>
                 <div class="local-gw-status" id="local-gw-status"></div>
+                <div class="local-gw-start-cmd" id="local-gw-start-cmd">
+                    <code>~/.agentgw/agentgw start</code>
+                    <button class="copy-cmd-btn" onclick="copyStartCmd(event)">复制</button>
+                </div>
                 <div id="local-qr-display">
                     <div class="qr-container" id="qr-local-container">
                         <img src="http://localhost:7374/qr.png?type=local" class="qr-img" id="qr-local" alt="本机二维码" onload="onLocalQRLoad()" onerror="onLocalQRError()">
@@ -318,7 +353,7 @@
         </div>
 
         <footer>
-            <p>PhoneTalk © 2026 | 文档 | GitHub | 问题反馈</p>
+            <p>Agnet © 2026 | 文档 | GitHub | 问题反馈</p>
         </footer>
     </div>
 
@@ -432,15 +467,37 @@
         function onLocalQRLoad() {
             stopGwRetry();
             const statusEl = document.getElementById('local-gw-status');
-            statusEl.textContent = '已检测到本地网关，请使用 PhoneTalk App 扫描二维码';
+            statusEl.textContent = '已检测到本地网关，请使用 Agnet App 扫描二维码';
             statusEl.className = 'local-gw-status success';
+            document.getElementById('local-gw-start-cmd').style.display = 'none';
         }
 
         function onLocalQRError() {
             const statusEl = document.getElementById('local-gw-status');
-            statusEl.textContent = '未检测到本地网关，请先安装并启动 agentgw';
+            statusEl.textContent = '未检测到本地网关，请在终端运行以下命令启动：';
             statusEl.className = 'local-gw-status error';
+            document.getElementById('local-gw-start-cmd').style.display = 'block';
             document.getElementById('qr-local-container').style.display = 'none';
+        }
+
+        function copyStartCmd(event) {
+            event.stopPropagation();
+            const cmd = document.querySelector('#local-gw-start-cmd code').textContent;
+            navigator.clipboard.writeText(cmd).then(() => {
+                const btn = event.target;
+                btn.textContent = '已复制!';
+                setTimeout(() => btn.textContent = '复制', 2000);
+            }).catch(() => {
+                const textArea = document.createElement('textarea');
+                textArea.value = cmd;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                const btn = event.target;
+                btn.textContent = '已复制!';
+                setTimeout(() => btn.textContent = '复制', 2000);
+            });
         }
 
         function onRemoteQRLoad() {
@@ -485,6 +542,11 @@
             _gwRetryTimer = setInterval(() => {
                 if (_gwRetryCount >= GW_MAX_RETRIES) {
                     stopGwRetry();
+                    const s = document.getElementById('local-gw-status');
+                    if (!s.classList.contains('success')) {
+                        s.textContent = '连接超时，请在终端运行以下命令启动网关：';
+                        document.getElementById('local-gw-start-cmd').style.display = 'block';
+                    }
                     return;
                 }
                 _gwRetryCount++;

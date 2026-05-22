@@ -44,6 +44,7 @@ dependencies:
   package_info_plus: ^10.0.0
   image_picker: ^1.1.2
   mobile_scanner: ^6.0.5
+  webview_flutter: ^4.8.0
 
 dev_dependencies:
   flutter_test:

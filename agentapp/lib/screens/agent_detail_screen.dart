@@ -23,6 +23,7 @@ import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
+import '../widgets/browser_screenshot_widget.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
 /// Handles complex sequences including claude-code specific output.
@@ -1031,12 +1032,19 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     super.initState();
     _scrollCtrl.addListener(_handleScroll);
 
-    // Restore draft text if any
+    // Restore draft text if any (use post-frame to ensure TextField is ready)
     final draft = ref.read(draftProvider.notifier).getDraft(widget.nodeId, widget.agentId);
     if (draft.isNotEmpty) {
-      _inputCtrl.text = draft;
-      _inputCtrl.selection = TextSelection.collapsed(offset: draft.length);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_inputCtrl.text != draft) {
+          _inputCtrl.text = draft;
+          _inputCtrl.selection = TextSelection.collapsed(offset: draft.length);
+        }
+      });
     }
+
+    // Persist draft on every keystroke (web: dispose may not fire on browser back)
+    _inputCtrl.addListener(_persistDraft);
 
     ref.read(unreadProvider.notifier).markAsRead(widget.nodeId, widget.agentId);
 
@@ -1119,15 +1127,18 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     });
   }
 
-  @override
-  void dispose() {
-    // Persist draft text for this agent before disposing
+  void _persistDraft() {
     final draft = _inputCtrl.text;
     if (draft.isNotEmpty) {
       ref.read(draftProvider.notifier).setDraft(widget.nodeId, widget.agentId, draft);
     } else {
       ref.read(draftProvider.notifier).clearDraft(widget.nodeId, widget.agentId);
     }
+  }
+
+  @override
+  void dispose() {
+    _inputCtrl.removeListener(_persistDraft);
 
     _pollTimer?.cancel();
     _scrollCtrl.removeListener(_handleScroll);
@@ -5262,6 +5273,24 @@ class _InputBarState extends State<_InputBar> {
     widget.onImagesChanged(updated);
   }
 
+  Future<void> _takeBrowserScreenshot() async {
+    try {
+      final result = await showBrowserScreenshot(context);
+      if (result != null) {
+        final updated = List<Map<String, String>>.from(widget.pendingImages);
+        updated.add(result);
+        widget.onImagesChanged(updated);
+      }
+    } catch (e, st) {
+      debugPrint('browserScreenshot error: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('浏览器截图失败: $e')));
+      }
+    }
+  }
+
   String _detectMimeType(List<int> bytes) {
     if (bytes.length >= 4) {
       if (bytes[0] == 0x89 &&
@@ -5542,6 +5571,21 @@ class _InputBarState extends State<_InputBar> {
                   onPressed: effectiveLoading ? null : _pickImage,
                   icon: const Icon(Icons.image, size: 20),
                   tooltip: '添加图片',
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
+                  padding: EdgeInsets.zero,
+                ),
+              // Browser screenshot button
+              if (!isReadOnly &&
+                  widget.agent?.provider != 'opencode' &&
+                  widget.agent?.attachMode != 'tmux')
+                IconButton(
+                  onPressed: effectiveLoading ? null : _takeBrowserScreenshot,
+                  icon: const Icon(Icons.web, size: 20),
+                  tooltip: '浏览器截图',
                   visualDensity: VisualDensity.compact,
                   constraints: const BoxConstraints(
                     minWidth: 32,

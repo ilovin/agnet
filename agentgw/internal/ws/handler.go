@@ -71,7 +71,7 @@ func (h *handler) dispatch(req RPCRequest) dispatchResult {
 		"session.list", "session.create", "session.attach", "session.catalog",
 		"provider.list", "provider.switch", "provider.add",
 		"opencode.models",
-		"system.info", "system.skills":
+		"system.info", "system.skills", "system.suggest_dirs":
 		return dispatchResult{resp: h.proxyToNode(req)}
 	case "node.rename":
 		return dispatchResult{resp: h.nodeRename(req)}

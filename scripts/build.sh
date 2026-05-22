@@ -164,7 +164,7 @@ build_agentd_mac() {
         return 0
     fi
     echo "[build] Building agentd for macOS..."
-    (cd "$AGENTD_DIR" && go build -o "../$LOCAL_BIN" ./cmd/agentd/)
+    (cd "$AGENTD_DIR" && go build -ldflags "-s -w" -o "../$LOCAL_BIN" ./cmd/agentd/)
     record_binary_hash "$LOCAL_BIN" agentd agentd/go.mod agentd/go.sum
     link_legacy "$LOCAL_BIN" "$AGENTD_DIR/agentd"
     echo "[build] agentd (macOS): $(ls -lh "$LOCAL_BIN" | awk '{print $5}')"
@@ -176,7 +176,7 @@ build_agentd_linux() {
         return 0
     fi
     echo "[build] Building agentd for Linux amd64..."
-    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -o "../$LINUX_BIN" ./cmd/agentd/)
+    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o "../$LINUX_BIN" ./cmd/agentd/)
     record_binary_hash "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum
     link_legacy "$LINUX_BIN" "$AGENTD_DIR/agentd-linux"
     echo "[build] agentd (Linux): $(ls -lh "$LINUX_BIN" | awk '{print $5}')"
@@ -188,18 +188,14 @@ build_agentgw_mac() {
         return 0
     fi
     echo "[build] Building agentgw for macOS..."
-    local ldflags=""
+    local ldflags="-s -w"
     if [[ -n "$BUILD_VERSION" ]]; then
-        ldflags="-X main.Version=$BUILD_VERSION"
+        ldflags="$ldflags -X main.Version=$BUILD_VERSION"
     fi
     if [[ -n "$DOMAIN" ]]; then
-        ldflags="${ldflags:+$ldflags }-X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
+        ldflags="$ldflags -X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
     fi
-    if [[ -n "$ldflags" ]]; then
-        (cd "$AGENTGW_DIR" && go build -ldflags "$ldflags" -o "../$GW_BIN" ./cmd/agentgw/)
-    else
-        (cd "$AGENTGW_DIR" && go build -o "../$GW_BIN" ./cmd/agentgw/)
-    fi
+    (cd "$AGENTGW_DIR" && go build -ldflags "$ldflags" -o "../$GW_BIN" ./cmd/agentgw/)
     record_binary_hash "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum
     link_legacy "$GW_BIN" "$AGENTGW_DIR/agentgw"
     echo "[build] agentgw (macOS): $(ls -lh "$GW_BIN" | awk '{print $5}')"
@@ -211,18 +207,14 @@ build_agentgw_linux() {
         return 0
     fi
     echo "[build] Building agentgw for Linux amd64..."
-    local ldflags=""
+    local ldflags="-s -w"
     if [[ -n "$BUILD_VERSION" ]]; then
-        ldflags="-X main.Version=$BUILD_VERSION"
+        ldflags="$ldflags -X main.Version=$BUILD_VERSION"
     fi
     if [[ -n "$DOMAIN" ]]; then
-        ldflags="${ldflags:+$ldflags }-X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
+        ldflags="$ldflags -X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
     fi
-    if [[ -n "$ldflags" ]]; then
-        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "$ldflags" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
-    else
-        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
-    fi
+    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "$ldflags" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
     record_binary_hash "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum
     link_legacy "$GW_LINUX_BIN" "$AGENTGW_DIR/agentgw-linux"
     echo "[build] agentgw (Linux): $(ls -lh "$GW_LINUX_BIN" | awk '{print $5}')"
