@@ -511,26 +511,25 @@ func TestAttachHermesSamePIDSwitchesSessionAndHydratesHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetResumeSessionID failed: %v", err)
 	}
-	if resumeID != "sess-new" {
-		t.Fatalf("expected new session id, got %q", resumeID)
+	if resumeID != "sess-old" {
+		t.Fatalf("expected stored session preserved, got %q (Hermes session is gateway-managed, --session arg is not authoritative)", resumeID)
 	}
 
-	if live := rebound.EventBuf().Since(0); len(live) != 0 {
-		t.Fatalf("expected cleared live history after session switch, got %d events", len(live))
+	// Live events: preserved (no rebind clearing)
+	if live := rebound.EventBuf().Since(0); len(live) != 1 {
+		t.Fatalf("expected 1 live event preserved after reattach, got %d", len(live))
 	}
 
+	// Persisted events: only the stale event (no history hydration from API on reattach)
 	events, err := m.LoadPersistedEventsLatest(first.ID, 10)
 	if err != nil {
 		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("expected hydrated hermes history with 2 events, got %d", len(events))
+	if len(events) != 1 {
+		t.Fatalf("expected 1 persisted event, got %d", len(events))
 	}
-	if events[0].Data["role"] != "user" || events[0].Data["text"] != "hello" {
-		t.Fatalf("unexpected first hydrated event: %+v", events[0].Data)
-	}
-	if events[1].Data["role"] != "assistant" || events[1].Data["text"] != "hi" {
-		t.Fatalf("unexpected second hydrated event: %+v", events[1].Data)
+	if events[0].Data["role"] != "assistant" || events[0].Data["text"] != "stale" {
+		t.Fatalf("unexpected persisted event: %+v", events[0].Data)
 	}
 }
 
@@ -579,16 +578,16 @@ func TestAttachHermesSamePIDSessionSwitchHistoryFetchFailureKeepsAgent(t *testin
 	if err != nil {
 		t.Fatalf("GetResumeSessionID failed: %v", err)
 	}
-	if resumeID != "sess-new" {
-		t.Fatalf("expected new session id, got %q", resumeID)
+	if resumeID != "sess-old" {
+		t.Fatalf("expected stored session preserved, got %q (Hermes session is gateway-managed)", resumeID)
 	}
 
 	events, err := m.LoadPersistedEventsLatest(first.ID, 10)
 	if err != nil {
 		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
 	}
-	if len(events) != 0 {
-		t.Fatalf("expected stale persisted events cleared when session switches, got %d", len(events))
+	if len(events) != 1 {
+		t.Fatalf("expected 1 preserved event, got %d", len(events))
 	}
 }
 

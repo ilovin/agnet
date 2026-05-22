@@ -1949,7 +1949,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		m.mu.RUnlock()
 		// Refresh attach metadata in case tmux/TTY availability changed.
 		applyAttachMetadata(existing)
-		if samePID && sessionID != "" && existingResumeID != sessionID {
+		if samePID && sessionID != "" && existingResumeID != sessionID && !(info.Provider == "hermes" && existingResumeID != "") {
 			rebindAttachedSession(existing, sessionID, sessionFile)
 				if info.Provider == "hermes" {
 					if historyEvents, err := m.HermesClient().GetHistory(context.Background(), sessionID); err != nil {
