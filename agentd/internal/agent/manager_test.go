@@ -1330,3 +1330,49 @@ func TestLoadFromStoreKeepsInteractiveHermesWhenNotGatewayRun(t *testing.T) {
 		t.Fatalf("expected pid 4444, got %d", ag.PID)
 	}
 }
+
+func TestAttachSamePIDSessionSwitchRebindsToScannerSession(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	firstSessionFile := filepath.Join(repoDir, "sess-old.jsonl")
+	if err := os.WriteFile(firstSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write first session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: firstSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("initial attach failed: %v", err)
+	}
+	if err := m.UpdateResumeSessionID(ag.ID, "sess-old"); err != nil {
+		t.Fatalf("UpdateResumeSessionID failed: %v", err)
+	}
+
+	newSessionFile := filepath.Join(repoDir, "sess-new.jsonl")
+	if err := os.WriteFile(newSessionFile, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write new session file: %v", err)
+	}
+
+	_, err = m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     repoDir,
+		SessionFile: newSessionFile,
+	})
+	if err != nil {
+		t.Fatalf("reattach failed: %v", err)
+	}
+
+	resumeID, err := m.GetResumeSessionID(ag.ID)
+	if err != nil {
+		t.Fatalf("GetResumeSessionID failed: %v", err)
+	}
+	if resumeID != "sess-new" {
+		t.Fatalf("expected rebind to scanner session sess-new, got %q", resumeID)
+	}
+}

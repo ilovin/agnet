@@ -715,3 +715,14 @@ func TestContentMatchSessionByPaneTextAcceptsClearWinner(t *testing.T) {
 		t.Fatalf("expected sess-win clear match, got %+v", matched)
 	}
 }
+
+func TestFilterByPaneActivityDoesNotHardPruneOutsideTolerance(t *testing.T) {
+	paneActivity := time.Now()
+	inTolerance := SessionCandidate{SessionID: "near", LastActivity: paneActivity.Add(-2 * time.Minute)}
+	outOfTolerance := SessionCandidate{SessionID: "far", LastActivity: paneActivity.Add(-20 * time.Minute)}
+
+	got := filterByPaneActivity([]SessionCandidate{inTolerance, outOfTolerance}, &paneActivity, 5*time.Minute)
+	if len(got) != 2 {
+		t.Fatalf("expected no hard prune (2 candidates), got %d", len(got))
+	}
+}

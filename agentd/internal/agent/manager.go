@@ -17,8 +17,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/phone-talk/agentd/internal/hermesclient"
 	"github.com/phone-talk/agentd/internal/eventbuf"
+	"github.com/phone-talk/agentd/internal/hermesclient"
 	agentpty "github.com/phone-talk/agentd/internal/pty"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
@@ -79,9 +79,9 @@ type Manager struct {
 	sessionParents    map[string]string                         // childAgentID -> parentAgentID for session continuity
 	hermesClient      *hermesclient.Client
 	scanExisting      func() ([]scanner.ProcessInfo, error)
-	sessionFileFinder func(scanner.ProcessInfo) string          // test hook to override session file discovery
-	processRunning    func(pid int, provider string) bool       // test hook for process liveness check
-	hermesGatewayRun  func(pid int) bool                        // test hook for hermes gateway daemon detection
+	sessionFileFinder func(scanner.ProcessInfo) string    // test hook to override session file discovery
+	processRunning    func(pid int, provider string) bool // test hook for process liveness check
+	hermesGatewayRun  func(pid int) bool                  // test hook for hermes gateway daemon detection
 	events            *EventManager
 	parser            *StreamParser
 	processes         *ProcessManager
@@ -1503,7 +1503,6 @@ func (m *Manager) SetHermesGatewayRunChecker(fn func(pid int) bool) {
 	m.hermesGatewayRun = fn
 }
 
-
 // DataDir returns the data directory used for persistent storage.
 func (m *Manager) DataDir() string {
 	m.mu.RLock()
@@ -1898,9 +1897,6 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 		// Reset the in-memory EventBuf so new-session events start from seq=0,
 		ag.EventBuf().Reset()
-		if err := m.ClearConversationEvents(ag.ID); err != nil {
-			log.Printf("[Attach] Warning: failed to clear persisted history for %s: %v", ag.ID, err)
-		}
 		currentName := ag.Name
 		currentPID := ag.PID
 		currentSessionID, _ := m.GetResumeSessionID(ag.ID)
@@ -1971,12 +1967,7 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		// Refresh attach metadata in case tmux/TTY availability changed.
 		applyAttachMetadata(existing)
 		if samePID && sessionID != "" && existingResumeID != sessionID && !(info.Provider == "hermes" && existingResumeID != "") {
-			if existingResumeID != "" {
-				log.Printf("[ReAttach] PID %d: keeping existing session %s (scanner returned %s)",
-					info.PID, existingResumeID, sessionID)
-			} else {
-				rebindAttachedSession(existing, sessionID, sessionFile)
-			}
+			rebindAttachedSession(existing, sessionID, sessionFile)
 
 		} else {
 			currentName := existing.Name

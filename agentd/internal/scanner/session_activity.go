@@ -127,38 +127,23 @@ func filterByPaneActivity(candidates []SessionCandidate, paneActivity *time.Time
 		return candidates
 	}
 
-	var filtered []SessionCandidate
-	for _, c := range candidates {
-		diff := c.LastActivity.Sub(*paneActivity)
-		if diff < 0 {
-			diff = -diff
-		}
-		if diff <= tolerance {
-			filtered = append(filtered, c)
-		}
-	}
-
-	if len(filtered) == 0 {
-		// Tolerance too strict, return all sorted by lastActivity
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].LastActivity.After(candidates[j].LastActivity)
-		})
-		return candidates
-	}
-
-	// Sort by time proximity to paneActivity (closest first)
+	// Soft temporal fusion: do not hard-prune by tolerance; only sort by
+	// proximity so nearby candidates are preferred while distant ones remain.
 	pa := *paneActivity
-	sort.Slice(filtered, func(i, j int) bool {
-		di := filtered[i].LastActivity.Sub(pa)
+	sort.Slice(candidates, func(i, j int) bool {
+		di := candidates[i].LastActivity.Sub(pa)
 		if di < 0 {
 			di = -di
 		}
-		dj := filtered[j].LastActivity.Sub(pa)
+		dj := candidates[j].LastActivity.Sub(pa)
 		if dj < 0 {
 			dj = -dj
+		}
+		if di == dj {
+			return candidates[i].LastActivity.After(candidates[j].LastActivity)
 		}
 		return di < dj
 	})
 
-	return filtered
+	return candidates
 }
