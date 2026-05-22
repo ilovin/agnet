@@ -10,8 +10,10 @@
 #   go               Build all Go binaries (agentd + agentgw for all platforms)
 #   agentd           Build agentd for current platform
 #   agentd-linux     Build agentd for Linux amd64
+#   agentd-linux-arm64 Build agentd for Linux arm64
 #   agentgw          Build agentgw for current platform
 #   agentgw-linux    Build agentgw for Linux amd64
+#   agentgw-linux-arm64 Build agentgw for Linux arm64
 #   apk              Build Android APK
 #   ipa              Build iOS IPA
 #   web              Build Flutter Web
@@ -30,13 +32,19 @@ AGENTGW_DIR="./agentgw"
 AGENTAPP_DIR="./agentapp"
 OUT_DIR="./out"
 OUT_DIR_DARWIN="$OUT_DIR/darwin-arm64"
-OUT_DIR_LINUX="$OUT_DIR/linux-amd64"
+OUT_DIR_LINUX_AMD64="$OUT_DIR/linux-amd64"
+OUT_DIR_LINUX_ARM64="$OUT_DIR/linux-arm64"
+OUT_DIR_LINUX="$OUT_DIR_LINUX_AMD64"
 OUT_DIR_ANDROID="$OUT_DIR/android"
 OUT_DIR_IOS="$OUT_DIR/ios"
 LOCAL_BIN="$OUT_DIR_DARWIN/agentd"
-LINUX_BIN="$OUT_DIR_LINUX/agentd"
+LINUX_AMD64_BIN="$OUT_DIR_LINUX_AMD64/agentd"
+LINUX_ARM64_BIN="$OUT_DIR_LINUX_ARM64/agentd"
+LINUX_BIN="$LINUX_AMD64_BIN"
 GW_BIN="$OUT_DIR_DARWIN/agentgw"
-GW_LINUX_BIN="$OUT_DIR_LINUX/agentgw"
+GW_LINUX_AMD64_BIN="$OUT_DIR_LINUX_AMD64/agentgw"
+GW_LINUX_ARM64_BIN="$OUT_DIR_LINUX_ARM64/agentgw"
+GW_LINUX_BIN="$GW_LINUX_AMD64_BIN"
 APK_OUTPUT="$OUT_DIR_ANDROID/agentapp.apk"
 IPA_OUTPUT="$OUT_DIR_IOS/agentapp.ipa"
 WEB_STATIC_DIR="$OUT_DIR/static"
@@ -49,7 +57,7 @@ HUB_DOMAIN="tunnel.${DOMAIN}"
 API_DOMAIN="api.${DOMAIN}"
 DOWNLOAD_DOMAIN="download.${DOMAIN}"
 
-mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
+mkdir -p "$OUT_DIR_DARWIN" "$OUT_DIR_LINUX_AMD64" "$OUT_DIR_LINUX_ARM64" "$OUT_DIR_ANDROID" "$OUT_DIR_IOS"
 
 # Symlink legacy paths to out/ for backward compatibility
 link_legacy() {
@@ -170,17 +178,34 @@ build_agentd_mac() {
     echo "[build] agentd (macOS): $(ls -lh "$LOCAL_BIN" | awk '{print $5}')"
 }
 
-build_agentd_linux() {
-    if binary_up_to_date "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum; then
-        echo "[build] agentd (Linux) up-to-date, skipping"
+build_agentd_linux_amd64() {
+    if binary_up_to_date "$LINUX_AMD64_BIN" agentd agentd/go.mod agentd/go.sum; then
+        echo "[build] agentd (Linux amd64) up-to-date, skipping"
         return 0
     fi
     echo "[build] Building agentd for Linux amd64..."
-    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o "../$LINUX_BIN" ./cmd/agentd/)
-    record_binary_hash "$LINUX_BIN" agentd agentd/go.mod agentd/go.sum
-    link_legacy "$LINUX_BIN" "$AGENTD_DIR/agentd-linux"
-    echo "[build] agentd (Linux): $(ls -lh "$LINUX_BIN" | awk '{print $5}')"
+    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o "../$LINUX_AMD64_BIN" ./cmd/agentd/)
+    record_binary_hash "$LINUX_AMD64_BIN" agentd agentd/go.mod agentd/go.sum
+    link_legacy "$LINUX_AMD64_BIN" "$AGENTD_DIR/agentd-linux"
+    echo "[build] agentd (Linux amd64): $(ls -lh "$LINUX_AMD64_BIN" | awk '{print $5}')"
 }
+
+build_agentd_linux_arm64() {
+    if binary_up_to_date "$LINUX_ARM64_BIN" agentd agentd/go.mod agentd/go.sum; then
+        echo "[build] agentd (Linux arm64) up-to-date, skipping"
+        return 0
+    fi
+    echo "[build] Building agentd for Linux arm64..."
+    (cd "$AGENTD_DIR" && GOOS=linux GOARCH=arm64 go build -o "../$LINUX_ARM64_BIN" ./cmd/agentd/)
+    record_binary_hash "$LINUX_ARM64_BIN" agentd agentd/go.mod agentd/go.sum
+    link_legacy "$LINUX_ARM64_BIN" "$AGENTD_DIR/agentd-linux-arm64"
+    echo "[build] agentd (Linux arm64): $(ls -lh "$LINUX_ARM64_BIN" | awk '{print $5}')"
+}
+
+build_agentd_linux() {
+    build_agentd_linux_amd64
+}
+
 
 build_agentgw_mac() {
     if binary_up_to_date "$GW_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
@@ -201,9 +226,9 @@ build_agentgw_mac() {
     echo "[build] agentgw (macOS): $(ls -lh "$GW_BIN" | awk '{print $5}')"
 }
 
-build_agentgw_linux() {
-    if binary_up_to_date "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
-        echo "[build] agentgw (Linux) up-to-date, skipping"
+build_agentgw_linux_amd64() {
+    if binary_up_to_date "$GW_LINUX_AMD64_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
+        echo "[build] agentgw (Linux amd64) up-to-date, skipping"
         return 0
     fi
     echo "[build] Building agentgw for Linux amd64..."
@@ -214,11 +239,39 @@ build_agentgw_linux() {
     if [[ -n "$DOMAIN" ]]; then
         ldflags="$ldflags -X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
     fi
-    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "$ldflags" -o "../$GW_LINUX_BIN" ./cmd/agentgw/)
-    record_binary_hash "$GW_LINUX_BIN" agentgw agentgw/go.mod agentgw/go.sum
-    link_legacy "$GW_LINUX_BIN" "$AGENTGW_DIR/agentgw-linux"
-    echo "[build] agentgw (Linux): $(ls -lh "$GW_LINUX_BIN" | awk '{print $5}')"
+    (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=amd64 go build -ldflags "$ldflags" -o "../$GW_LINUX_AMD64_BIN" ./cmd/agentgw/)
+    record_binary_hash "$GW_LINUX_AMD64_BIN" agentgw agentgw/go.mod agentgw/go.sum
+    link_legacy "$GW_LINUX_AMD64_BIN" "$AGENTGW_DIR/agentgw-linux"
+    echo "[build] agentgw (Linux amd64): $(ls -lh "$GW_LINUX_AMD64_BIN" | awk '{print $5}')"
 }
+
+build_agentgw_linux_arm64() {
+    if binary_up_to_date "$GW_LINUX_ARM64_BIN" agentgw agentgw/go.mod agentgw/go.sum; then
+        echo "[build] agentgw (Linux arm64) up-to-date, skipping"
+        return 0
+    fi
+    echo "[build] Building agentgw for Linux arm64..."
+    local ldflags=""
+    if [[ -n "$BUILD_VERSION" ]]; then
+        ldflags="-X main.Version=$BUILD_VERSION"
+    fi
+    if [[ -n "$DOMAIN" ]]; then
+        ldflags="${ldflags:+$ldflags }-X main.DefaultHubDomain=$HUB_DOMAIN -X main.DefaultAPIDomain=$API_DOMAIN -X main.DefaultDownloadDomain=$DOWNLOAD_DOMAIN"
+    fi
+    if [[ -n "$ldflags" ]]; then
+        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=arm64 go build -ldflags "$ldflags" -o "../$GW_LINUX_ARM64_BIN" ./cmd/agentgw/)
+    else
+        (cd "$AGENTGW_DIR" && GOOS=linux GOARCH=arm64 go build -o "../$GW_LINUX_ARM64_BIN" ./cmd/agentgw/)
+    fi
+    record_binary_hash "$GW_LINUX_ARM64_BIN" agentgw agentgw/go.mod agentgw/go.sum
+    link_legacy "$GW_LINUX_ARM64_BIN" "$AGENTGW_DIR/agentgw-linux-arm64"
+    echo "[build] agentgw (Linux arm64): $(ls -lh "$GW_LINUX_ARM64_BIN" | awk '{print $5}')"
+}
+
+build_agentgw_linux() {
+    build_agentgw_linux_amd64
+}
+
 
 build_apk() {
     local needs_build=false
@@ -324,43 +377,52 @@ build_portal() {
 
 build_go_all() {
     echo "[build] Building all Go binaries in parallel..."
-    local mac_pid linux_pid gw_mac_pid gw_linux_pid
-    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0
+    local mac_pid linux_amd64_pid linux_arm64_pid gw_mac_pid gw_linux_amd64_pid gw_linux_arm64_pid
+    local mac_ok=0 linux_amd64_ok=0 linux_arm64_ok=0 gw_mac_ok=0 gw_linux_amd64_ok=0 gw_linux_arm64_ok=0
     build_agentd_mac & mac_pid=$!
-    build_agentd_linux & linux_pid=$!
+    build_agentd_linux_amd64 & linux_amd64_pid=$!
+    build_agentd_linux_arm64 & linux_arm64_pid=$!
     build_agentgw_mac & gw_mac_pid=$!
-    build_agentgw_linux & gw_linux_pid=$!
+    build_agentgw_linux_amd64 & gw_linux_amd64_pid=$!
+    build_agentgw_linux_arm64 & gw_linux_arm64_pid=$!
     wait "$mac_pid" && mac_ok=1 || true
-    wait "$linux_pid" && linux_ok=1 || true
+    wait "$linux_amd64_pid" && linux_amd64_ok=1 || true
+    wait "$linux_arm64_pid" && linux_arm64_ok=1 || true
     wait "$gw_mac_pid" && gw_mac_ok=1 || true
-    wait "$gw_linux_pid" && gw_linux_ok=1 || true
-    echo "[build] Go build results: agentd_mac=$mac_ok agentd_linux=$linux_ok agentgw_mac=$gw_mac_ok agentgw_linux=$gw_linux_ok"
-    [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_ok -eq 1 ]]
+    wait "$gw_linux_amd64_pid" && gw_linux_amd64_ok=1 || true
+    wait "$gw_linux_arm64_pid" && gw_linux_arm64_ok=1 || true
+    echo "[build] Go build results: agentd_mac=$mac_ok agentd_linux_amd64=$linux_amd64_ok agentd_linux_arm64=$linux_arm64_ok agentgw_mac=$gw_mac_ok agentgw_linux_amd64=$gw_linux_amd64_ok agentgw_linux_arm64=$gw_linux_arm64_ok"
+    [[ $mac_ok -eq 1 && $linux_amd64_ok -eq 1 && $linux_arm64_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_amd64_ok -eq 1 && $gw_linux_arm64_ok -eq 1 ]]
 }
 
 build_all() {
     echo "[build] Building all components in parallel..."
-    local mac_pid linux_pid gw_mac_pid gw_linux_pid apk_pid ipa_pid web_pid portal_pid
-    local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 apk_ok=0 ipa_ok=0 web_ok=0 portal_ok=0
+    local mac_pid linux_amd64_pid linux_arm64_pid gw_mac_pid gw_linux_amd64_pid gw_linux_arm64_pid apk_pid ipa_pid web_pid portal_pid
+    local mac_ok=0 linux_amd64_ok=0 linux_arm64_ok=0 gw_mac_ok=0 gw_linux_amd64_ok=0 gw_linux_arm64_ok=0 apk_ok=0 ipa_ok=0 web_ok=0 portal_ok=0
     build_agentd_mac & mac_pid=$!
-    build_agentd_linux & linux_pid=$!
+    build_agentd_linux_amd64 & linux_amd64_pid=$!
+    build_agentd_linux_arm64 & linux_arm64_pid=$!
     build_agentgw_mac & gw_mac_pid=$!
-    build_agentgw_linux & gw_linux_pid=$!
+    build_agentgw_linux_amd64 & gw_linux_amd64_pid=$!
+    build_agentgw_linux_arm64 & gw_linux_arm64_pid=$!
     build_apk & apk_pid=$!
     build_ipa & ipa_pid=$!
     build_web & web_pid=$!
     build_portal & portal_pid=$!
     wait "$mac_pid" && mac_ok=1 || true
-    wait "$linux_pid" && linux_ok=1 || true
+    wait "$linux_amd64_pid" && linux_amd64_ok=1 || true
+    wait "$linux_arm64_pid" && linux_arm64_ok=1 || true
     wait "$gw_mac_pid" && gw_mac_ok=1 || true
-    wait "$gw_linux_pid" && gw_linux_ok=1 || true
+    wait "$gw_linux_amd64_pid" && gw_linux_amd64_ok=1 || true
+    wait "$gw_linux_arm64_pid" && gw_linux_arm64_ok=1 || true
     wait "$apk_pid" && apk_ok=1 || true
     wait "$ipa_pid" && ipa_ok=1 || true
     wait "$web_pid" && web_ok=1 || true
     wait "$portal_pid" && portal_ok=1 || true
-    echo "[build] Build results: agentd_mac=$mac_ok agentd_linux=$linux_ok agentgw_mac=$gw_mac_ok agentgw_linux=$gw_linux_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok portal=$portal_ok"
-    [[ $mac_ok -eq 1 && $linux_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_ok -eq 1 && $apk_ok -eq 1 ]]
+    echo "[build] Build results: agentd_mac=$mac_ok agentd_linux_amd64=$linux_amd64_ok agentd_linux_arm64=$linux_arm64_ok agentgw_mac=$gw_mac_ok agentgw_linux_amd64=$gw_linux_amd64_ok agentgw_linux_arm64=$gw_linux_arm64_ok apk=$apk_ok ipa=$ipa_ok web=$web_ok portal=$portal_ok"
+    [[ $mac_ok -eq 1 && $linux_amd64_ok -eq 1 && $linux_arm64_ok -eq 1 && $gw_mac_ok -eq 1 && $gw_linux_amd64_ok -eq 1 && $gw_linux_arm64_ok -eq 1 && $apk_ok -eq 1 ]]
 }
+
 
 show_help() {
   cat <<EOF
@@ -375,8 +437,10 @@ TARGETS:
   go               Build all Go binaries (agentd + agentgw for all platforms)
   agentd           Build agentd for current platform
   agentd-linux     Build agentd for Linux amd64
+  agentd-linux-arm64 Build agentd for Linux arm64
   agentgw          Build agentgw for current platform
   agentgw-linux    Build agentgw for Linux amd64
+  agentgw-linux-arm64 Build agentgw for Linux arm64
   apk              Build Android APK
   ipa              Build iOS IPA
   web              Build Flutter Web
@@ -406,6 +470,8 @@ OUTPUT LOCATIONS:
   out/darwin-arm64/agentgw — macOS gateway
   out/linux-amd64/agentd   — Linux daemon (amd64)
   out/linux-amd64/agentgw  — Linux gateway (amd64)
+  out/linux-arm64/agentd   — Linux daemon (arm64)
+  out/linux-arm64/agentgw  — Linux gateway (arm64)
   out/android/agentapp.apk — Android APK
   out/ios/agentapp.ipa     — iOS IPA
   out/static/              — Web static assets
@@ -434,11 +500,17 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         agentd-linux)
             build_agentd_linux
             ;;
+        agentd-linux-arm64)
+            build_agentd_linux_arm64
+            ;;
         agentgw)
             build_agentgw_mac
             ;;
         agentgw-linux)
             build_agentgw_linux
+            ;;
+        agentgw-linux-arm64)
+            build_agentgw_linux_arm64
             ;;
         apk)
             build_apk

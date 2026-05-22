@@ -193,6 +193,25 @@ func TestFinalizeProcessScanKeepsClaudeWithoutLiveSessionMapping(t *testing.T) {
 	}
 }
 
+func TestFinalizeProcessScanKeepsHermesGatewayRunArgs(t *testing.T) {
+	got := finalizeProcessScan([]ProcessInfo{{
+		PID:      321,
+		PPID:     1,
+		Provider: "hermes",
+		Cmd:      "hermes",
+		Args:     []string{"gateway", "run"},
+		WorkDir:  "/repo",
+	}})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 hermes process, got %d", len(got))
+	}
+	if got[0].Provider != "hermes" {
+		t.Fatalf("expected provider hermes, got %q", got[0].Provider)
+	}
+	if len(got[0].Args) < 2 || got[0].Args[0] != "gateway" || got[0].Args[1] != "run" {
+		t.Fatalf("expected hermes args to keep gateway run, got %#v", got[0].Args)
+	}
+}
 func TestResolveTmuxTargetFromPaneListMatchesTTY(t *testing.T) {
 	output := "/dev/ttys001\tmain\tmain:0.0\n/dev/ttys002\tdev\tdev:1.2\n"
 
@@ -479,6 +498,29 @@ func TestProcessInfoAttachRoutingMetadata(t *testing.T) {
 			t.Fatal("expected non-empty read-only reason")
 		}
 	})
+}
+
+func TestIsClaudeSubagentArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "plain interactive", args: []string{"--dangerously-skip-permissions"}, want: false},
+		{name: "print mode", args: []string{"-p", "hello"}, want: true},
+		{name: "output format separate flag", args: []string{"--output-format", "stream-json"}, want: true},
+		{name: "output format equals", args: []string{"--output-format=stream-json"}, want: true},
+		{name: "similar token not match", args: []string{"-path", "foo"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isClaudeSubagentArgs(tt.args)
+			if got != tt.want {
+				t.Fatalf("isClaudeSubagentArgs(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestDetectProvider(t *testing.T) {

@@ -59,6 +59,11 @@ func (s *Scanner) scanProcess(pid int) (ProcessInfo, bool) {
 		return ProcessInfo{}, false
 	}
 
+	// Filter out claude -p sub-agents (child processes spawned by Claude Code Agent tool).
+	if provider == "claude" && isClaudeSubagentArgs(parts[1:]) {
+		return ProcessInfo{}, false
+	}
+
 	// Get working directory
 	cwdPath := fmt.Sprintf("/proc/%d/cwd", pid)
 	workDir, err := os.Readlink(cwdPath)

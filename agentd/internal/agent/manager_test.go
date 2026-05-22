@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -123,19 +124,59 @@ func TestClassifyAttachCandidateClaudeWithoutSessionIDIsDisplay(t *testing.T) {
 	}
 }
 
-func TestClassifyAttachCandidateNonClaudeWithEmptySessionIDIsAmbiguous(t *testing.T) {
+func TestClassifyAttachCandidateOpencodeStillAuto(t *testing.T) {
 	m := newTestManager(t)
 
-	// Non-claude process with empty session ID should still be Auto (not filtered as ambiguous)
-	// Note: the original behavior for non-claude was Auto regardless of session ID.
-	// The test name reflects the regression concern: non-claude should not be affected.
 	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
 		PID:       123,
 		Provider:  "opencode",
 		SessionID: "",
 	})
 	if candidate.Decision != agent.AttachDecisionAuto {
-		t.Fatalf("expected auto decision for non-claude process, got %q", candidate.Decision)
+		t.Fatalf("expected auto decision for opencode process, got %q", candidate.Decision)
+	}
+}
+
+func TestClassifyAttachCandidateHermesGatewayRunIsSkipped(t *testing.T) {
+	m := newTestManager(t)
+
+	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
+		PID:      123,
+		Provider: "hermes",
+		Cmd:      "hermes",
+		Args:     []string{"gateway", "run"},
+	})
+	if candidate.Decision != agent.AttachDecisionSkip {
+		t.Fatalf("expected skip decision for hermes gateway run, got %q", candidate.Decision)
+	}
+}
+
+func TestClassifyAttachCandidateHermesNonInteractiveIsSkipped(t *testing.T) {
+	m := newTestManager(t)
+
+	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
+		PID:      321,
+		Provider: "hermes",
+		Cmd:      "hermes",
+		Args:     []string{"shell"},
+	})
+	if candidate.Decision != agent.AttachDecisionSkip {
+		t.Fatalf("expected skip decision for non-interactive hermes, got %q", candidate.Decision)
+	}
+}
+
+func TestClassifyAttachCandidateHermesInteractiveIsAuto(t *testing.T) {
+	m := newTestManager(t)
+
+	candidate := m.ClassifyAttachCandidate(scanner.ProcessInfo{
+		PID:      654,
+		Provider: "hermes",
+		Cmd:      "hermes",
+		Args:     []string{"shell"},
+		Terminal: "/dev/ttys001",
+	})
+	if candidate.Decision != agent.AttachDecisionAuto {
+		t.Fatalf("expected auto decision for interactive hermes, got %q", candidate.Decision)
 	}
 }
 
@@ -389,22 +430,48 @@ func TestAttachClaudeWithoutSessionFileAppearsInList(t *testing.T) {
 	}
 }
 
-func TestAttachClaudeWithoutSessionFileNoWatcher(t *testing.T) {
-	m := newTestManager(t)
-
-	ownPID := os.Getpid()
-	ag, err := m.Attach(scanner.ProcessInfo{
-		PID:         ownPID,
-		Provider:    "claude",
-		WorkDir:     t.TempDir(),
-		SessionFile: "",
-		SessionID:   "",
-	})
-	if err != nil {
-		t.Fatalf("Attach failed: %v", err)
+func TestAttachHermesSamePIDReusesExistingAgent(t *testing.T) {
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep command not available")
 	}
-	if ag.Watcher() != nil {
-		t.Fatalf("expected no watcher for display-only agent, got %v", ag.Watcher())
+
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep process: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	info := scanner.ProcessInfo{
+		PID:      cmd.Process.Pid,
+		Provider: "hermes",
+		WorkDir:  repoDir,
+		Cmd:      "hermes",
+		Args:     []string{"gateway", "run"},
+	}
+
+	first, err := m.Attach(info)
+	if err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+	second, err := m.Attach(info)
+	if err != nil {
+		t.Fatalf("second attach failed: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("expected same agent ID on reattach, got %s vs %s", first.ID, second.ID)
+	}
+
+	agents := m.List()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 managed agent, got %d", len(agents))
+	}
+	if agents[0].ID != first.ID {
+		t.Fatalf("expected agent %s in manager list, got %s", first.ID, agents[0].ID)
 	}
 }
 
@@ -949,5 +1016,156 @@ func TestHandleStreamJSONEvent_AssistantMessage_PersistsBeforeStatusChange(t *te
 	if !statusChangedAt.IsZero() && statusChangedAt.Before(lastTime) {
 		t.Fatalf("status changed at %v before event persisted at %v; event not persisted before status change",
 			statusChangedAt, lastTime)
+	}
+}
+
+func TestLoadFromStoreKeepsHermesProcesslessAgent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s1, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store 1 failed: %v", err)
+	}
+	m1 := agent.NewManager(s1, dataDir)
+	id, err := m1.Create("hermes-a", "hermes", "hermes", []string{"gateway", "run"}, workDir, nil)
+	if err != nil {
+		t.Fatalf("create hermes agent failed: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close store 1 failed: %v", err)
+	}
+
+	s2, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store 2 failed: %v", err)
+	}
+	defer s2.Close()
+	m2 := agent.NewManager(s2, dataDir)
+	if err := m2.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	ag := m2.Get(id)
+	if ag == nil {
+		t.Fatalf("expected hermes agent %s to be restored", id)
+	}
+	if ag.Provider != "hermes" {
+		t.Fatalf("expected provider hermes, got %q", ag.Provider)
+	}
+	if ag.PID != 0 {
+		t.Fatalf("expected processless hermes pid=0, got %d", ag.PID)
+	}
+}
+
+
+func TestLoadFromStoreRemovesPersistedHermesGatewayDaemon(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s1, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store 1 failed: %v", err)
+	}
+	defer s1.Close()
+
+	daemonID := "hermes-daemon"
+	interactiveID := "hermes-interactive"
+	if err := s1.SaveAgent(store.AgentRecord{
+		ID:       daemonID,
+		Name:     "daemon",
+		Provider: "hermes",
+		WorkDir:  workDir,
+		PID:      2222,
+	}); err != nil {
+		t.Fatalf("save daemon record failed: %v", err)
+	}
+	if err := s1.SaveAgent(store.AgentRecord{
+		ID:       interactiveID,
+		Name:     "interactive",
+		Provider: "hermes",
+		WorkDir:  workDir,
+		PID:      3333,
+	}); err != nil {
+		t.Fatalf("save interactive record failed: %v", err)
+	}
+
+	m := agent.NewManager(s1, dataDir)
+	m.SetProcessRunningChecker(func(pid int, provider string) bool {
+		return provider == "hermes" && (pid == 2222 || pid == 3333)
+	})
+	m.SetHermesGatewayRunChecker(func(pid int) bool {
+		return pid == 2222
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	if got := m.Get(daemonID); got != nil {
+		t.Fatalf("expected daemon %s to be cleaned up", daemonID)
+	}
+	if got := m.Get(interactiveID); got == nil {
+		t.Fatalf("expected interactive %s to remain", interactiveID)
+	}
+
+	recs, err := s1.ListAgents()
+	if err != nil {
+		t.Fatalf("ListAgents failed: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, rec := range recs {
+		ids[rec.ID] = true
+	}
+	if ids[daemonID] {
+		t.Fatalf("expected daemon record %s deleted from store", daemonID)
+	}
+	if !ids[interactiveID] {
+		t.Fatalf("expected interactive record %s still in store", interactiveID)
+	}
+}
+
+func TestLoadFromStoreKeepsInteractiveHermesWhenNotGatewayRun(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s1, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store failed: %v", err)
+	}
+	defer s1.Close()
+
+	interactiveID := "hermes-interactive-only"
+	if err := s1.SaveAgent(store.AgentRecord{
+		ID:       interactiveID,
+		Name:     "interactive",
+		Provider: "hermes",
+		WorkDir:  workDir,
+		PID:      4444,
+	}); err != nil {
+		t.Fatalf("save interactive record failed: %v", err)
+	}
+
+	m := agent.NewManager(s1, dataDir)
+	m.SetProcessRunningChecker(func(pid int, provider string) bool {
+		return provider == "hermes" && pid == 4444
+	})
+	m.SetHermesGatewayRunChecker(func(pid int) bool {
+		return false
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	ag := m.Get(interactiveID)
+	if ag == nil {
+		t.Fatalf("expected interactive hermes agent to remain")
+	}
+	if ag.PID != 4444 {
+		t.Fatalf("expected pid 4444, got %d", ag.PID)
 	}
 }

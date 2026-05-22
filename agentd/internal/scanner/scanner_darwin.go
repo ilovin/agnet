@@ -120,8 +120,7 @@ func (s *Scanner) parseDarwinProcess(line string, allProcs map[int]darwinProcInf
 		}
 
 		// Filter out claude -p sub-agents (child processes spawned by Claude Code Agent tool).
-		argsStr := strings.Join(args, " ")
-		if provider == "claude" && (strings.Contains(argsStr, "-p ") || strings.Contains(argsStr, "--output-format")) {
+		if provider == "claude" && isClaudeSubagentArgs(args) {
 			return ProcessInfo{}, false
 		}
 

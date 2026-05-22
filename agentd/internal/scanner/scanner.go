@@ -44,11 +44,24 @@ func detectProvider(cmd string, args []string) string {
 		return "claude"
 	case strings.HasPrefix(base, "opencode"):
 		return "opencode"
+	case strings.HasPrefix(base, "hermes"):
+		return "hermes"
 	case base == "node" || base == "nodejs":
 		// Node.js wrapper: check args for opencode reference
 		for _, arg := range args {
 			if strings.Contains(strings.ToLower(arg), "opencode") {
 				return "opencode"
+			}
+		}
+	case base == "python" || base == "python3":
+		// Python wrapper: check args for hermes/claude reference
+		for _, arg := range args {
+			lower := strings.ToLower(arg)
+			if strings.Contains(lower, "hermes") {
+				return "hermes"
+			}
+			if strings.Contains(lower, "claude") {
+				return "claude"
 			}
 		}
 	}
@@ -64,6 +77,20 @@ func normalizeTTY(tty string) string {
 		return tty
 	}
 	return "/dev/" + strings.TrimPrefix(tty, "/dev/")
+}
+
+func isClaudeSubagentArgs(args []string) bool {
+	hasPrintMode := false
+	hasOutputFormat := false
+	for _, arg := range args {
+		if arg == "-p" {
+			hasPrintMode = true
+		}
+		if arg == "--output-format" || strings.HasPrefix(arg, "--output-format=") {
+			hasOutputFormat = true
+		}
+	}
+	return hasPrintMode || hasOutputFormat
 }
 
 func resolveTmuxTargetFromPaneList(output string, terminal string) (string, string) {
@@ -129,6 +156,9 @@ func (p *ProcessInfo) AttachReadOnlyReason() string {
 			return "" // Allow input via resume mode
 		}
 		return "no session ID available for OpenCode resume"
+	case "hermes":
+		// Hermes via HTTP does not need tmux/PTY
+		return ""
 	default:
 		return "attached input routing is not supported for this provider"
 	}
@@ -189,6 +219,8 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 			sessionID, sessionFile := findOpenCodeSessionInfo(proc.PID, proc.WorkDir)
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
+		} else if proc.Provider == "hermes" {
+			// Hermes session is managed via HTTP API, no local session file needed
 		}
 		out = append(out, proc)
 	}
@@ -222,7 +254,7 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 		if !ok {
 			break
 		}
-		if parent.Provider == "claude" || parent.Provider == "opencode" {
+		if parent.Provider == "claude" || parent.Provider == "opencode" || parent.Provider == "hermes" {
 			return true
 		}
 		parentPID = parent.PPID

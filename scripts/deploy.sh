@@ -270,6 +270,34 @@ deploy_mobile() {
 
 # ── Server deploy functions ───────────────────────────────────────────
 
+normalize_linux_arch() {
+    case "$1" in
+        x86_64|amd64) echo "amd64" ;;
+        aarch64|arm64) echo "arm64" ;;
+        *) echo "" ;;
+    esac
+}
+
+resolve_remote_agentd_binary() {
+    local remote_arch="$1"
+    local remote_bin=""
+    case "$remote_arch" in
+        amd64)
+            build_agentd_linux >&2
+            remote_bin="$LINUX_BIN"
+            ;;
+        arm64)
+            build_agentd_linux_arm64 >&2
+            remote_bin="$LINUX_ARM64_BIN"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ -f "$remote_bin" ]] || return 1
+    echo "$remote_bin"
+}
+
 deploy_local_runtime() {
     echo "[deploy] Refreshing local runtime via install.sh restart..."
     bash "$INSTALL_SCRIPT" restart
@@ -286,6 +314,19 @@ deploy_local() {
 
 deploy_remote() {
     echo "[deploy] Deploying to $REMOTE_HOST (as user, NOT sudo)..."
+
+    local remote_arch_raw remote_arch remote_bin
+    remote_arch_raw="$(ssh -o ConnectTimeout=5 "$REMOTE_HOST" "uname -m" 2>/dev/null | tr -d '[:space:]' || true)"
+    remote_arch="$(normalize_linux_arch "$remote_arch_raw")"
+    if [[ -z "$remote_arch" ]]; then
+        echo "[deploy] ERROR: Unsupported remote architecture '$remote_arch_raw'"
+        return 1
+    fi
+    echo "[deploy] Remote architecture: $remote_arch_raw -> $remote_arch"
+    remote_bin="$(resolve_remote_agentd_binary "$remote_arch")" || {
+        echo "[deploy] ERROR: Failed to prepare agentd binary for linux-$remote_arch"
+        return 1
+    }
 
     # Sync token from agentgw config to remote agentd so auth stays consistent
     local token
@@ -307,7 +348,7 @@ with open(path, 'w') as f:
     fi
 
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p ~/bin" || return 1
-    scp -o ConnectTimeout=5 "$LINUX_BIN" "$REMOTE_HOST:~/bin/agentd-new" || return 1
+    scp -o ConnectTimeout=5 "$remote_bin" "$REMOTE_HOST:~/bin/agentd-new" || return 1
 
     echo "[deploy] Stopping remote agentd..."
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "pkill -f '[a]gentd start' 2>/dev/null; sudo pkill -f '[a]gentd start' 2>/dev/null; sleep 1" || true
@@ -321,6 +362,7 @@ with open(path, 'w') as f:
     echo "[deploy] Checking remote status..."
     ssh -o ConnectTimeout=5 "$REMOTE_HOST" "if pgrep -u \$(whoami) -f 'agentd start' > /dev/null; then echo 'OK (running as user)'; else echo 'WARN: may be running as root'; fi; tail -3 $REMOTE_LOG" || true
 }
+
 
 deploy_all() {
     local local_pid remote_pid runtime_pid local_ok=0 remote_ok=0 runtime_ok=0
@@ -473,7 +515,7 @@ TARGETS:
   build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
   server           Build all Go binaries, deploy local + remote, restart agentgw (no mobile)
   local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
-  ws               Build Linux agentd, deploy to remote \$REMOTE_HOST, restart agentgw
+  ws               Build matching Linux agentd by remote arch, deploy to remote \$REMOTE_HOST, restart agentgw
   apk              Build APK only and auto-install to connected Android devices
   ipa              Build IPA only and auto-install to connected iOS devices
   flutter-android  Use \`flutter install\` to flash Android (auto-detects device)
