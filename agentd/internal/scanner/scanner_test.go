@@ -212,6 +212,23 @@ func TestFinalizeProcessScanKeepsHermesGatewayRunArgs(t *testing.T) {
 		t.Fatalf("expected hermes args to keep gateway run, got %#v", got[0].Args)
 	}
 }
+
+func TestFinalizeProcessScanMapsHermesSessionIDFromArgs(t *testing.T) {
+	got := finalizeProcessScan([]ProcessInfo{{
+		PID:      654,
+		PPID:     1,
+		Provider: "hermes",
+		Cmd:      "hermes",
+		Args:     []string{"gateway", "run", "--session", "sess-hermes-1"},
+		WorkDir:  "/repo",
+	}})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 hermes process, got %d", len(got))
+	}
+	if got[0].SessionID != "sess-hermes-1" {
+		t.Fatalf("expected hermes session id sess-hermes-1, got %q", got[0].SessionID)
+	}
+}
 func TestResolveTmuxTargetFromPaneListMatchesTTY(t *testing.T) {
 	output := "/dev/ttys001\tmain\tmain:0.0\n/dev/ttys002\tdev\tdev:1.2\n"
 

@@ -1,6 +1,9 @@
 package agent_test
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -427,6 +430,165 @@ func TestAttachClaudeWithoutSessionFileAppearsInList(t *testing.T) {
 	}
 	if agents[0].Provider != "claude" {
 		t.Fatalf("expected claude agent, got %q", agents[0].Provider)
+	}
+}
+
+func TestAttachHermesUsesProcessSessionIDForResume(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	ownPID := os.Getpid()
+
+	ag, err := m.Attach(scanner.ProcessInfo{
+		PID:       ownPID,
+		Provider:  "hermes",
+		WorkDir:   repoDir,
+		Cmd:       "hermes",
+		Args:      []string{"gateway", "run", "--session", "sess-from-args"},
+		SessionID: "sess-from-args",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	resumeID, err := m.GetResumeSessionID(ag.ID)
+	if err != nil {
+		t.Fatalf("GetResumeSessionID failed: %v", err)
+	}
+	if resumeID != "sess-from-args" {
+		t.Fatalf("expected resume session from process info, got %q", resumeID)
+	}
+}
+
+func TestAttachHermesSamePIDSwitchesSessionAndHydratesHistory(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	ownPID := os.Getpid()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sessions/sess-new/history":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, `{"events":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+	m.SetHermesBaseURL(ts.URL)
+
+	first, err := m.Attach(scanner.ProcessInfo{
+		PID:       ownPID,
+		Provider:  "hermes",
+		WorkDir:   repoDir,
+		Cmd:       "hermes",
+		Args:      []string{"gateway", "run", "--session", "sess-old"},
+		SessionID: "sess-old",
+	})
+	if err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+	if seq, err := m.RecordConversationEvent(first.ID, map[string]any{"role": "assistant", "text": "stale"}); err != nil || seq == 0 {
+		t.Fatalf("expected persisted event seq > 0, got seq=%d err=%v", seq, err)
+	}
+
+	rebound, err := m.Attach(scanner.ProcessInfo{
+		PID:       ownPID,
+		Provider:  "hermes",
+		WorkDir:   repoDir,
+		Cmd:       "hermes",
+		Args:      []string{"gateway", "run", "--session", "sess-new"},
+		SessionID: "sess-new",
+	})
+	if err != nil {
+		t.Fatalf("reattach failed: %v", err)
+	}
+	if rebound.ID != first.ID {
+		t.Fatalf("expected same agent id, got %s vs %s", rebound.ID, first.ID)
+	}
+
+	resumeID, err := m.GetResumeSessionID(first.ID)
+	if err != nil {
+		t.Fatalf("GetResumeSessionID failed: %v", err)
+	}
+	if resumeID != "sess-new" {
+		t.Fatalf("expected new session id, got %q", resumeID)
+	}
+
+	if live := rebound.EventBuf().Since(0); len(live) != 0 {
+		t.Fatalf("expected cleared live history after session switch, got %d events", len(live))
+	}
+
+	events, err := m.LoadPersistedEventsLatest(first.ID, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected hydrated hermes history with 2 events, got %d", len(events))
+	}
+	if events[0].Data["role"] != "user" || events[0].Data["text"] != "hello" {
+		t.Fatalf("unexpected first hydrated event: %+v", events[0].Data)
+	}
+	if events[1].Data["role"] != "assistant" || events[1].Data["text"] != "hi" {
+		t.Fatalf("unexpected second hydrated event: %+v", events[1].Data)
+	}
+}
+
+func TestAttachHermesSamePIDSessionSwitchHistoryFetchFailureKeepsAgent(t *testing.T) {
+	m := newTestManager(t)
+	repoDir := t.TempDir()
+	ownPID := os.Getpid()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ts.Close()
+	m.SetHermesBaseURL(ts.URL)
+
+	first, err := m.Attach(scanner.ProcessInfo{
+		PID:       ownPID,
+		Provider:  "hermes",
+		WorkDir:   repoDir,
+		Cmd:       "hermes",
+		Args:      []string{"gateway", "run", "--session", "sess-old"},
+		SessionID: "sess-old",
+	})
+	if err != nil {
+		t.Fatalf("first attach failed: %v", err)
+	}
+	if seq, err := m.RecordConversationEvent(first.ID, map[string]any{"role": "assistant", "text": "stale"}); err != nil || seq == 0 {
+		t.Fatalf("expected persisted event seq > 0, got seq=%d err=%v", seq, err)
+	}
+
+	rebound, err := m.Attach(scanner.ProcessInfo{
+		PID:       ownPID,
+		Provider:  "hermes",
+		WorkDir:   repoDir,
+		Cmd:       "hermes",
+		Args:      []string{"gateway", "run", "--session", "sess-new"},
+		SessionID: "sess-new",
+	})
+	if err != nil {
+		t.Fatalf("reattach failed: %v", err)
+	}
+	if rebound.ID != first.ID {
+		t.Fatalf("expected same agent id, got %s vs %s", rebound.ID, first.ID)
+	}
+
+	resumeID, err := m.GetResumeSessionID(first.ID)
+	if err != nil {
+		t.Fatalf("GetResumeSessionID failed: %v", err)
+	}
+	if resumeID != "sess-new" {
+		t.Fatalf("expected new session id, got %q", resumeID)
+	}
+
+	events, err := m.LoadPersistedEventsLatest(first.ID, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected stale persisted events cleared when session switches, got %d", len(events))
 	}
 }
 

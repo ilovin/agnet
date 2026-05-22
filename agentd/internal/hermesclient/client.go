@@ -172,5 +172,37 @@ func (c *Client) IsHealthy(ctx context.Context) bool {
 }
 
 func (c *Client) GetHistory(ctx context.Context, sessionID string) ([]Event, error) {
-	return nil, fmt.Errorf("GetHistory not implemented yet")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/sessions/"+sessionID+"/history", nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	if c.APIServerKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIServerKey)
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Events []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode history response: %w", err)
+	}
+
+	events := make([]Event, 0, len(payload.Events))
+	for _, ev := range payload.Events {
+		events = append(events, Event{Role: ev.Role, Text: ev.Content})
+	}
+	return events, nil
 }
