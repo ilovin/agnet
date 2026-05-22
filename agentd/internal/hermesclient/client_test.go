@@ -159,6 +159,54 @@ func TestChatCompletionWithAuth(t *testing.T) {
 	}
 }
 
+func TestGetHistory(t *testing.T) {
+	t.Run("fetches and maps hermes history", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("expected GET, got %s", r.Method)
+			}
+			if r.URL.Path != "/v1/sessions/sess-123/history" {
+				t.Fatalf("expected /v1/sessions/sess-123/history, got %s", r.URL.Path)
+			}
+			if r.Header.Get("Authorization") != "Bearer test-key" {
+				t.Fatalf("expected auth header")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"events":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi there"}]}`))
+		}))
+		defer ts.Close()
+
+		client := NewClient(ts.URL, "test-key")
+		events, err := client.GetHistory(context.Background(), "sess-123")
+		if err != nil {
+			t.Fatalf("GetHistory returned error: %v", err)
+		}
+		if len(events) != 2 {
+			t.Fatalf("expected 2 events, got %d", len(events))
+		}
+		if events[0].Role != "user" || events[0].Text != "hello" {
+			t.Fatalf("unexpected first event: %+v", events[0])
+		}
+		if events[1].Role != "assistant" || events[1].Text != "hi there" {
+			t.Fatalf("unexpected second event: %+v", events[1])
+		}
+	})
+
+	t.Run("returns error on non-200", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer ts.Close()
+
+		client := NewClient(ts.URL, "")
+		_, err := client.GetHistory(context.Background(), "sess-404")
+		if err == nil {
+			t.Fatal("expected non-nil error")
+		}
+	})
+}
+
 func TestNewClientDefaultBaseURL(t *testing.T) {
 	c := NewClient("", "")
 	if c.BaseURL != "http://127.0.0.1:8642" {

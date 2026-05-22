@@ -2045,6 +2045,20 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			ResumeSessionID: sessionID,
 			PID:             info.PID,
 		})
+
+		// Load historical events from Hermes API so conversation.history is non-empty
+		if sessionID != "" && m.hermesClient != nil {
+			if historyEvents, err := m.hermesClient.GetHistory(context.Background(), sessionID); err == nil && len(historyEvents) > 0 {
+				log.Printf("[Attach] Loaded %d historical events for Hermes agent %s", len(historyEvents), id)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(id, ag, data)
+				}
+			} else if err != nil {
+				log.Printf("[Attach] Warning: failed to load Hermes history for %s (session %s): %v", id, sessionID, err)
+			}
+		}
+
 		return ag, nil
 	}
 

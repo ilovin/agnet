@@ -220,11 +220,26 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 			proc.SessionID = sessionID
 			proc.SessionFile = sessionFile
 		} else if proc.Provider == "hermes" {
-			// Hermes session is managed via HTTP API, no local session file needed
+			proc.SessionID = hermesSessionIDFromArgs(proc.Args)
 		}
 		out = append(out, proc)
 	}
 	return out
+}
+
+func hermesSessionIDFromArgs(args []string) string {
+	for i, arg := range args {
+		if arg == "--session" {
+			if i+1 < len(args) {
+				return strings.TrimSpace(args[i+1])
+			}
+			return ""
+		}
+		if strings.HasPrefix(arg, "--session=") {
+			return strings.TrimSpace(strings.TrimPrefix(arg, "--session="))
+		}
+	}
+	return ""
 }
 
 func filterParentAgents(processes []ProcessInfo) []ProcessInfo {
