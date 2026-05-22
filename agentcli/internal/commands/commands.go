@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	cliClient *client.Client
+	cliClient  *client.Client
 	outputJSON bool
 )
 
@@ -81,6 +81,45 @@ func truncate(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+// fetchLastMessage fetches the last meaningful message text for an agent.
+func fetchLastMessage(nodeID, agentID string) string {
+	resp, err := cliClient.Call("conversation.history", map[string]any{
+		"agentId": agentID,
+		"nodeId":  nodeID,
+		"limit":   10,
+	})
+	if err != nil || resp.Error != nil {
+		return ""
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		return ""
+	}
+	events := toAnySlice(result["events"])
+	for i := len(events) - 1; i >= 0; i-- {
+		if ev, ok := events[i].(map[string]any); ok {
+			role := stringify(ev["role"])
+			text := stringify(ev["text"])
+			if text == "" {
+				text = stringify(ev["content"])
+			}
+			text = strings.TrimSpace(text)
+			if text == "" || text == "[Agent]" || len(text) < 5 {
+				continue
+			}
+			if role == "user" || len(text) > 20 {
+				lines := strings.Split(text, "\n")
+				lastLine := strings.TrimSpace(lines[len(lines)-1])
+				if len(lastLine) > 60 {
+					lastLine = lastLine[:57] + "..."
+				}
+				return lastLine
+			}
+		}
+	}
+	return ""
+}
+
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "agentcli",
@@ -88,30 +127,30 @@ func NewRootCmd() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			url, _ := cmd.Flags().GetString("url")
 			token, _ := cmd.Flags().GetString("token")
-			
+
 			if url == "" {
 				url = os.Getenv("AGENTGW_URL")
 			}
 			if token == "" {
 				token = os.Getenv("AGENTGW_TOKEN")
 			}
-			
+
 			if url == "" {
 				return fmt.Errorf("--url or AGENTGW_URL required")
 			}
 			if token == "" {
 				return fmt.Errorf("--token or AGENTGW_TOKEN required")
 			}
-			
+
 			if !strings.HasPrefix(url, "ws://") && !strings.HasPrefix(url, "wss://") {
 				url = "ws://" + url
 			}
-			
+
 			cliClient = client.New(url, token)
 			if err := cliClient.Connect(); err != nil {
 				return err
 			}
-			
+
 			outputJSON, _ = cmd.Flags().GetBool("json")
 			return nil
 		},
@@ -204,7 +243,8 @@ func newListAgentsCmd() *cobra.Command {
 				return nil
 			}
 
-			fmt.Printf("%-3s %-12s %-20s %-10s %-8s %-15s\n", "", "STATUS", "NAME", "PROVIDER", "PID", "PROJECT")
+			fmt.Printf("%-3s %-12s %-20s %-10s %-8s %-15s %-10s %-12s  %s\n",
+				"", "STATUS", "NAME", "PROVIDER", "PID", "PROJECT", "RUNTIME", "S-STATE", "MESSAGE")
 			for _, raw := range agents {
 				if ag, ok := raw.(map[string]any); ok {
 					status := stringify(ag["status"])
@@ -218,6 +258,9 @@ func newListAgentsCmd() *cobra.Command {
 					if project == "" {
 						project = stringify(ag["workDir"])
 					}
+					runtimeState := stringify(ag["runtimeState"])
+					sessionState := stringify(ag["sessionState"])
+					agentID := stringify(ag["id"])
 
 					statusIcon := "●"
 					if status == "working" {
@@ -228,8 +271,18 @@ func newListAgentsCmd() *cobra.Command {
 						statusIcon = "🔴"
 					}
 
-					fmt.Printf("%-3s %-12s %-20s %-10s %-8d %-15s\n",
-						statusIcon, status, truncate(name, 20), provider, pid, truncate(project, 15))
+					runtimeIcon := ""
+					if runtimeState == "live" {
+						runtimeIcon = "🟢"
+					} else if runtimeState == "exited" {
+						runtimeIcon = "⚫"
+					}
+
+					lastMsg := fetchLastMessage(nodeID, agentID)
+
+					fmt.Printf("%-3s %-12s %-20s %-10s %-8d %-15s %-10s %-12s  %s\n",
+						statusIcon, status, truncate(name, 20), provider, pid, truncate(project, 15),
+						runtimeIcon+runtimeState, sessionState, lastMsg)
 				}
 			}
 			return nil
@@ -239,7 +292,7 @@ func newListAgentsCmd() *cobra.Command {
 
 func newSendMessageCmd() *cobra.Command {
 	var agentID, message string
-	
+
 	cmd := &cobra.Command{
 		Use:   "send-message",
 		Short: "Send a message to an agent",
@@ -289,7 +342,7 @@ func newWatchEventsCmd() *cobra.Command {
 				"client.connected",
 				"client.disconnected",
 			}
-			
+
 			for _, event := range events {
 				eventName := event
 				cliClient.OnEvent(eventName, func(params any) {
@@ -305,7 +358,7 @@ func newWatchEventsCmd() *cobra.Command {
 					}
 				})
 			}
-			
+
 			fmt.Println("Watching events... Press Ctrl+C to exit")
 			select {}
 		},
@@ -399,6 +452,38 @@ func newAgentStatusCmd() *cobra.Command {
 							fmt.Printf("Permission: %s\n", permissionMode)
 						}
 
+						// Fetch recent messages
+						histResp, err := cliClient.Call("conversation.history", map[string]any{
+							"agentId": args[0],
+							"nodeId":  nodeID,
+							"limit":   3,
+						})
+						if err == nil && histResp.Error == nil {
+							if histResult, ok := histResp.Result.(map[string]any); ok {
+								if events := toAnySlice(histResult["events"]); len(events) > 0 {
+									fmt.Println()
+									fmt.Println("Recent messages:")
+									for _, raw := range events {
+										if ev, ok := raw.(map[string]any); ok {
+											role := stringify(ev["role"])
+											text := stringify(ev["text"])
+											if text == "" {
+												text = stringify(ev["content"])
+											}
+											if text != "" && (role == "user" || role == "assistant") {
+												roleIcon := "👤"
+												if role == "assistant" {
+													roleIcon = "🤖"
+												}
+												firstLine := strings.Split(strings.TrimSpace(text), "\n")[0]
+												fmt.Printf("  %s %s\n", roleIcon, truncate(firstLine, 80))
+											}
+										}
+									}
+								}
+							}
+						}
+
 						return nil
 					}
 				}
@@ -458,7 +543,43 @@ func newDashboardCmd() *cobra.Command {
 			fmt.Println("═══ Dashboard ═══")
 			fmt.Println()
 
+			// Summary from agent.list (has runtimeState, sessionState)
+			listResp, err := cliClient.Call("agent.list", map[string]any{"nodeId": nodeID})
+			if err == nil && listResp.Error == nil {
+				if allAgents, ok := listResp.Result.([]any); ok {
+					total := len(allAgents)
+					working := 0
+					idle := 0
+					stopped := 0
+					live := 0
+					exited := 0
+					for _, raw := range allAgents {
+						if ag, ok := raw.(map[string]any); ok {
+							switch stringify(ag["status"]) {
+							case "working":
+								working++
+							case "idle":
+								idle++
+							case "stopped", "crashed":
+								stopped++
+							}
+							switch stringify(ag["runtimeState"]) {
+							case "live":
+								live++
+							case "exited":
+								exited++
+							}
+						}
+					}
+					fmt.Printf("Total: %d  Working: %d  Idle: %d  Stopped: %d\n", total, working, idle, stopped)
+					fmt.Printf("Live: %d  Exited: %d\n", live, exited)
+					fmt.Println()
+				}
+			}
+
 			managed := toAnySlice(result["managed"])
+			attachable := toAnySlice(result["attachable"])
+
 			if len(managed) > 0 {
 				fmt.Printf("Managed Agents (%d):\n", len(managed))
 				for _, raw := range managed {
@@ -482,8 +603,16 @@ func newDashboardCmd() *cobra.Command {
 						} else if status == "stopped" || status == "crashed" {
 							statusIcon = "🔴"
 						}
+
+						// Fetch latest message
+						agentID := stringify(ag["id"])
+						lastMsg := fetchLastMessage(nodeID, agentID)
+
 						fmt.Printf("  %s %-10s %-15s %-10s PID:%-6d %s\n",
 							statusIcon, status, name, provider, pid, project)
+						if lastMsg != "" {
+							fmt.Printf("    └─ %s\n", lastMsg)
+						}
 					}
 				}
 			} else {
@@ -491,7 +620,6 @@ func newDashboardCmd() *cobra.Command {
 			}
 			fmt.Println()
 
-			attachable := toAnySlice(result["attachable"])
 			if len(attachable) > 0 {
 				fmt.Printf("Attachable Processes (%d):\n", len(attachable))
 				for _, raw := range attachable {
@@ -636,12 +764,12 @@ func newInteractiveCmd() *cobra.Command {
 			fmt.Println("Phone-Talk CLI Interactive Mode")
 			fmt.Println("Commands: list-agents, send-message, watch-events, quit")
 			fmt.Println()
-			
+
 			for {
 				fmt.Print("> ")
 				var input string
 				fmt.Scanln(&input)
-				
+
 				switch input {
 				case "quit", "exit", "q":
 					return nil
