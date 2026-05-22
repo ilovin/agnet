@@ -66,6 +66,12 @@ func (pm *ProcessManager) Create(id string, ag *Agent, env []string) error {
 		return nil
 	}
 
+	if provider == "hermes" {
+		ag.setStatus(StatusIdle)
+		log.Printf("[Create] Agent %s created in idle mode (Hermes HTTP API)", id)
+		return nil
+	}
+
 	var p *agentpty.Process
 	var err error
 	if provider == "claude" {
@@ -103,6 +109,20 @@ func (pm *ProcessManager) Create(id string, ag *Agent, env []string) error {
 
 // RestartInPlace restarts an agent process in place.
 func (pm *ProcessManager) RestartInPlace(id string, ag *Agent, provider, cmd string, args []string, env []string) error {
+	if provider == "hermes" {
+		ag.kill()
+		ag.setProcess(nil)
+		ag.setWatcher(nil)
+		ag.mu.Lock()
+		ag.Provider = provider
+		ag.Cmd = cmd
+		ag.Args = append([]string{}, args...)
+		ag.mu.Unlock()
+		ag.setStatus(StatusIdle)
+		log.Printf("[Restart] Agent %s restarted in idle mode (Hermes HTTP API)", id)
+		return nil
+	}
+
 	ag.kill()
 	ag.setProcess(nil)
 	ag.setWatcher(nil)
@@ -145,6 +165,12 @@ func (pm *ProcessManager) RestartInPlace(id string, ag *Agent, provider, cmd str
 
 // StartInPlaceWithMessage starts a fresh agent with a message written to stdin.
 func (pm *ProcessManager) StartInPlaceWithMessage(id string, ag *Agent, provider, cmd string, args []string, env []string, message string) error {
+	if provider == "hermes" {
+		ag.setStatus(StatusIdle)
+		log.Printf("[Start] Agent %s started in idle mode (Hermes HTTP API)", id)
+		return nil
+	}
+
 	ag.setStatus(StatusStarting)
 
 	ag.mu.Lock()

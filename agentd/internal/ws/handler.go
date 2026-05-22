@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/eventbuf"
+	"github.com/phone-talk/agentd/internal/hermesclient"
 	"github.com/phone-talk/agentd/internal/scanner"
 )
 
@@ -690,7 +692,7 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	// Guard against Restart/Start on attached non-tmux agents (read-only watcher attach).
 	// OpenCode agents are exempt: openCodeSendWithResume uses `opencode run --session`,
 	// not PTY input, so the read-only watcher attach does not apply.
-	if attachMode != "" && !isTmuxAttached && !isOpenCode {
+	if attachMode != "" && !isTmuxAttached && !isOpenCode && ag.Provider != "hermes" {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
 			reason = "attached session is read-only"
@@ -700,6 +702,16 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	}
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
 	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
+
+	// For Hermes provider, use HTTP API chat completions (check before tmux path
+	// since hermes CLI runs in a terminal and would otherwise hit the tmux branch).
+	if ag.Provider == "hermes" {
+		log.Printf("[conversationSend] taking hermes path for agent %s", agentID)
+		if len(imageFiles) > 0 {
+			return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
+		}
+		return h.hermesSend(req, ag, message, imageFiles, imagePaths)
+	}
 
 	// For tmux-attached sessions, write directly to PTY via tmux send-keys.
 	if isTmuxAttached {
@@ -762,6 +774,7 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		}
 		return h.openCodeSendWithResume(req, ag, message)
 	}
+
 
 	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
 	ptyEventData := map[string]any{
@@ -2186,4 +2199,169 @@ func (h *handler) opencodeModels(req RPCRequest) RPCResponse {
 		"models":  models,
 		"current": currentModel,
 	})
+}
+
+// hermesSend sends a message via the Hermes HTTP API, streaming SSE responses
+// back to connected clients as conversation.message events.
+func (h *handler) hermesSend(req RPCRequest, ag *agent.Agent, message string, imageFiles, imagePaths []string) RPCResponse {
+	agentID := ag.ID
+
+	// Record user message to EventBuffer + persistent store
+	eventData := map[string]any{
+		"role":       "user",
+		"text":       message,
+		"raw":        false,
+		"imageCount": len(imageFiles),
+	}
+	if len(imagePaths) > 0 {
+		eventData["images"] = imagePaths
+	}
+	if _, err := h.server.manager.RecordConversationEvent(agentID, eventData); err != nil {
+		return errResp(req.ID, -32000, "record user message: "+err.Error())
+	}
+
+	// Broadcast user message to all clients
+	broadcastData := map[string]any{
+		"agentId":   agentID,
+		"role":      "user",
+		"text":      message,
+		"imageCount": len(imageFiles),
+		"timestamp": time.Now().UnixMilli(),
+	}
+	if len(imagePaths) > 0 {
+		broadcastData["images"] = imagePaths
+	}
+	h.server.broadcast(event("conversation.message", broadcastData), nil)
+
+	// Build message history from EventBuffer
+	events := ag.EventBuf().Since(0)
+	messages := make([]hermesclient.Message, 0, len(events))
+	for _, e := range events {
+		role, _ := e.Data["role"].(string)
+		text, _ := e.Data["text"].(string)
+		if text == "" || (role != "user" && role != "assistant") {
+			continue
+		}
+		messages = append(messages, hermesclient.Message{Role: role, Content: text})
+	}
+
+	// Get the hermes client
+	client := h.server.manager.HermesClient()
+
+	// Get stored session ID for conversation continuity
+	sessionID, _ := h.server.manager.GetResumeSessionID(agentID)
+
+	// Call ChatCompletion with SSE streaming
+	ctx := context.Background()
+	chunkChan, err := client.ChatCompletion(ctx, sessionID, messages)
+	if err != nil {
+		return errResp(req.ID, -32000, "hermes chat completion: "+err.Error())
+	}
+
+	// Set status to working
+	ag.SetStatus(agent.StatusWorking)
+	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(agentID, "working")), nil)
+
+	// Process SSE chunks with batched broadcast every 100ms
+	var mu sync.Mutex
+	var fullText strings.Builder
+	var pendingText string
+	var done bool
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	go func() {
+		for range ticker.C {
+			mu.Lock()
+			if pendingText == "" || done {
+				mu.Unlock()
+				continue
+			}
+			text := pendingText
+			pendingText = ""
+			mu.Unlock()
+			h.server.broadcast(event("conversation.message", map[string]any{
+				"agentId":   agentID,
+				"role":      "assistant",
+				"text":      text,
+				"partial":   true,
+				"timestamp": time.Now().UnixMilli(),
+			}), nil)
+		}
+	}()
+
+	for chunk := range chunkChan {
+		mu.Lock()
+		if chunk.Error != nil {
+			mu.Unlock()
+			log.Printf("[Hermes] Stream error for agent %s: %v", agentID, chunk.Error)
+			break
+		}
+		if chunk.Done {
+			done = true
+			// Save session ID if returned from server header
+			if chunk.SessionID != "" {
+				if err := h.server.manager.UpdateResumeSessionID(agentID, chunk.SessionID); err != nil {
+					log.Printf("[Hermes] Failed to update session ID for %s: %v", agentID, err)
+				}
+			}
+			// Flush any remaining pending text
+			if pendingText != "" {
+				h.server.broadcast(event("conversation.message", map[string]any{
+					"agentId":   agentID,
+					"role":      "assistant",
+					"text":      pendingText,
+					"partial":   true,
+					"timestamp": time.Now().UnixMilli(),
+				}), nil)
+				pendingText = ""
+			}
+			// Persist final assistant message
+			finalText := fullText.String()
+			historyData := map[string]any{
+				"role": "assistant",
+				"text": finalText,
+				"raw":  false,
+			}
+			if _, err := h.server.manager.RecordConversationEvent(agentID, historyData); err != nil {
+				log.Printf("[Hermes] Failed to persist assistant message: %v", err)
+			}
+			// Broadcast final complete message
+			h.server.broadcast(event("conversation.message", map[string]any{
+				"agentId":   agentID,
+				"role":      "assistant",
+				"text":      finalText,
+				"partial":   false,
+				"timestamp": time.Now().UnixMilli(),
+			}), nil)
+			mu.Unlock()
+			break
+		}
+		if chunk.Text != "" {
+			fullText.WriteString(chunk.Text)
+			pendingText += chunk.Text
+		}
+		mu.Unlock()
+	}
+
+	// Flush any remaining text if stream ended without Done marker
+	mu.Lock()
+	if pendingText != "" {
+		h.server.broadcast(event("conversation.message", map[string]any{
+			"agentId":   agentID,
+			"role":      "assistant",
+			"text":      pendingText,
+			"partial":   true,
+			"timestamp": time.Now().UnixMilli(),
+		}), nil)
+		pendingText = ""
+	}
+	mu.Unlock()
+
+	// Set status back to idle
+	ag.SetStatus(agent.StatusIdle)
+	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(agentID, "idle")), nil)
+
+	return okResp(req.ID, map[string]any{"id": agentID})
 }

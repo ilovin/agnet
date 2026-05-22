@@ -154,15 +154,34 @@ read_tty() {
 }
 
 # ── Platform detection ─────────────────────────────────────────────
+normalize_linux_arch() {
+  case "$1" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *) echo "" ;;
+  esac
+}
+
 detect_platform() {
-  local os arch
+  local os arch linux_arch
   os="$(uname -s)"
   arch="$(uname -m)"
-  case "${os}:${arch}" in
-    Darwin:arm64|Darwin:aarch64) echo "darwin-arm64" ;;
-    Darwin:x86_64) echo "darwin-amd64" ;;
-    Linux:arm64|Linux:aarch64) echo "linux-arm64" ;;
-    Linux:x86_64) echo "linux-amd64" ;;
+  case "$os" in
+    Darwin)
+      case "$arch" in
+        arm64|aarch64) echo "darwin-arm64" ;;
+        x86_64|amd64) echo "darwin-amd64" ;;
+        *) echo "unsupported" ;;
+      esac
+      ;;
+    Linux)
+      linux_arch="$(normalize_linux_arch "$arch")"
+      if [[ -n "$linux_arch" ]]; then
+        echo "linux-$linux_arch"
+      else
+        echo "unsupported"
+      fi
+      ;;
     *) echo "unsupported" ;;
   esac
 }
@@ -461,8 +480,18 @@ resolve_artifact() {
 # Detect agentgw binary for current platform
 detect_binary() {
   case "$(uname -s):$(uname -m)" in
-    Darwin:*)  resolve_artifact "agentgw" darwin-arm64/agentgw agentgw agentgw-macos-arm64 ;;
-    Linux:x86_64|Linux:aarch64) resolve_artifact "agentgw" linux-amd64/agentgw agentgw-linux agentgw ;;
+    Darwin:*)
+      resolve_artifact "agentgw" darwin-arm64/agentgw agentgw agentgw-macos-arm64
+      ;;
+    Linux:*)
+      local linux_arch
+      linux_arch="$(normalize_linux_arch "$(uname -m)")"
+      case "$linux_arch" in
+        amd64) resolve_artifact "agentgw" linux-amd64/agentgw agentgw-linux agentgw ;;
+        arm64) resolve_artifact "agentgw" linux-arm64/agentgw agentgw-linux-arm64 agentgw ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -569,8 +598,23 @@ detect_local_agentd() {
     Darwin:*)
       bin="$(resolve_artifact "agentd" darwin-arm64/agentd agentd agentd-darwin)" || return 1
       ;;
-    Linux:x86_64|Linux:aarch64)
-      bin="$(resolve_artifact "agentd" linux-amd64/agentd agentd-linux agentd)" || return 1
+    Linux:*)
+      local linux_arch
+      linux_arch="$(normalize_linux_arch "$(uname -m)")"
+      case "$linux_arch" in
+        amd64)
+          bin="$(resolve_artifact "agentd" linux-amd64/agentd agentd-linux agentd)" || return 1
+          ;;
+        arm64)
+          bin="$(resolve_artifact "agentd" linux-arm64/agentd agentd-linux-arm64 agentd)" || return 1
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      return 1
       ;;
   esac
   echo "$bin"
@@ -813,16 +857,38 @@ scan_ssh_nodes() {
 
 # ── Deploy agentd to remote ────────────────────────────────────────
 ensure_agentd_linux_binary() {
-  # Try local artifact first (dev builds)
-  local bin
-  bin="$(resolve_artifact "agentd-linux" linux-amd64/agentd agentd-linux 2>/dev/null)" && { echo "$bin"; return 0; }
-  # Download via cache + manifest (linux-amd64)
-  download_artifact agentd "$INSTALL_DIR/agentd-linux" "linux-amd64" && { echo "$INSTALL_DIR/agentd-linux"; return 0; }
+  local arch="${1:-amd64}"
+  local platform="linux-$arch"
+  local install_bin="$INSTALL_DIR/agentd-linux-$arch"
+  local bin=""
+
+  case "$arch" in
+    amd64)
+      bin="$(resolve_artifact "agentd-linux-$arch" linux-amd64/agentd agentd-linux agentd-linux-amd64 2>/dev/null)" && { echo "$bin"; return 0; }
+      ;;
+    arm64)
+      bin="$(resolve_artifact "agentd-linux-$arch" linux-arm64/agentd agentd-linux-arm64 2>/dev/null)" && { echo "$bin"; return 0; }
+      ;;
+    *)
+      warn "不支持的 Linux 架构: $arch"
+      return 1
+      ;;
+  esac
+
+  download_artifact agentd "$install_bin" "$platform" && { echo "$install_bin"; return 0; }
   return 1
 }
 
+resolve_remote_linux_arch() {
+  local target="$1" port="${2:-22}"
+  local ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+  local raw
+  raw="$(ssh "${ssh_opts[@]}" -p "$port" "$target" "uname -m" 2>/dev/null | tr -d '[:space:]' || true)"
+  normalize_linux_arch "$raw"
+}
+
 deploy_agentd() {
-  local target="$1" port="${2:-22}" token="${3:-}" agentd_linux_bin="${4:-}"
+  local target="$1" port="${2:-22}" token="${3:-}"
   local ssh_opts=(-o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
   step "部署 agentd → ${target}..."
 
@@ -831,10 +897,18 @@ deploy_agentd() {
     return 1
   fi
 
-  if [[ -z "$agentd_linux_bin" || ! -f "$agentd_linux_bin" ]]; then
-    err "找不到 agentd linux 二进制文件"
+  local remote_arch agentd_linux_bin
+  remote_arch="$(resolve_remote_linux_arch "$target" "$port")"
+  if [[ -z "$remote_arch" ]]; then
+    err "无法识别远程 Linux 架构: ${target}"
     return 1
   fi
+  info "远程架构: ${target} -> linux-${remote_arch}"
+
+  agentd_linux_bin="$(ensure_agentd_linux_binary "$remote_arch")" || {
+    err "找不到 agentd linux-${remote_arch} 二进制文件"
+    return 1
+  }
 
   local file_size
   file_size="$(ls -lh "$agentd_linux_bin" 2>/dev/null | awk '{print $5}' || true)"
@@ -866,7 +940,7 @@ if os.path.exists(path):
 cfg[\"token\"] = \"$token\"
 with open(path, \"w\") as f:
     json.dump(cfg, f, indent=2)
-    f.write(\"\n\")
+    f.write("\n")
 '"
   fi
 
@@ -1064,19 +1138,9 @@ if ! $LOCAL_ONLY; then
 
   # Deploy to selected nodes
   if [[ ${#SELECTED_NODES[@]} -gt 0 ]]; then
-    local_agentd_linux_bin=""
-    local_agentd_linux_bin="$(ensure_agentd_linux_binary)" || {
-      warn "无法获取 agentd linux 二进制，跳过远程部署"
-      local_agentd_linux_bin=""
-    }
-
     for node_info in "${SELECTED_NODES[@]}"; do
       IFS='|' read -r alias host port <<< "$node_info"
-      if [[ -n "$local_agentd_linux_bin" ]]; then
-        deploy_agentd "$alias" "$port" "$TOKEN" "$local_agentd_linux_bin" || warn "部署 ${alias} 失败，但节点仍会添加到配置"
-      else
-        warn "跳过 ${alias} 部署（无 agentd linux 二进制），节点仍会添加到配置"
-      fi
+      deploy_agentd "$alias" "$port" "$TOKEN" || warn "部署 ${alias} 失败，但节点仍会添加到配置"
     done
   fi
 

@@ -75,6 +75,9 @@ func (s *agentService) ResolveLaunch(provider, cmd string, args []string, sessio
 		if model != "" {
 			resolvedArgs = append(resolvedArgs, "-m", model)
 		}
+	case "hermes":
+		resolvedCmd = s.FindExecutable("hermes")
+		resolvedArgs = []string{"gateway", "run"}
 	case "claude", "claude-bedrock", "claude-vertex":
 		resolvedCmd = s.FindExecutable("claude")
 		resolvedArgs = []string{

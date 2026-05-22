@@ -17,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/phone-talk/agentd/internal/hermesclient"
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	agentpty "github.com/phone-talk/agentd/internal/pty"
 	"github.com/phone-talk/agentd/internal/scanner"
@@ -76,8 +77,11 @@ type Manager struct {
 	onOutput          func(agentID string, data map[string]any) // broadcast hook for messages
 	onStatusChange    func(agentID string, data map[string]any) // broadcast hook for status changes
 	sessionParents    map[string]string                         // childAgentID -> parentAgentID for session continuity
+	hermesClient      *hermesclient.Client
 	scanExisting      func() ([]scanner.ProcessInfo, error)
 	sessionFileFinder func(scanner.ProcessInfo) string          // test hook to override session file discovery
+	processRunning    func(pid int, provider string) bool       // test hook for process liveness check
+	hermesGatewayRun  func(pid int) bool                        // test hook for hermes gateway daemon detection
 	events            *EventManager
 	parser            *StreamParser
 	processes         *ProcessManager
@@ -103,6 +107,8 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 		s := scanner.New()
 		return s.Scan()
 	}
+	m.processRunning = isProcessRunning
+	m.hermesGatewayRun = isHermesGatewayRunPID
 	m.processes = NewProcessManager(s, m.parser, dataDir)
 	m.processes.SetHandleStreamJSONEvent(m.handleStreamJSONEvent)
 	m.processes.SetMakeWatcherCallback(m.makeWatcherCallback)
@@ -112,6 +118,25 @@ func NewManager(s *store.Store, dataDir string) *Manager {
 // LoadFromStore loads persisted agents from the store into memory.
 // Only agents whose process is still running are restored as idle;
 // stopped agents (pid=0 or dead process) are cleaned up from the store.
+func (m *Manager) SetHermesBaseURL(url string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if url != "" {
+		m.hermesClient = hermesclient.NewClient(url, "")
+	}
+}
+
+// HermesClient returns the hermes HTTP client, lazily creating it with defaults if needed.
+func (m *Manager) HermesClient() *hermesclient.Client {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.hermesClient == nil {
+		key := os.Getenv("HERMES_API_KEY")
+		m.hermesClient = hermesclient.NewClient("http://127.0.0.1:8642", key)
+	}
+	return m.hermesClient
+}
+
 func (m *Manager) LoadFromStore() error {
 	records, err := m.store.ListAgents()
 	if err != nil {
@@ -123,12 +148,19 @@ func (m *Manager) LoadFromStore() error {
 	loadedByPID := make(map[string]struct{})
 	loadedBySession := make(map[string]struct{})
 	for _, r := range records {
-		// Skip agents whose process is no longer running — they will be
-		// re-discovered by ScanExisting/Attach if the process comes back.
-		if r.PID <= 0 || !isProcessRunning(r.PID, r.Provider) {
-			log.Printf("[LoadFromStore] Skipping stopped agent %s (%s, PID %d)", r.ID, r.Name, r.PID)
+		if r.Provider == "hermes" && r.PID > 0 && m.hermesGatewayRun != nil && m.hermesGatewayRun(r.PID) {
+			log.Printf("[LoadFromStore] Removing persisted hermes gateway daemon %s (PID %d)", r.ID, r.PID)
 			_ = m.store.DeleteAgent(r.ID)
 			continue
+		}
+
+		isHermesProcessless := r.Provider == "hermes" && r.PID <= 0
+		if !isHermesProcessless {
+			if r.PID <= 0 || m.processRunning == nil || !m.processRunning(r.PID, r.Provider) {
+				log.Printf("[LoadFromStore] Skipping stopped agent %s (%s, PID %d)", r.ID, r.Name, r.PID)
+				_ = m.store.DeleteAgent(r.ID)
+				continue
+			}
 		}
 
 		if strings.Contains(r.Name, "-attached-") {
@@ -141,13 +173,15 @@ func (m *Manager) LoadFromStore() error {
 		}
 
 		// Deduplicate by PID+Provider and ResumeSessionID+Provider
-		pidKey := fmt.Sprintf("%s|%d", r.Provider, r.PID)
-		if _, ok := loadedByPID[pidKey]; ok {
-			log.Printf("[LoadFromStore] Skipping duplicate agent %s (same PID %d)", r.ID, r.PID)
-			_ = m.store.DeleteAgent(r.ID)
-			continue
+		if r.PID > 0 {
+			pidKey := fmt.Sprintf("%s|%d", r.Provider, r.PID)
+			if _, ok := loadedByPID[pidKey]; ok {
+				log.Printf("[LoadFromStore] Skipping duplicate agent %s (same PID %d)", r.ID, r.PID)
+				_ = m.store.DeleteAgent(r.ID)
+				continue
+			}
+			loadedByPID[pidKey] = struct{}{}
 		}
-		loadedByPID[pidKey] = struct{}{}
 
 		if r.ResumeSessionID != "" {
 			sessionKey := fmt.Sprintf("%s|%d|%s", r.Provider, r.PID, r.ResumeSessionID)
@@ -167,6 +201,9 @@ func (m *Manager) LoadFromStore() error {
 			if r.ResumeSessionID != "" {
 				args = []string{"-s", r.ResumeSessionID}
 			}
+		case "hermes":
+			cmd = "hermes"
+			args = []string{"gateway", "run"}
 		default:
 			cmd = "claude"
 			args = []string{"--dangerously-skip-permissions"}
@@ -211,7 +248,58 @@ func isProcessRunning(pid int, provider string) bool {
 	return strings.Contains(cmdline, strings.ToLower(provider))
 }
 
-// SetOnOutput registers a callback invoked whenever an agent produces PTY output.
+func isHermesGatewayRunPID(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+
+	cmdlinePath := fmt.Sprintf("/proc/%d/cmdline", pid)
+	if data, err := os.ReadFile(cmdlinePath); err == nil {
+		parts := strings.Split(strings.ToLower(string(data)), "\x00")
+		hasHermes := false
+		for _, part := range parts {
+			if strings.Contains(part, "hermes") {
+				hasHermes = true
+				break
+			}
+		}
+		if !hasHermes {
+			return false
+		}
+		for i := 0; i+1 < len(parts); i++ {
+			if strings.TrimSpace(parts[i]) == "gateway" && strings.TrimSpace(parts[i+1]) == "run" {
+				return true
+			}
+		}
+		return false
+	}
+
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(string(output))))
+	if len(fields) == 0 {
+		return false
+	}
+	hasHermes := false
+	for _, field := range fields {
+		if strings.Contains(field, "hermes") {
+			hasHermes = true
+			break
+		}
+	}
+	if !hasHermes {
+		return false
+	}
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "gateway" && fields[i+1] == "run" {
+			return true
+		}
+	}
+	return false
+}
 func (m *Manager) SetOnOutput(fn func(agentID string, data map[string]any)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1040,6 +1128,13 @@ func (m *Manager) Create(name, provider, cmd string, args []string, workDir stri
 		return id, nil
 	}
 
+	// For Hermes, no process spawn needed (HTTP API based)
+	if provider == "hermes" {
+		ag.setStatus(StatusIdle)
+		log.Printf("[Create] Agent %s created in idle mode (Hermes HTTP API)", id)
+		return id, nil
+	}
+
 	// Use pipe mode for Claude to avoid TUI permission menus
 	// Pipe mode with -p flag makes Claude run in non-interactive mode where --permission-mode works correctly
 	var p *agentpty.Process
@@ -1374,6 +1469,19 @@ func (m *Manager) SetFindSessionFile(fn func(scanner.ProcessInfo) string) {
 	m.sessionFileFinder = fn
 }
 
+func (m *Manager) SetProcessRunningChecker(fn func(pid int, provider string) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processRunning = fn
+}
+
+func (m *Manager) SetHermesGatewayRunChecker(fn func(pid int) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hermesGatewayRun = fn
+}
+
+
 // DataDir returns the data directory used for persistent storage.
 func (m *Manager) DataDir() string {
 	m.mu.RLock()
@@ -1642,9 +1750,47 @@ type AttachCandidate struct {
 	Reason   string
 }
 
+func isHermesGatewayRunProcess(info scanner.ProcessInfo) bool {
+	if info.Provider != "hermes" {
+		return false
+	}
+	for i := 0; i+1 < len(info.Args); i++ {
+		if strings.EqualFold(info.Args[i], "gateway") && strings.EqualFold(info.Args[i+1], "run") {
+			return true
+		}
+	}
+	return false
+}
+
+func isHermesInteractiveProcess(info scanner.ProcessInfo) bool {
+	if info.Provider != "hermes" {
+		return false
+	}
+	if info.AttachMode() == scanner.AttachModeTmux {
+		return true
+	}
+	terminal := strings.TrimSpace(info.Terminal)
+	if terminal == "" {
+		return false
+	}
+	if terminal == "/dev/null" || strings.HasPrefix(terminal, "pipe:") {
+		return false
+	}
+	return strings.HasPrefix(terminal, "/dev/tty") || strings.HasPrefix(terminal, "/dev/pts/")
+}
+
 func (m *Manager) ClassifyAttachCandidate(info scanner.ProcessInfo) AttachCandidate {
 	if info.PID <= 0 {
 		return AttachCandidate{Process: info, Decision: AttachDecisionSkip, Reason: "missing pid"}
+	}
+	if isHermesGatewayRunProcess(info) {
+		return AttachCandidate{Process: info, Decision: AttachDecisionSkip, Reason: "hermes gateway daemon process"}
+	}
+	if info.Provider == "hermes" {
+		if !isHermesInteractiveProcess(info) {
+			return AttachCandidate{Process: info, Decision: AttachDecisionSkip, Reason: "hermes process is not interactive"}
+		}
+		return AttachCandidate{Process: info, Decision: AttachDecisionAuto, Reason: "interactive hermes process"}
 	}
 	if info.Provider != "claude" {
 		return AttachCandidate{Process: info, Decision: AttachDecisionAuto, Reason: "non-claude process"}
@@ -1856,6 +2002,31 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		return existing, nil
 	}
 	m.mu.RUnlock()
+
+	// For hermes processes, create a managed agent with no watcher or process.
+	// This runs after same-PID reuse logic so repeated attach reuses existing agent.
+	if info.Provider == "hermes" {
+		name := attachedDisplayName(info.PID, sessionID, info.Provider, info.WorkDir)
+		id := newUUID()
+		ag := newAgent(id, name, info.Provider, info.WorkDir, info.Cmd, info.Args)
+		ag.PID = info.PID
+		ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
+		ag.setStatus(StatusIdle)
+
+		m.mu.Lock()
+		m.agents[id] = ag
+		m.mu.Unlock()
+
+		_ = m.store.SaveAgent(store.AgentRecord{
+			ID:              id,
+			Name:            name,
+			Provider:        info.Provider,
+			WorkDir:         info.WorkDir,
+			ResumeSessionID: sessionID,
+			PID:             info.PID,
+		})
+		return ag, nil
+	}
 
 	if sessionID != "" {
 		m.mu.RLock()

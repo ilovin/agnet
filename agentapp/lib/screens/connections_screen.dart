@@ -38,6 +38,22 @@ Uri connectionProbeUri(String wsUrl) {
   return uri.replace(scheme: scheme);
 }
 
+String normalizeGatewayWsUrl(String rawUrl) {
+  final trimmed = rawUrl.trim();
+  Uri uri;
+  try {
+    uri = Uri.parse(trimmed);
+  } catch (_) {
+    return trimmed;
+  }
+
+  final isWsScheme = uri.scheme == 'ws' || uri.scheme == 'wss';
+  final isRootPath = uri.path.isEmpty || uri.path == '/';
+  if (!isWsScheme || !isRootPath) return trimmed;
+
+  return uri.replace(path: '/ws').toString();
+}
+
 bool shouldProbeConnectionError(Object error) {
   final lower = error.toString().toLowerCase();
   if (isDefinitiveConnectionError(error)) return false;
@@ -751,7 +767,7 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
     });
     try {
       final cfg = ConnectionConfig(
-        url: _urlCtrl.text.trim(),
+        url: normalizeGatewayWsUrl(_urlCtrl.text),
         token: _tokenCtrl.text.trim(),
       );
       Navigator.of(context).pop();
@@ -786,7 +802,7 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
             controller: _urlCtrl,
             decoration: const InputDecoration(
               labelText: 'Gateway URL',
-              hintText: 'ws://192.168.1.x:7374',
+              hintText: 'ws://192.168.1.x:7374/ws',
               border: OutlineInputBorder(),
             ),
             keyboardType: TextInputType.url,
@@ -855,7 +871,7 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
     });
     try {
       final cfg = ConnectionConfig(
-        url: _urlCtrl.text.trim(),
+        url: normalizeGatewayWsUrl(_urlCtrl.text),
         token: _tokenCtrl.text.trim(),
       );
       Navigator.of(context).pop();
@@ -890,7 +906,7 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
             controller: _urlCtrl,
             decoration: const InputDecoration(
               labelText: 'Gateway URL',
-              hintText: 'ws://192.168.1.x:7374',
+              hintText: 'ws://192.168.1.x:7374/ws',
               border: OutlineInputBorder(),
             ),
             keyboardType: TextInputType.url,
