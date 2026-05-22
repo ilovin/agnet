@@ -280,6 +280,11 @@
                     <code id="desktop-command">wget --no-check-certificate https://api.ilovin.xyz/v1/install.sh && bash install.sh</code>
                 </div>
                 <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
+                <div class="install-command" style="margin-top: 30px; border-top: 2px dashed #e0e0e0; padding-top: 20px;">
+                    <div style="font-size: 0.85em; color: #666; margin-bottom: 10px; font-family: sans-serif;">或通过 npm 安装（推荐）</div>
+                    <button class="copy-btn" onclick="copyCommand(event, 'desktop-npm')">复制</button>
+                    <code id="desktop-npm-command">npm i -g @ai-alignment/agnet && agnet setup</code>
+                </div>
             </div>
 
             <div class="platform-card" onclick="selectPlatform('android')">

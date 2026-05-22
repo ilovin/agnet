@@ -1,0 +1,30 @@
+{
+  "name": "@ai-alignment/agnet",
+  "version": "0.2.8",
+  "description": "Remote AI Agent management toolkit \u2014 agentgw + agentd",
+  "bin": {
+    "agnet": "./bin/run.js"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "files": [
+    "bin/",
+    "postinstall.js",
+    "platform/",
+    "install.sh",
+    "static/"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "license": "MIT"
+}

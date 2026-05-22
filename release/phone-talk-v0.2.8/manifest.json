@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "package": "phone-talk",
+  "version": "v0.2.8",
+  "buildDate": "2026-05-22T12:17:49Z",
+  "downloadBaseUrl": "https://download.ilovin.xyz",
+  "installScriptUrl": "https://api.ilovin.xyz/v1/install.sh",
+  "artifacts": [
+    {
+      "name": "agentgw",
+      "description": "Gateway daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentgw-macos-arm64",
+          "url": "https://download.ilovin.xyz/v0.2.8/bin/agentgw-macos-arm64",
+          "sha256": "cf14e477fc6b1c653f5c901a5d003d8ff7997af33b8484b902379ecb366bdb08",
+          "size":  9256850
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentgw-linux",
+          "url": "https://download.ilovin.xyz/v0.2.8/bin/agentgw-linux",
+          "sha256": "44db951c73e6c2fef821ba8e8bc60ca7ca5f7af2286fc3e65f3ff4d961e0b7f2",
+          "size":  9801890
+        }
+      ]
+    },
+    {
+      "name": "agentd",
+      "description": "Agent daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentd",
+          "url": "https://download.ilovin.xyz/v0.2.8/bin/agentd",
+          "sha256": "0ea0657d21ae682688c98d2d7750ce47b2803b142bb0e2906680681834694356",
+          "size":  11028770
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentd-linux",
+          "url": "https://download.ilovin.xyz/v0.2.8/bin/agentd-linux",
+          "sha256": "701441da4cb9126e4ce6f4997d1ef60d7c37e59376251f93846090ed174d9e8a",
+          "size":  11505826
+        }
+      ]
+    },
+    {
+      "name": "agentapp",
+      "description": "Mobile app",
+      "apk": null,
+      "ipa": null
+    }
+  ]
+}
