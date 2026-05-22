@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -1850,6 +1851,9 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		// Handle both .json (OpenCode) and .jsonl (Claude) extensions
 		sessionID = strings.TrimSuffix(strings.TrimSuffix(fileName, ".jsonl"), ".json")
 	}
+	if sessionID == "" && info.Provider == "hermes" {
+		sessionID = strings.TrimSpace(info.SessionID)
+	}
 
 	// For claude processes without a session file, create a display-only agent
 	// so they still appear in agent.list. No watcher is started since there's
@@ -1872,9 +1876,10 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			ag.setWatcher(nil)
 		}
 		// Reset the in-memory EventBuf so new-session events start from seq=0,
-		// but keep persisted history intact so the dashboard can reload
-		// previous conversation from SQLite via LoadPersistedEventsLatest.
 		ag.EventBuf().Reset()
+		if err := m.ClearConversationEvents(ag.ID); err != nil {
+			log.Printf("[Attach] Warning: failed to clear persisted history for %s: %v", ag.ID, err)
+		}
 		currentName := ag.Name
 		currentPID := ag.PID
 		currentSessionID, _ := m.GetResumeSessionID(ag.ID)
@@ -1946,6 +1951,21 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		applyAttachMetadata(existing)
 		if samePID && sessionID != "" && existingResumeID != sessionID {
 			rebindAttachedSession(existing, sessionID, sessionFile)
+				if info.Provider == "hermes" {
+					if historyEvents, err := m.HermesClient().GetHistory(context.Background(), sessionID); err != nil {
+						log.Printf("[ReAttach] Warning: failed to load Hermes history for %s: %v", existing.ID, err)
+					} else if len(historyEvents) > 0 {
+						log.Printf("[ReAttach] Loaded %d historical events for Hermes agent %s", len(historyEvents), existing.ID)
+						lastSeq, _ := m.LastPersistedSeq(existing.ID)
+						for _, ev := range historyEvents {
+							lastSeq++
+							data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+							if err := m.store.SaveConversationEvent(existing.ID, lastSeq, data); err != nil {
+								log.Printf("[ReAttach] Warning: failed to persist Hermes history for %s seq=%d: %v", existing.ID, lastSeq, err)
+							}
+						}
+					}
+				}
 		} else {
 			currentName := existing.Name
 			currentPID := existing.PID
