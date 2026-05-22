@@ -623,3 +623,95 @@ func TestContentMatchSessionExpandsCandidatesBeyondTopFive(t *testing.T) {
 		t.Fatalf("expected nil without tmux target, got %+v", matched)
 	}
 }
+
+func TestExtractFingerprintsIncludesToolUseOnlyMessages(t *testing.T) {
+	dir := t.TempDir()
+	jsonlPath := filepath.Join(dir, "sess-tool-only.jsonl")
+	line := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"go test ./internal/scanner -run TestFoo -count=1\"}}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fps := extractFingerprints(jsonlPath, 20)
+	if len(fps) == 0 {
+		t.Fatalf("expected tool_use-only message to produce fingerprints, got none")
+	}
+
+	foundToolName := false
+	for _, fp := range fps {
+		if fp == "bash" || fp == "tool bash" {
+			foundToolName = true
+			break
+		}
+	}
+	if !foundToolName {
+		t.Fatalf("expected tool name fingerprint in %v", fps)
+	}
+}
+
+func TestContentMatchSessionByPaneTextRejectsLowScore(t *testing.T) {
+	dir := t.TempDir()
+	jsonlPath := filepath.Join(dir, "sess-low.jsonl")
+	line := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"single weak token\"}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []SessionCandidate{{SessionID: "sess-low", JSONLPath: jsonlPath, LastActivity: time.Now()}}
+
+	matched := contentMatchSessionByPaneText("single weak token", candidates, nil)
+	if matched != nil {
+		t.Fatalf("expected low-score match to be rejected, got %+v", matched)
+	}
+}
+
+func TestContentMatchSessionByPaneTextRejectsAmbiguousTopScores(t *testing.T) {
+	dir := t.TempDir()
+	leftPath := filepath.Join(dir, "sess-left.jsonl")
+	rightPath := filepath.Join(dir, "sess-right.jsonl")
+
+	left := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma\"}]}}\n"
+	right := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta delta\"}]}}\n"
+	if err := os.WriteFile(leftPath, []byte(left), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rightPath, []byte(right), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []SessionCandidate{
+		{SessionID: "sess-left", JSONLPath: leftPath, LastActivity: time.Now()},
+		{SessionID: "sess-right", JSONLPath: rightPath, LastActivity: time.Now().Add(-time.Second)},
+	}
+
+	pane := "deploy alpha beta"
+	matched := contentMatchSessionByPaneText(pane, candidates, nil)
+	if matched != nil {
+		t.Fatalf("expected ambiguous top scores to be rejected, got %+v", matched)
+	}
+}
+
+func TestContentMatchSessionByPaneTextAcceptsClearWinner(t *testing.T) {
+	dir := t.TempDir()
+	winPath := filepath.Join(dir, "sess-win.jsonl")
+	losePath := filepath.Join(dir, "sess-lose.jsonl")
+
+	winner := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	loser := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"noise only\"}]}}\n"
+	if err := os.WriteFile(winPath, []byte(winner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(losePath, []byte(loser), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []SessionCandidate{
+		{SessionID: "sess-win", JSONLPath: winPath, LastActivity: time.Now()},
+		{SessionID: "sess-lose", JSONLPath: losePath, LastActivity: time.Now().Add(-time.Second)},
+	}
+
+	pane := "deploy alpha beta gamma epsilon"
+	matched := contentMatchSessionByPaneText(pane, candidates, nil)
+	if matched == nil || matched.SessionID != "sess-win" {
+		t.Fatalf("expected sess-win clear match, got %+v", matched)
+	}
+}

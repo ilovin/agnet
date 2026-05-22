@@ -12,6 +12,12 @@ import (
 var tuiDecorationRe = regexp.MustCompile(`[─━│┃┌┐└┘├┤┬┴┼╔╗╚╝║═⏺⏵✻※❯⎿]`)
 var whitespaceRe = regexp.MustCompile(`\s+`)
 var markdownRe = regexp.MustCompile("[*`#\\[\\]]")
+var nonWordRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+const (
+	contentMatchMinScore = 2
+	contentMatchMinMargin = 2
+)
 
 // captureTmuxPane captures the visible content of a tmux pane.
 func captureTmuxPane(target string) (string, error) {
@@ -25,15 +31,60 @@ func captureTmuxPane(target string) (string, error) {
 
 // cleanTUIText removes TUI decorations and normalizes whitespace for matching.
 func cleanTUIText(raw string) string {
-	clean := tuiDecorationRe.ReplaceAllString(raw, " ")
+	clean := strings.ToLower(raw)
+	clean = markdownRe.ReplaceAllString(clean, " ")
+	clean = tuiDecorationRe.ReplaceAllString(clean, " ")
+	clean = nonWordRe.ReplaceAllString(clean, " ")
 	clean = whitespaceRe.ReplaceAllString(clean, " ")
 	return strings.TrimSpace(clean)
 }
 
+func appendTokenFingerprints(dst []string, token string) []string {
+	token = cleanTUIText(token)
+	if len(token) < 3 {
+		return dst
+	}
+	if len(token) > 80 {
+		token = token[:80]
+	}
+	return append(dst, token)
+}
+
+func appendToolUseFingerprints(dst []string, block map[string]interface{}) []string {
+	name, _ := block["name"].(string)
+	if name != "" {
+		dst = appendTokenFingerprints(dst, "tool "+name)
+		dst = appendTokenFingerprints(dst, name)
+	}
+
+	input, ok := block["input"].(map[string]interface{})
+	if !ok {
+		return dst
+	}
+	for _, key := range []string{"command", "description", "prompt", "query", "url", "pattern", "path", "file_path"} {
+		v, ok := input[key].(string)
+		if !ok || strings.TrimSpace(v) == "" {
+			continue
+		}
+		clean := cleanTUIText(v)
+		if clean == "" {
+			continue
+		}
+		parts := strings.Fields(clean)
+		limit := 4
+		if len(parts) < limit {
+			limit = len(parts)
+		}
+		for i := 0; i < limit; i++ {
+			dst = appendTokenFingerprints(dst, parts[i])
+		}
+	}
+	return dst
+}
+
 // extractFingerprints extracts text snippets from a JSONL session file.
-// Scans backwards from the end, collecting fingerprints from assistant text
-// and user messages. Pure tool_use messages (no text block) are skipped.
-// Stops when maxFPs fingerprints are collected.
+// Scans backwards from the end, collecting fingerprints from assistant text,
+// user messages, and tool_use blocks. Stops when maxFPs fingerprints are collected.
 func extractFingerprints(jsonlPath string, maxFPs int) []string {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
@@ -83,8 +134,11 @@ func extractFingerprints(jsonlPath string, maxFPs int) []string {
 
 		// String content (user messages)
 		if str, ok := content.(string); ok {
-			t := strings.TrimSpace(str)
-			if len(t) >= 3 && len(t) <= 80 {
+			t := cleanTUIText(str)
+			if len(t) >= 3 {
+				if len(t) > 80 {
+					t = t[:80]
+				}
 				fps = append(fps, t)
 			}
 			continue
@@ -96,35 +150,48 @@ func extractFingerprints(jsonlPath string, maxFPs int) []string {
 			continue
 		}
 
-		hasText := false
 		for _, item := range contentArr {
+			if len(fps) >= maxFPs {
+				break
+			}
 			block, ok := item.(map[string]interface{})
 			if !ok {
 				continue
 			}
-			if block["type"] != "text" {
-				continue
-			}
-			hasText = true
-			text, _ := block["text"].(string)
-			text = strings.TrimSpace(text)
-			text = markdownRe.ReplaceAllString(text, "")
-			for _, l := range strings.Split(text, "\n") {
-				l = strings.TrimSpace(l)
-				if len(l) > 15 && len(l) < 80 {
-					fps = append(fps, l)
-					if len(fps) >= maxFPs {
-						break
+			blockType, _ := block["type"].(string)
+			switch blockType {
+			case "text":
+				text, _ := block["text"].(string)
+				text = cleanTUIText(text)
+				for _, l := range strings.Split(text, "\n") {
+					l = cleanTUIText(l)
+					if len(l) >= 8 && len(l) <= 120 {
+						fps = append(fps, l)
+						parts := strings.Fields(l)
+						limit := 4
+						if len(parts) < limit {
+							limit = len(parts)
+						}
+						for i := 0; i < limit; i++ {
+							if len(parts[i]) >= 3 {
+								fps = append(fps, parts[i])
+							}
+						}
+						if len(fps) >= maxFPs {
+							break
+						}
 					}
 				}
+			case "tool_use":
+				before := len(fps)
+				fps = appendToolUseFingerprints(fps, block)
+				if len(fps) > maxFPs {
+					fps = fps[:maxFPs]
+				}
+				if len(fps) == before {
+					continue
+				}
 			}
-			if len(fps) >= maxFPs {
-				break
-			}
-		}
-		// Pure tool_use (no text block) — skip, don't count
-		if !hasText {
-			continue
 		}
 	}
 
@@ -155,6 +222,15 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, force
 		log.Printf("[ContentMatch] capture-pane failed for %s: %v", tmuxTarget, err)
 		return nil
 	}
+
+	return contentMatchSessionByPaneText(paneRaw, candidates, forcedSessionIDs)
+}
+
+func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+
 	paneText := cleanTUIText(paneRaw)
 	if len(paneText) < 20 {
 		log.Printf("[ContentMatch] reject: pane text too short (%d)", len(paneText))
@@ -176,6 +252,7 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, force
 	log.Printf("[ContentMatch] candidate_total=%d staged_max=%v", len(candidates), maxByStage)
 
 	bestScore := 0
+	secondBestScore := 0
 	var bestCandidate *SessionCandidate
 	seen := make(map[string]bool, len(candidates))
 
@@ -219,23 +296,46 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, force
 			seen[stageCandidates[i].SessionID] = true
 			fps := extractFingerprints(stageCandidates[i].JSONLPath, 20)
 			score := matchScore(paneText, fps)
-			log.Printf("[ContentMatch] candidate=%s fpCount=%d toolFpCount=%d score=%d forced=%t", stageCandidates[i].SessionID, len(fps), 0, score, isForced(stageCandidates[i].SessionID))
+			log.Printf("[ContentMatch] candidate=%s fpCount=%d toolFpCount=%d score=%d forced=%t", stageCandidates[i].SessionID, len(fps), countToolFingerprints(fps), score, isForced(stageCandidates[i].SessionID))
 			if score > bestScore {
+				secondBestScore = bestScore
 				bestScore = score
 				candidate := stageCandidates[i]
 				bestCandidate = &candidate
+			} else if score > secondBestScore {
+				secondBestScore = score
 			}
 		}
-		if bestScore > 0 {
+		if bestScore >= contentMatchMinScore && (bestScore-secondBestScore) >= contentMatchMinMargin {
 			break
 		}
 	}
 
-	if bestCandidate != nil && bestScore > 0 {
-		log.Printf("[ContentMatch] pane %s → session %s (score %d)", tmuxTarget, bestCandidate.SessionID, bestScore)
-		return bestCandidate
+	if bestCandidate == nil {
+		log.Printf("[ContentMatch] reject: no candidate scored > 0 among %d candidates", len(candidates))
+		return nil
 	}
 
-	log.Printf("[ContentMatch] reject: no confident match among %d candidates", len(candidates))
-	return nil
+	margin := bestScore - secondBestScore
+	if bestScore < contentMatchMinScore {
+		log.Printf("[ContentMatch] reject: low confidence bestScore=%d minScore=%d", bestScore, contentMatchMinScore)
+		return nil
+	}
+	if margin < contentMatchMinMargin {
+		log.Printf("[ContentMatch] reject: ambiguous bestScore=%d secondBest=%d minMargin=%d", bestScore, secondBestScore, contentMatchMinMargin)
+		return nil
+	}
+
+	log.Printf("[ContentMatch] pane match success session=%s bestScore=%d secondBest=%d margin=%d", bestCandidate.SessionID, bestScore, secondBestScore, margin)
+	return bestCandidate
+}
+
+func countToolFingerprints(fps []string) int {
+	count := 0
+	for _, fp := range fps {
+		if strings.HasPrefix(fp, "tool ") {
+			count++
+		}
+	}
+	return count
 }
