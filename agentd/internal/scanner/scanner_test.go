@@ -568,3 +568,58 @@ func TestDetectProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestFindClaudeSessionInfoReturnsEmptyWhenMultipleCandidatesAndNoConfidentMatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	baseTime := time.Now()
+	for i := 0; i < 2; i++ {
+		sid := "sess-" + string(rune('a'+i))
+		jsonlPath := filepath.Join(projectDir, sid+".jsonl")
+		if err := os.WriteFile(jsonlPath, []byte("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"unlikely fingerprint text\"}]}}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(jsonlPath, baseTime.Add(time.Duration(i)*time.Second), baseTime.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gotSessionID, gotSessionFile := findClaudeSessionInfo(os.Getpid(), workDir, "")
+	if gotSessionID != "" || gotSessionFile != "" {
+		t.Fatalf("expected empty result when no confident match and no task-fd hint, got sessionID=%q sessionFile=%q", gotSessionID, gotSessionFile)
+	}
+}
+
+func TestContentMatchSessionExpandsCandidatesBeyondTopFive(t *testing.T) {
+	dir := t.TempDir()
+	var candidates []SessionCandidate
+
+	for i := 0; i < 6; i++ {
+		sid := "sess-" + string(rune('a'+i))
+		jsonlPath := filepath.Join(dir, sid+".jsonl")
+		text := "common text"
+		if i == 5 {
+			text = "unique expansion fingerprint target"
+		}
+		line := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"" + text + "\"}]}}\n"
+		if err := os.WriteFile(jsonlPath, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, SessionCandidate{SessionID: sid, JSONLPath: jsonlPath, LastActivity: time.Now().Add(-time.Duration(i) * time.Second)})
+	}
+
+	matched := contentMatchSession("", candidates, nil)
+	if matched != nil {
+		t.Fatalf("expected nil without tmux target, got %+v", matched)
+	}
+}

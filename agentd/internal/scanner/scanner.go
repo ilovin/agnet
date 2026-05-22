@@ -385,14 +385,27 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 		return candidates[0].SessionID, candidates[0].JSONLPath
 	}
 
-	// Step 4: Content matching
-	if matched := contentMatchSession(tmuxTarget, candidates, 5); matched != nil {
+	// Step 4: Content matching with staged candidate expansion.
+	forcedSessionIDs := make(map[string]bool, len(taskSessions))
+	for _, sid := range taskSessions {
+		forcedSessionIDs[sid] = true
+	}
+	if matched := contentMatchSession(tmuxTarget, candidates, forcedSessionIDs); matched != nil {
 		return matched.SessionID, matched.JSONLPath
 	}
 
-	// Fallback: return the most active candidate
-	if len(candidates) > 0 {
-		return candidates[0].SessionID, candidates[0].JSONLPath
+	// Conservative fallback: no confident content match.
+	// If task-fd sessions exist, prefer the most active among those only.
+	if len(taskSessions) > 0 {
+		taskSet := make(map[string]bool, len(taskSessions))
+		for _, sid := range taskSessions {
+			taskSet[sid] = true
+		}
+		for _, c := range candidates {
+			if taskSet[c.SessionID] {
+				return c.SessionID, c.JSONLPath
+			}
+		}
 	}
 
 	return "", ""

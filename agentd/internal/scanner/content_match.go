@@ -144,9 +144,8 @@ func matchScore(paneText string, fingerprints []string) int {
 
 // contentMatchSession finds the best matching session from candidates by comparing
 // tmux pane content with JSONL fingerprints. Returns the matched SessionCandidate
-// or nil if no match (all scores are 0).
-// maxCandidates limits how many candidates are actually fingerprinted.
-func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, maxCandidates int) *SessionCandidate {
+// or nil if no confident match.
+func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
 	if tmuxTarget == "" || len(candidates) == 0 {
 		return nil
 	}
@@ -158,28 +157,85 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, maxCa
 	}
 	paneText := cleanTUIText(paneRaw)
 	if len(paneText) < 20 {
+		log.Printf("[ContentMatch] reject: pane text too short (%d)", len(paneText))
 		return nil
 	}
 
-	top := candidates
-	if len(top) > maxCandidates {
-		top = top[:maxCandidates]
+	isForced := func(sid string) bool {
+		if forcedSessionIDs == nil {
+			return false
+		}
+		return forcedSessionIDs[sid]
 	}
+
+	maxByStage := []int{5, 12, 20}
+	if len(candidates) < 20 {
+		maxByStage = []int{5, 12, len(candidates)}
+	}
+
+	log.Printf("[ContentMatch] candidate_total=%d staged_max=%v", len(candidates), maxByStage)
 
 	bestScore := 0
 	var bestCandidate *SessionCandidate
+	seen := make(map[string]bool, len(candidates))
 
-	for i := range top {
-		fps := extractFingerprints(top[i].JSONLPath, 20)
-		score := matchScore(paneText, fps)
-		if score > bestScore {
-			bestScore = score
-			bestCandidate = &top[i]
+	for _, stageMax := range maxByStage {
+		if stageMax <= 0 {
+			continue
+		}
+		if stageMax > len(candidates) {
+			stageMax = len(candidates)
+		}
+
+		stageCandidates := make([]SessionCandidate, 0, stageMax)
+		for i := 0; i < stageMax; i++ {
+			if seen[candidates[i].SessionID] {
+				continue
+			}
+			stageCandidates = append(stageCandidates, candidates[i])
+		}
+		for _, c := range candidates {
+			if !isForced(c.SessionID) || seen[c.SessionID] {
+				continue
+			}
+			already := false
+			for _, existing := range stageCandidates {
+				if existing.SessionID == c.SessionID {
+					already = true
+					break
+				}
+			}
+			if !already {
+				stageCandidates = append(stageCandidates, c)
+			}
+		}
+
+		if len(stageCandidates) == 0 {
+			continue
+		}
+		log.Printf("[ContentMatch] stage_max=%d scored_candidates=%d", stageMax, len(stageCandidates))
+
+		for i := range stageCandidates {
+			seen[stageCandidates[i].SessionID] = true
+			fps := extractFingerprints(stageCandidates[i].JSONLPath, 20)
+			score := matchScore(paneText, fps)
+			log.Printf("[ContentMatch] candidate=%s fpCount=%d toolFpCount=%d score=%d forced=%t", stageCandidates[i].SessionID, len(fps), 0, score, isForced(stageCandidates[i].SessionID))
+			if score > bestScore {
+				bestScore = score
+				candidate := stageCandidates[i]
+				bestCandidate = &candidate
+			}
+		}
+		if bestScore > 0 {
+			break
 		}
 	}
 
-	if bestCandidate != nil {
+	if bestCandidate != nil && bestScore > 0 {
 		log.Printf("[ContentMatch] pane %s → session %s (score %d)", tmuxTarget, bestCandidate.SessionID, bestScore)
+		return bestCandidate
 	}
-	return bestCandidate
+
+	log.Printf("[ContentMatch] reject: no confident match among %d candidates", len(candidates))
+	return nil
 }
