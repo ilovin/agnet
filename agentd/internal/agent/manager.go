@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -218,6 +217,17 @@ func (m *Manager) LoadFromStore() error {
 		// Initialize buffer seq from persisted events so new appends continue after existing data
 		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
 			ag.InitSeq(lastSeq)
+		}
+		// Load Hermes CLI history from state.db on restart so conversation data
+		// is available even after agentd restart.
+		if r.Provider == "hermes" {
+			if hist, _, err := watcher.HermesStateDBHistory(); err == nil && len(hist) > 0 {
+				log.Printf("[LoadFromStore] Loaded %d historical events for Hermes agent %s from state.db", len(hist), r.ID)
+				for _, ev := range hist {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					_ = m.appendAndPersistEvent(r.ID, ag, data)
+				}
+			}
 		}
 		m.agents[r.ID] = ag
 	}
@@ -896,15 +906,26 @@ func deriveAgentState(ag *Agent, resumeSessionID string) DerivedAgentState {
 	attachMode := ag.AttachMode()
 	attachReadOnly := ag.AttachReadOnly()
 
+	hasProcess := process != nil
+	hasWatcher := watcher != nil
+	// For display-only agents (no watcher, no process object) with a running PID,
+	// check process liveness to avoid showing "exited" for a running external process.
+	hasRunningPID := false
+	if !hasProcess && !hasWatcher && status != StatusStopped && status != StatusCrashed {
+		if ag.PID > 0 {
+			hasRunningPID = isProcessRunning(ag.PID, ag.Provider)
+		}
+	}
+
 	state := DerivedAgentState{
-		RuntimeState:   deriveRuntimeState(status, process != nil, watcher != nil),
+		RuntimeState:   deriveRuntimeState(status, hasProcess, hasWatcher, hasRunningPID),
 		SessionControl: deriveSessionControl(process != nil, watcher != nil, attachMode, attachReadOnly, resumeSessionID),
 	}
 	state.SessionState, state.SessionStateReason = deriveSessionState(status, process != nil, watcher != nil, resumeSessionID)
 	return state
 }
 
-func deriveRuntimeState(status Status, hasProcess bool, hasWatcher bool) string {
+func deriveRuntimeState(status Status, hasProcess bool, hasWatcher bool, hasRunningPID bool) string {
 	switch status {
 	case StatusStarting:
 		return "starting"
@@ -915,12 +936,12 @@ func deriveRuntimeState(status Status, hasProcess bool, hasWatcher bool) string 
 	case StatusWorking:
 		return "live"
 	case StatusIdle:
-		if hasProcess || hasWatcher {
+		if hasProcess || hasWatcher || hasRunningPID {
 			return "live"
 		}
 		return "exited"
 	default:
-		if hasProcess || hasWatcher {
+		if hasProcess || hasWatcher || hasRunningPID {
 			return "live"
 		}
 		return "exited"
@@ -1950,22 +1971,13 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		// Refresh attach metadata in case tmux/TTY availability changed.
 		applyAttachMetadata(existing)
 		if samePID && sessionID != "" && existingResumeID != sessionID && !(info.Provider == "hermes" && existingResumeID != "") {
-			rebindAttachedSession(existing, sessionID, sessionFile)
-				if info.Provider == "hermes" {
-					if historyEvents, err := m.HermesClient().GetHistory(context.Background(), sessionID); err != nil {
-						log.Printf("[ReAttach] Warning: failed to load Hermes history for %s: %v", existing.ID, err)
-					} else if len(historyEvents) > 0 {
-						log.Printf("[ReAttach] Loaded %d historical events for Hermes agent %s", len(historyEvents), existing.ID)
-						lastSeq, _ := m.LastPersistedSeq(existing.ID)
-						for _, ev := range historyEvents {
-							lastSeq++
-							data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
-							if err := m.store.SaveConversationEvent(existing.ID, lastSeq, data); err != nil {
-								log.Printf("[ReAttach] Warning: failed to persist Hermes history for %s seq=%d: %v", existing.ID, lastSeq, err)
-							}
-						}
-					}
-				}
+			if existingResumeID != "" {
+				log.Printf("[ReAttach] PID %d: keeping existing session %s (scanner returned %s)",
+					info.PID, existingResumeID, sessionID)
+			} else {
+				rebindAttachedSession(existing, sessionID, sessionFile)
+			}
+
 		} else {
 			currentName := existing.Name
 			currentPID := existing.PID
@@ -2001,6 +2013,14 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		} else if info.Provider == "claude" && sessionFile != "" {
 			if historyEvents, err := watcher.LoadClaudeJSONLHistory(sessionFile); err == nil && len(historyEvents) > 0 {
 				log.Printf("[ReAttach] Loaded %d historical events for Claude agent %s", len(historyEvents), existing.ID)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(existing.ID, existing, data)
+				}
+			}
+		} else if info.Provider == "hermes" {
+			if historyEvents, sessionDBID, err := watcher.HermesStateDBHistory(); err == nil && len(historyEvents) > 0 {
+				log.Printf("[ReAttach] Loaded %d historical events for Hermes agent %s (session %s)", len(historyEvents), existing.ID, sessionDBID)
 				for _, ev := range historyEvents {
 					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
 					m.appendAndPersistEvent(existing.ID, existing, data)
@@ -2046,17 +2066,15 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			PID:             info.PID,
 		})
 
-		// Load historical events from Hermes API so conversation.history is non-empty
-		if sessionID != "" && m.hermesClient != nil {
-			if historyEvents, err := m.hermesClient.GetHistory(context.Background(), sessionID); err == nil && len(historyEvents) > 0 {
-				log.Printf("[Attach] Loaded %d historical events for Hermes agent %s", len(historyEvents), id)
-				for _, ev := range historyEvents {
-					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
-					m.appendAndPersistEvent(id, ag, data)
-				}
-			} else if err != nil {
-				log.Printf("[Attach] Warning: failed to load Hermes history for %s (session %s): %v", id, sessionID, err)
+		// Load historical events from Hermes state.db so conversation.history is non-empty
+		if historyEvents, sessionDBID, err := watcher.HermesStateDBHistory(); err == nil && len(historyEvents) > 0 {
+			log.Printf("[Attach] Loaded %d historical events for Hermes agent %s (session %s)", len(historyEvents), id, sessionDBID)
+			for _, ev := range historyEvents {
+				data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+				m.appendAndPersistEvent(id, ag, data)
 			}
+		} else if err != nil {
+			log.Printf("[Attach] Warning: failed to load Hermes history for %s: %v", id, err)
 		}
 
 		return ag, nil
