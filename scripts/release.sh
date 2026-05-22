@@ -47,10 +47,10 @@ EXAMPLES:
   VERSION=v0.5.0 ./scripts/release.sh
 
 CONTENTS OF THE RELEASE:
-  bin/agentd              - Local agent daemon (macOS)
-  bin/agentd-linux        - Remote server agent daemon (Linux amd64)
-  bin/agentgw-macos-arm64 - Local gateway (macOS ARM64)
-  bin/agentgw-linux       - Local gateway (Linux amd64)
+  platform/darwin-arm64/agentd  - Local agent daemon (macOS)
+  platform/linux-amd64/agentd        - Remote server agent daemon (Linux amd64)
+  platform/darwin-arm64/agentgw - Local gateway (macOS ARM64)
+  platform/linux-amd64/agentgw       - Local gateway (Linux amd64)
   bin/agentapp.apk        - Android app (if built)
   bin/agentapp.ipa        - iOS app (if built)
   install.sh              - One-click installer for end users
@@ -137,26 +137,26 @@ echo "=== Release ${VERSION} ==="
 echo "[release] Domain: ${DOMAIN}"
 echo "[release] CDN: ${CDN_DOMAIN}"
 rm -rf "$RELEASE_DIR"
-mkdir -p "$RELEASE_DIR/bin"
+mkdir -p "$RELEASE_DIR/platform/darwin-arm64" "$RELEASE_DIR/platform/linux-amd64"
 
 # ── Go binaries ─────────────────────────────────────────────────────
 echo "[release] Building Go binaries in parallel..."
 BUILD_VERSION="$VERSION" build_go_all
 
-cp "$LOCAL_BIN" "${RELEASE_DIR}/bin/agentd"
-cp "$LINUX_BIN" "${RELEASE_DIR}/bin/agentd-linux"
-cp "$GW_BIN" "${RELEASE_DIR}/bin/agentgw-macos-arm64"
-cp "$GW_LINUX_BIN" "${RELEASE_DIR}/bin/agentgw-linux"
+cp "$LOCAL_BIN" "${RELEASE_DIR}/platform/darwin-arm64/agentd"
+cp "$LINUX_BIN" "${RELEASE_DIR}/platform/linux-amd64/agentd"
+cp "$GW_BIN" "${RELEASE_DIR}/platform/darwin-arm64/agentgw"
+cp "$GW_LINUX_BIN" "${RELEASE_DIR}/platform/linux-amd64/agentgw"
 
-AGENTD_MAC_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentd")"
-AGENTD_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentd-linux")"
-AGENTGW_MAC_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentgw-macos-arm64")"
-AGENTGW_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/bin/agentgw-linux")"
+AGENTD_MAC_SHA="$(sha256_file "${RELEASE_DIR}/platform/darwin-arm64/agentd")"
+AGENTD_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/platform/linux-amd64/agentd")"
+AGENTGW_MAC_SHA="$(sha256_file "${RELEASE_DIR}/platform/darwin-arm64/agentgw")"
+AGENTGW_LINUX_SHA="$(sha256_file "${RELEASE_DIR}/platform/linux-amd64/agentgw")"
 
-echo "[release] agentd (macOS): $(ls -lh "${RELEASE_DIR}/bin/agentd" | awk '{print $5}')"
-echo "[release] agentd-linux: $(ls -lh "${RELEASE_DIR}/bin/agentd-linux" | awk '{print $5}')"
-echo "[release] agentgw-macos-arm64: $(ls -lh "${RELEASE_DIR}/bin/agentgw-macos-arm64" | awk '{print $5}')"
-echo "[release] agentgw-linux: $(ls -lh "${RELEASE_DIR}/bin/agentgw-linux" | awk '{print $5}')"
+echo "[release] agentd (macOS): $(ls -lh "${RELEASE_DIR}/platform/darwin-arm64/agentd" | awk '{print $5}')"
+echo "[release] agentd-linux: $(ls -lh "${RELEASE_DIR}/platform/linux-amd64/agentd" | awk '{print $5}')"
+echo "[release] agentgw (macOS): $(ls -lh "${RELEASE_DIR}/platform/darwin-arm64/agentgw" | awk '{print $5}')"
+echo "[release] agentgw-linux: $(ls -lh "${RELEASE_DIR}/platform/linux-amd64/agentgw" | awk '{print $5}')"
 
 # ── Android APK ────────────────────────────────────────────────────
 APK_SHA=""
@@ -256,10 +256,10 @@ Token: 安装时生成的 Token
 
 ## 文件说明
 
-    bin/agentd              # macOS 本地 Agent 守护进程
-    bin/agentd-linux        # 远程服务器 Agent 守护进程 (Linux)
-    bin/agentgw-macos-arm64 # macOS 网关
-    bin/agentgw-linux       # Linux 网关
+    platform/darwin-arm64/agentd  # macOS 本地 Agent 守护进程
+    platform/linux-amd64/agentd        # 远程服务器 Agent 守护进程 (Linux)
+    platform/darwin-arm64/agentgw # macOS 网关
+    platform/linux-amd64/agentgw       # Linux 网关
     bin/agentapp.apk        # Android App
     install.sh              # 一键安装脚本
     scripts/                # 部署与辅助脚本（可被管理 UI 调用）
@@ -291,18 +291,18 @@ cat > "$MANIFEST_PATH" <<EOF
         {
           "os": "darwin",
           "arch": "arm64",
-          "path": "bin/agentgw-macos-arm64",
-          "url": "${BASE_URL}/${VERSION}/bin/agentgw-macos-arm64",
+          "path": "platform/darwin-arm64/agentgw",
+          "url": "${BASE_URL}/${VERSION}/platform/darwin-arm64/agentgw",
           "sha256": "${AGENTGW_MAC_SHA}",
-          "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-macos-arm64")
+          "size": $(wc -c < "${RELEASE_DIR}/platform/darwin-arm64/agentgw")
         },
         {
           "os": "linux",
           "arch": "amd64",
-          "path": "bin/agentgw-linux",
-          "url": "${BASE_URL}/${VERSION}/bin/agentgw-linux",
+          "path": "platform/linux-amd64/agentgw",
+          "url": "${BASE_URL}/${VERSION}/platform/linux-amd64/agentgw",
           "sha256": "${AGENTGW_LINUX_SHA}",
-          "size": $(wc -c < "${RELEASE_DIR}/bin/agentgw-linux")
+          "size": $(wc -c < "${RELEASE_DIR}/platform/linux-amd64/agentgw")
         }
       ]
     },
@@ -313,18 +313,18 @@ cat > "$MANIFEST_PATH" <<EOF
         {
           "os": "darwin",
           "arch": "arm64",
-          "path": "bin/agentd",
-          "url": "${BASE_URL}/${VERSION}/bin/agentd",
+          "path": "platform/darwin-arm64/agentd",
+          "url": "${BASE_URL}/${VERSION}/platform/darwin-arm64/agentd",
           "sha256": "${AGENTD_MAC_SHA}",
-          "size": $(wc -c < "${RELEASE_DIR}/bin/agentd")
+          "size": $(wc -c < "${RELEASE_DIR}/platform/darwin-arm64/agentd")
         },
         {
           "os": "linux",
           "arch": "amd64",
-          "path": "bin/agentd-linux",
-          "url": "${BASE_URL}/${VERSION}/bin/agentd-linux",
+          "path": "platform/linux-amd64/agentd",
+          "url": "${BASE_URL}/${VERSION}/platform/linux-amd64/agentd",
           "sha256": "${AGENTD_LINUX_SHA}",
-          "size": $(wc -c < "${RELEASE_DIR}/bin/agentd-linux")
+          "size": $(wc -c < "${RELEASE_DIR}/platform/linux-amd64/agentd")
         }
       ]
     },
@@ -404,10 +404,10 @@ if $PUBLISH || $DRY_RUN; then
     }
 
     # Upload individual binaries
-    upload_oss "${RELEASE_DIR}/bin/agentd" "${VERSION}/bin/agentd"
-    upload_oss "${RELEASE_DIR}/bin/agentd-linux" "${VERSION}/bin/agentd-linux"
-    upload_oss "${RELEASE_DIR}/bin/agentgw-macos-arm64" "${VERSION}/bin/agentgw-macos-arm64"
-    upload_oss "${RELEASE_DIR}/bin/agentgw-linux" "${VERSION}/bin/agentgw-linux"
+    upload_oss "${RELEASE_DIR}/platform/darwin-arm64/agentd" "${VERSION}/platform/darwin-arm64/agentd"
+    upload_oss "${RELEASE_DIR}/platform/linux-amd64/agentd" "${VERSION}/platform/linux-amd64/agentd"
+    upload_oss "${RELEASE_DIR}/platform/darwin-arm64/agentgw" "${VERSION}/platform/darwin-arm64/agentgw"
+    upload_oss "${RELEASE_DIR}/platform/linux-amd64/agentgw" "${VERSION}/platform/linux-amd64/agentgw"
 
     if [[ -n "$APK_SHA" ]]; then
       upload_oss "${RELEASE_DIR}/bin/agentapp.apk" "${VERSION}/bin/agentapp.apk"
@@ -483,6 +483,7 @@ ls -lh "${RELEASE_DIR}/bin/"
 echo ""
 echo "  Tarball: release/phone-talk-${VERSION}.tar.gz"
 echo "  Manifest: ${MANIFEST_PATH}"
+echo "  Platform binaries: ${RELEASE_DIR}/platform/"
 echo ""
 echo "  首次安装:"
 echo "    tar xzf phone-talk-${VERSION}.tar.gz"

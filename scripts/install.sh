@@ -459,7 +459,7 @@ stop_services() {
   fi
 }
 
-# Resolve packaged-release artifacts from ./bin or development artifacts from ../out.
+# Resolve packaged-release artifacts from ./bin, ./platform, or development artifacts from ../out.
 resolve_artifact() {
   local kind="$1"
   shift
@@ -471,6 +471,10 @@ resolve_artifact() {
       candidates+=("$OUT_DIR/$name")
     done
   fi
+  # npm package distributes binaries under platform/<os-arch>/
+  for name in "$@"; do
+    candidates+=("$PACKAGE_ROOT/platform/$name")
+  done
   for name in "$@"; do
     candidates+=("$BIN_DIR/$name")
   done

@@ -33,10 +33,17 @@ fs.mkdirSync(installDir, { recursive: true });
 
 for (const name of ['agentgw', 'agentd']) {
   const src = path.join(srcDir, name);
+  // Legacy flat install (for direct user execution)
   const dst = path.join(installDir, name);
+  // Platform-structured install (for install.sh upgrade path)
+  const platformDst = path.join(installDir, 'platform', platform);
+  fs.mkdirSync(platformDst, { recursive: true });
+  const platformBin = path.join(platformDst, name);
   if (fs.existsSync(src)) {
     fs.copyFileSync(src, dst);
     fs.chmodSync(dst, 0o755);
+    fs.copyFileSync(src, platformBin);
+    fs.chmodSync(platformBin, 0o755);
     console.log(`agnet: installed ${name} (${platform})`);
   }
 }
