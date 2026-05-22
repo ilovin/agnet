@@ -138,6 +138,7 @@ echo "[release] Domain: ${DOMAIN}"
 echo "[release] CDN: ${CDN_DOMAIN}"
 rm -rf "$RELEASE_DIR"
 mkdir -p "$RELEASE_DIR/platform/darwin-arm64" "$RELEASE_DIR/platform/linux-amd64"
+mkdir -p "$RELEASE_DIR/bin"
 
 # ── Go binaries ─────────────────────────────────────────────────────
 echo "[release] Building Go binaries in parallel..."
