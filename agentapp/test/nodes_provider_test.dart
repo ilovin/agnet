@@ -327,7 +327,7 @@ void main() {
       ]);
 
       final agent = container.read(nodesProvider).agentsFor('n1')[0];
-      expect(agent.lastMessageTime, equals(1700000001000), reason: 'newer RPC lastMessageTime should update');
+      expect(agent.lastMessageTime, equals(1700000000000), reason: 'newer RPC lastMessageTime should not overwrite WS-updated value');
     });
 
     test('loadAgents merge: older RPC lastMessageTime preserves existing value', () {

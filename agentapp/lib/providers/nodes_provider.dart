@@ -69,8 +69,7 @@ class NodesNotifier extends StateNotifier<NodeState> {
     for (final rpcAgent in rpcAgents) {
       final prev = existing[rpcAgent.id];
       if (prev != null) {
-        // Use RPC status as authoritative source; WS events are for real-time
-        // updates between RPC refreshes, but RPC represents current ground truth.
+        // Preserve WS-updated dynamic fields, update static fields from RPC
         merged.add(AgentModel(
           id: rpcAgent.id,
           nodeId: rpcAgent.nodeId,
@@ -83,23 +82,20 @@ class NodesNotifier extends StateNotifier<NodeState> {
           attachMode: rpcAgent.attachMode,
           projectName: rpcAgent.projectName,
           sessionId: rpcAgent.sessionId,
-          // Dynamic fields from RPC (authoritative)
-          status: rpcAgent.status,
-          runtimeState: rpcAgent.runtimeState,
-          sessionState: rpcAgent.sessionState,
-          sessionStateReason: rpcAgent.sessionStateReason,
-          sessionControl: rpcAgent.sessionControl,
-          providerState: rpcAgent.providerState,
-          providerScope: rpcAgent.providerScope,
-          providerWriteMode: rpcAgent.providerWriteMode,
-          providerReadOnlyReason: rpcAgent.providerReadOnlyReason,
-          permissionMode: rpcAgent.permissionMode,
-          isReadOnly: rpcAgent.isReadOnly,
-          readOnlyReason: rpcAgent.readOnlyReason,
-          lastMessageTime: (rpcAgent.lastMessageTime != null &&
-                  (prev.lastMessageTime == null || rpcAgent.lastMessageTime! > prev.lastMessageTime!))
-              ? rpcAgent.lastMessageTime
-              : prev.lastMessageTime,
+          // Dynamic fields preserved from WS (local state)
+          status: prev.status,
+          runtimeState: prev.runtimeState,
+          sessionState: prev.sessionState,
+          sessionStateReason: prev.sessionStateReason,
+          sessionControl: prev.sessionControl,
+          providerState: prev.providerState,
+          providerScope: prev.providerScope,
+          providerWriteMode: prev.providerWriteMode,
+          providerReadOnlyReason: prev.providerReadOnlyReason,
+          permissionMode: prev.permissionMode,
+          isReadOnly: prev.isReadOnly,
+          readOnlyReason: prev.readOnlyReason,
+          lastMessageTime: prev.lastMessageTime,
         ));
       } else {
         // New agent from RPC
@@ -136,21 +132,14 @@ class NodesNotifier extends StateNotifier<NodeState> {
   void _handleAgentStatus(Map<String, dynamic> params) {
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String?;
-    print('[WS] agent.status_changed nodeId=$nodeId agentId=$agentId status=${params['status']}');
-    if (nodeId.isEmpty || agentId == null || agentId.isEmpty) {
-      print('[WS] agent.status_changed: missing nodeId or agentId, skipping');
-      return;
-    }
+    if (nodeId.isEmpty || agentId == null || agentId.isEmpty) return;
     final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
     final idx = agentList.indexWhere((a) => a.id == agentId);
-    print('[WS] agent.status_changed: found ${agentList.length} agents, idx=$idx');
     if (idx == -1) {
-      print('[WS] agent.status_changed: agent not found, refreshing');
       _refreshAgents(nodeId);
       return;
     }
     final status = _parseAgentStatus(params['status'] as String? ?? '');
-    print('[WS] agent.status_changed: updating status to $status');
     if ((params['status'] as String? ?? '') == 'removed') {
       agentList.removeAt(idx);
       final updated = Map<String, List<AgentModel>>.from(state.agents);
@@ -184,7 +173,6 @@ class NodesNotifier extends StateNotifier<NodeState> {
       providerWriteMode: params['providerWriteMode'] as String?,
       providerReadOnlyReason: params['providerReadOnlyReason'] as String?,
       permissionMode: params['permissionMode'] as String?,
-      // Defensive: never let an older WS lastMessageTime overwrite a newer one.
       lastMessageTime: (() {
         final wsTime = params.containsKey('lastMessageTime')
             ? (params['lastMessageTime'] as num?)?.toInt()
