@@ -669,6 +669,45 @@ func TestAutoAttachExistingWithEmptySessionFileCreatesDisplayAgent(t *testing.T)
 	}
 }
 
+func TestAutoAttachExistingDeduplicatesSameSessionAcrossPIDs(t *testing.T) {
+	m := newTestManager(t)
+
+	// Two processes with same provider+sessionID but different PIDs.
+	// Both have interactive terminals so ClassifyAttachCandidate returns "auto".
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{
+			{
+				PID:       1111,
+				Provider:  "hermes",
+				WorkDir:   "/repo",
+				Cmd:       "hermes",
+				Args:      []string{"shell", "--session", "sess-1"},
+				SessionID: "sess-1",
+				Terminal:  "/dev/ttys001",
+			},
+			{
+				PID:       2222,
+				Provider:  "hermes",
+				WorkDir:   "/repo",
+				Cmd:       "hermes",
+				Args:      []string{"shell", "--session", "sess-1"},
+				SessionID: "sess-1",
+				Terminal:  "/dev/ttys002",
+			},
+		}, nil
+	})
+
+	m.AutoAttachExisting()
+
+	agents := m.List()
+	if len(agents) != 1 {
+		for _, ag := range agents {
+			t.Logf("agent: id=%s pid=%d provider=%s", ag.ID, ag.PID, ag.Provider)
+		}
+		t.Fatalf("expected 1 deduplicated agent for same provider+session, got %d", len(agents))
+	}
+}
+
 func TestAutoAttachExistingSkipsAmbiguousCandidates(t *testing.T) {
 	m := newTestManager(t)
 

@@ -1828,12 +1828,37 @@ func (m *Manager) AutoAttachExisting() {
 		log.Printf("warning: scan existing processes: %v", err)
 		return
 	}
+
+	// Collect existing session keys from store to prevent duplicates
+	// across periodic scans for the same provider+sessionID.
+	existingSessions := make(map[string]bool)
+	records, err := m.store.ListAgents()
+	if err == nil {
+		for _, r := range records {
+			if r.ResumeSessionID != "" {
+				existingSessions[r.Provider+"|"+r.ResumeSessionID] = true
+			}
+		}
+	}
+	seenSessions := make(map[string]bool) // within-scan deduplication
+
 	for _, proc := range procs {
 		candidate := m.ClassifyAttachCandidate(proc)
 		if candidate.Decision != AttachDecisionAuto && candidate.Decision != AttachDecisionDisplay {
 			log.Printf("[AutoAttach] Skipping %s pid %d: %s", proc.Provider, proc.PID, candidate.Reason)
 			continue
 		}
+
+		// Deduplicate: skip if we already track this provider+sessionID.
+		if proc.SessionID != "" {
+			key := proc.Provider + "|" + proc.SessionID
+			if existingSessions[key] || seenSessions[key] {
+				log.Printf("[AutoAttach] Skipping %s pid %d: already tracking %s session %s", proc.Provider, proc.PID, proc.Provider, proc.SessionID)
+				continue
+			}
+			seenSessions[key] = true
+		}
+
 		if ag, err := m.Attach(proc); err != nil {
 			log.Printf("warning: auto-attach pid %d: %v", proc.PID, err)
 		} else {
