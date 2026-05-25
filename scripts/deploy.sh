@@ -716,6 +716,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             build_agentgw_mac
             build_agentd_linux
             deploy_local
+            ./scripts/package.sh
             deploy_remote
             restart_agentgw
             deploy_mobile
