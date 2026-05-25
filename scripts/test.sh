@@ -1146,6 +1146,80 @@ except:
   fi
   echo ""
 
+  # ── Test 17: bash -n syntax check on all scripts/*.sh ────────────────
+  test_name="bash -n syntax check for all scripts/*.sh"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local syntax_ok=1
+  for sh_file in scripts/*.sh; do
+    local syntax_err
+    if ! syntax_err=$(bash -n "$sh_file" 2>&1); then
+      echo -e "${RED}[scripts]   Syntax error in $sh_file: $syntax_err${NC}"
+      syntax_ok=0
+    fi
+  done
+
+  if [[ $syntax_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 18: key scripts have executable permission ───────────────────
+  test_name="key scripts have executable permission"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local exec_ok=1
+  for f in scripts/deploy.sh scripts/build.sh scripts/install.sh scripts/package.sh scripts/test.sh scripts/release.sh; do
+    [[ -e "$f" ]] || continue
+    if [[ ! -x "$f" ]]; then
+      echo -e "${RED}[scripts]   Not executable: $f${NC}"
+      exec_ok=0
+    fi
+  done
+
+  if [[ $exec_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 19: deploy.sh local --dry-run ───────────────────────────────
+  test_name="deploy.sh local --dry-run (DEPLOY_DRY_RUN=1)"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name (~1-2 min)"
+
+  # Pre-condition: dry-run CHECK_ONLY validates existing dist artifacts before
+  # package.sh recreates them; ensure dist/ has real binaries from a prior build.
+  if [[ ! -e "dist/platform/darwin-arm64/agentgw" ]]; then
+    echo "[scripts]   Pre-condition: dist/agentgw absent, running build.sh + package.sh..."
+    bash scripts/build.sh >/dev/null 2>&1 && bash scripts/package.sh >/dev/null 2>&1 || true
+  fi
+
+  local dry_run_log
+  dry_run_log=$(mktemp -t phone-talk-dry-run.XXXX)
+  if DEPLOY_DRY_RUN=1 bash scripts/deploy.sh local >"$dry_run_log" 2>&1; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+    rm -f "$dry_run_log"
+  else
+    local dry_rc=$?
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name (exit=$dry_rc)${NC}"
+    echo "--- last 30 lines ---"
+    tail -30 "$dry_run_log"
+    rm -f "$dry_run_log"
+  fi
+  echo ""
+
   # ── Summary ──────────────────────────────────────────────────────────
   echo "========================================"
   echo "       SCRIPTS TEST SUMMARY"

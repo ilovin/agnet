@@ -648,8 +648,13 @@ EOF
 # ── Gateway management ────────────────────────────────────────────────
 
 restart_agentgw() {
-    echo "[deploy] Refreshing local gateway runtime via install.sh restart..."
-    bash "$INSTALL_SCRIPT" restart
+    if [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]]; then
+        echo "[deploy] DEPLOY_DRY_RUN=1: skipping actual restart, running CHECK_ONLY validation..."
+        CHECK_ONLY=1 bash "$INSTALL_SCRIPT" restart
+    else
+        echo "[deploy] Refreshing local gateway runtime via install.sh restart..."
+        bash "$INSTALL_SCRIPT" restart
+    fi
 }
 
 # ── Help ──────────────────────────────────────────────────────────────
@@ -716,10 +721,13 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             build_agentgw_mac
             build_agentd_linux
             deploy_local
+            # dry-run: run CHECK_ONLY validation against existing dist artifacts BEFORE
+            # package.sh recreates them, so a missing artifact is caught immediately.
+            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] && restart_agentgw
             ./scripts/package.sh
-            deploy_remote
-            restart_agentgw
-            deploy_mobile
+            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_remote
+            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || restart_agentgw
+            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
             ;;
         web)
             shift || true

@@ -658,6 +658,14 @@ PY
 }
 
 restart_services() {
+  if [[ "${CHECK_ONLY:-}" == "1" ]]; then
+    step "[install] CHECK_ONLY=1: 仅校验二进制路径，跳过实际重启"
+    detect_local_agentd >/dev/null 2>&1 || true
+    detect_binary >/dev/null || { err "[install] CHECK_ONLY=1: 找不到 agentgw 二进制，校验失败"; return 1; }
+    step "[install] CHECK_ONLY=1: 二进制路径解析 OK"
+    return 0
+  fi
+
   stop_services
 
   sync_local_agentgw_binary
