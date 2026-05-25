@@ -142,8 +142,21 @@ func (m *Manager) LoadFromStore() error {
 	if err != nil {
 		return fmt.Errorf("list agents from store: %w", err)
 	}
+	// claudeWatcherTodo collects Claude agents whose jsonl watcher must be
+	// re-spawned after agentd restart. We can't start the watchers while
+	// holding m.mu because newSessionWatcher() calls m.Get() (which takes
+	// m.mu.RLock) and would deadlock. So defer watcher startup until after
+	// the lock is released below.
+	type claudeWatcherTodo struct {
+		agentID   string
+		ag        *Agent
+		workDir   string
+		pid       int
+		sessionID string
+	}
+	var claudeTodos []claudeWatcherTodo
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	loadedAttached := make(map[string]struct{})
 	loadedByPID := make(map[string]struct{})
 	loadedBySession := make(map[string]struct{})
@@ -240,6 +253,41 @@ func (m *Manager) LoadFromStore() error {
 			}
 		}
 		m.agents[r.ID] = ag
+
+		// Queue Claude agents for jsonl watcher re-spawn after the lock is
+		// released. Without this, the agent's EventBuf stays frozen at the
+		// pre-restart state and live appends by the running Claude CLI are
+		// never reflected in the API. Mirrors the re-attach path's watcher
+		// startup logic (see manager.go ReAttach Claude branch).
+		if r.Provider == "claude" && r.PID > 0 {
+			claudeTodos = append(claudeTodos, claudeWatcherTodo{
+				agentID:   r.ID,
+				ag:        ag,
+				workDir:   r.WorkDir,
+				pid:       r.PID,
+				sessionID: r.ResumeSessionID,
+			})
+		}
+	}
+	m.mu.Unlock()
+
+	// Spawn jsonl watchers for restored Claude agents now that the lock is
+	// released; newSessionWatcher() acquires m.mu.RLock internally.
+	for _, t := range claudeTodos {
+		sessionFile := m.findSessionFile(t.pid, t.workDir)
+		if sessionFile == "" {
+			log.Printf("[LoadFromStore] Could not find jsonl session file for Claude agent %s (PID %d); watcher not started", t.agentID, t.pid)
+			continue
+		}
+		cb := m.makeWatcherCallback(t.agentID, t.ag)
+		w := m.newSessionWatcher("claude", t.sessionID, sessionFile, t.workDir, t.pid, cb, t.agentID)
+		w.SetSkipExisting(true)
+		if err := w.Start(); err != nil {
+			log.Printf("[LoadFromStore] Watcher start failed for Claude agent %s: %v", t.agentID, err)
+			continue
+		}
+		t.ag.setWatcher(w)
+		log.Printf("[LoadFromStore] Spawned jsonl watcher for Claude agent %s (PID %d, session %s)", t.agentID, t.pid, sessionFile)
 	}
 	return nil
 }
