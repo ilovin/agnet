@@ -721,15 +721,62 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         web)
             echo "[deploy] Running web release..."
+            if is_release_up_to_date; then
+                echo "[deploy] Binaries unchanged since last release. Skipping web release."
+                exit 0
+            fi
             ./scripts/build.sh web
             ./scripts/package.sh
-            echo "[deploy] Web release completed (OSS publish not implemented in test)"
+            deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
+            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
+            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+            echo "[deploy] Web release completed"
             ;;
         npm)
             echo "[deploy] Running npm release..."
+            if is_release_up_to_date; then
+                echo "[deploy] Binaries unchanged since last release. Skipping npm release."
+                exit 0
+            fi
             ./scripts/build.sh go
             ./scripts/package.sh
-            echo "[deploy] NPM publish completed (dry-run in test)"
+
+            # Copy packaged artifacts to npm package
+            NPM_PKG_DIR="npm/agnet"
+            rm -rf "$NPM_PKG_DIR/platform" "$NPM_PKG_DIR/install.sh" "$NPM_PKG_DIR/static"
+            if [[ -d "dist/platform" ]]; then
+                cp -r "dist/platform" "$NPM_PKG_DIR/platform"
+            fi
+            if [[ -f "dist/install.sh" ]]; then
+                cp "dist/install.sh" "$NPM_PKG_DIR/install.sh"
+            fi
+            if [[ -d "dist/static" ]]; then
+                cp -r "dist/static" "$NPM_PKG_DIR/static"
+            fi
+
+            # Update package.json version
+            if command -v node &>/dev/null; then
+                node -e "
+const fs = require('fs');
+const pkg = JSON.parse(fs.readFileSync('$NPM_PKG_DIR/package.json', 'utf8'));
+pkg.version = '${VERSION}';
+fs.writeFileSync('$NPM_PKG_DIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
+console.log('[deploy] Updated npm package version to ${VERSION}');
+"
+            else
+                echo "[deploy] WARNING: node not found, skipping package.json version update"
+            fi
+
+            # Publish
+            if [[ "${NPM_DRY_RUN:-}" == "1" ]]; then
+                echo "[deploy] NPM dry-run: cd $NPM_PKG_DIR && npm publish --dry-run"
+                (cd "$NPM_PKG_DIR" && npm publish --dry-run)
+            else
+                echo "[deploy] Publishing npm package..."
+                (cd "$NPM_PKG_DIR" && npm publish --access public)
+            fi
+
+            echo "[deploy] NPM release completed"
             ;;
         tunnelhub)
             echo "[deploy] Running tunnelhub deployment..."
