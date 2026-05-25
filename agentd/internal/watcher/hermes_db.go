@@ -18,6 +18,26 @@ var findHermesStateDBFunc = findHermesStateDB
 // Exposed as a var so tests can shorten it.
 var hermesDBWatcherInterval = 3 * time.Second
 
+// SetFindHermesStateDBForTest replaces the function used to locate the Hermes
+// state.db. Returns a restore function callers should defer.
+//
+// This exists so integration tests in other packages (agent, ws) can inject a
+// temporary sqlite DB. It is the only supported override path; production
+// code must not rely on it.
+func SetFindHermesStateDBForTest(fn func() string) (restore func()) {
+	orig := findHermesStateDBFunc
+	findHermesStateDBFunc = fn
+	return func() { findHermesStateDBFunc = orig }
+}
+
+// SetHermesDBWatcherIntervalForTest shortens the polling interval used by
+// HermesDBWatcher.loop. Returns a restore function callers should defer.
+func SetHermesDBWatcherIntervalForTest(d time.Duration) (restore func()) {
+	orig := hermesDBWatcherInterval
+	hermesDBWatcherInterval = d
+	return func() { hermesDBWatcherInterval = orig }
+}
+
 // HermesStateDBHistory loads all conversation events from the Hermes state.db
 // for the most recently active session. Returns events, the session ID, and any error.
 func HermesStateDBHistory() ([]ConversationEvent, string, error) {
@@ -142,6 +162,13 @@ type HermesDBWatcher struct {
 	callback func(event ConversationEvent)
 	onSwitch func(newSessionID string)
 
+	// isSending, when set and returning true, suppresses OnSessionSwitch
+	// firings: the caller (Manager) is currently driving a request and a
+	// chunk.Done will arrive shortly with the authoritative session id, so
+	// the watcher should not pre-empt it. New-message emission within the
+	// same session is unaffected.
+	isSending func() bool
+
 	stop chan struct{}
 	once sync.Once
 
@@ -180,6 +207,18 @@ func (w *HermesDBWatcher) OnSessionSwitch(fn func(newSessionID string)) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.onSwitch = fn
+}
+
+// SetSendingChecker injects a predicate the watcher consults before firing
+// OnSessionSwitch. While the predicate returns true, session-switch detection
+// is suppressed (but in-session new-message emission still runs). This avoids
+// races with chunk.Done in hermesSend (see plan §3.6).
+//
+// Pass nil to remove the checker.
+func (w *HermesDBWatcher) SetSendingChecker(fn func() bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.isSending = fn
 }
 
 // SetSessionID updates the session this watcher is tracking. Used after a
@@ -251,6 +290,7 @@ func (w *HermesDBWatcher) poll() {
 	seeded := w.seeded
 	lastTS := w.lastTS
 	onSwitch := w.onSwitch
+	isSending := w.isSending
 
 	if currentSession == "" {
 		// Watcher was constructed without an initial session id; nothing to
@@ -260,10 +300,17 @@ func (w *HermesDBWatcher) poll() {
 	}
 
 	if latestSessionID != currentSession {
-		// Session switch detected. Don't try to track lastTS for the new
-		// session here — let the caller decide what to do (typically: write
-		// a session-changed marker + call SetSessionID, which seeds lastTS).
+		// Session switch detected. If a request is currently in flight,
+		// suppress the switch — chunk.Done will follow with the authoritative
+		// session id and call SetSessionID. We also do not fall through to the
+		// in-session emit branch because lastTS belongs to the *old* session
+		// and any rows for the new session would be wrongly attributed.
 		w.mu.Unlock()
+		if isSending != nil && isSending() {
+			log.Printf("[HermesDB][agent=%s] session switch %s->%s suppressed: send in flight",
+				w.agentID, currentSession, latestSessionID)
+			return
+		}
 		if onSwitch != nil {
 			onSwitch(latestSessionID)
 		}

@@ -228,6 +228,16 @@ func (m *Manager) LoadFromStore() error {
 					_ = m.appendAndPersistEvent(r.ID, ag, data)
 				}
 			}
+			// Start state.db poller so /clear-style switches in the running
+			// hermes CLI are detected after agentd restart.
+			cb := m.makeWatcherCallback(r.ID, ag)
+			w := m.newSessionWatcher(r.Provider, r.ResumeSessionID, "", r.WorkDir, r.PID, cb, r.ID)
+			w.SetSkipExisting(true)
+			if err := w.Start(); err != nil {
+				log.Printf("[LoadFromStore] Warning: hermes watcher start failed for %s: %v", r.ID, err)
+			} else {
+				ag.setWatcher(w)
+			}
 		}
 		m.agents[r.ID] = ag
 	}
@@ -2044,9 +2054,17 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			}
 		}
 
-		if !isDisplayOnly && (sessionFile != "" || info.Provider == "opencode") {
+		if !isDisplayOnly && (sessionFile != "" || info.Provider == "opencode" || info.Provider == "hermes") {
 			cb := m.makeWatcherCallback(existing.ID, existing)
-			w := m.newSessionWatcher(info.Provider, sessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)
+			watcherSessionID := sessionID
+			if info.Provider == "hermes" {
+				// Preserve any existing (possibly server-issued) resume id; the
+				// scanner-supplied --session arg is not authoritative for hermes.
+				if curID, _ := m.GetResumeSessionID(existing.ID); curID != "" {
+					watcherSessionID = curID
+				}
+			}
+			w := m.newSessionWatcher(info.Provider, watcherSessionID, sessionFile, info.WorkDir, info.PID, cb, existing.ID)
 			w.SetSkipExisting(true)
 			if err := w.Start(); err != nil {
 				log.Printf("[ReAttach] Warning: watcher start failed for %s: %v", existing.ID, err)
@@ -2091,6 +2109,18 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			}
 		} else if err != nil {
 			log.Printf("[Attach] Warning: failed to load Hermes history for %s: %v", id, err)
+		}
+
+		// Start state.db poller so /clear-style session switches are detected
+		// without requiring a fresh hermesSend round-trip.
+		cb := m.makeWatcherCallback(id, ag)
+		w := m.newSessionWatcher(info.Provider, sessionID, "", info.WorkDir, info.PID, cb, id)
+		w.SetSkipExisting(true)
+		if err := w.Start(); err != nil {
+			log.Printf("[Attach] Warning: hermes watcher start failed for %s: %v", id, err)
+		} else {
+			ag.setWatcher(w)
+			log.Printf("[Attach] Started hermes watcher for agent %s", id)
 		}
 
 		return ag, nil
@@ -2294,6 +2324,84 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 // For opencode it returns an OpenCodeDBWatcher that reads from the SQLite DB;
 // for claude (and others) it returns a ClaudeWatcher on the JSONL file.
 func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent), agentID string) watcher.SessionWatcher {
+	if provider == "hermes" {
+		w := watcher.NewHermesDBWatcher(agentID, sessionID, cb)
+		// Suppress switch detection while a hermesSend is in flight; chunk.Done
+		// is the authoritative source in that window. See plan §3.6.
+		w.SetSendingChecker(func() bool {
+			ag := m.Get(agentID)
+			if ag == nil {
+				return false
+			}
+			return ag.IsSending()
+		})
+		w.OnSessionSwitch(func(newSessionID string) {
+			ag := m.Get(agentID)
+			if ag == nil {
+				return
+			}
+			// Plan §3.3 mandates this strict order: 1) UpdateResumeSessionID
+			// (so any send already racing in uses the new id), 2) clear
+			// persisted events, 3) reset live EventBuf, 4) reload new
+			// session's history into both, 5) broadcast cleared +
+			// status_changed.
+			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
+				log.Printf("[Watcher] Failed to update session ID for %s on hermes session switch: %v", agentID, err)
+			}
+			if err := m.ClearConversationEvents(agentID); err != nil {
+				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on hermes session switch: %v", agentID, err)
+			}
+			ag.EventBuf().Reset()
+			if historyEvents, err := watcher.HermesStateDBLoadSession(newSessionID); err == nil && len(historyEvents) > 0 {
+				log.Printf("[Watcher] Loaded %d historical events for hermes session switch %s → %s", len(historyEvents), sessionID, newSessionID)
+				for _, ev := range historyEvents {
+					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+					m.appendAndPersistEvent(agentID, ag, data)
+				}
+			}
+			// Tell the watcher about the new session so subsequent in-session
+			// emits use the right lastTS baseline.
+			if hw, ok := ag.Watcher().(*watcher.HermesDBWatcher); ok {
+				hw.SetSessionID(newSessionID)
+			}
+			m.mu.RLock()
+			onOut := m.onOutput
+			m.mu.RUnlock()
+			if onOut != nil {
+				onOut(agentID, map[string]any{
+					"type":    "conversation.cleared",
+					"agentId": agentID,
+				})
+			}
+			derived := m.DeriveAgentState(agentID)
+			m.mu.RLock()
+			onSC := m.onStatusChange
+			m.mu.RUnlock()
+			if onSC != nil {
+				params := map[string]any{
+					"agentId":            agentID,
+					"status":             string(ag.Status()),
+					"runtimeState":       derived.RuntimeState,
+					"sessionState":       derived.SessionState,
+					"sessionStateReason": derived.SessionStateReason,
+					"sessionControl":     derived.SessionControl,
+				}
+				if ag.Name != "" {
+					params["name"] = ag.Name
+				}
+				resumeID, _ := m.GetResumeSessionID(agentID)
+				if resumeID != "" {
+					params["sessionId"] = resumeID
+				}
+				onSC(agentID, map[string]any{
+					"jsonrpc": "2.0",
+					"method":  "agent.status_changed",
+					"params":  params,
+				})
+			}
+		})
+		return w
+	}
 	if provider == "opencode" && sessionID != "" {
 		w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
 		w.SetWorkDir(workDir)

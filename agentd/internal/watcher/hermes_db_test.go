@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -385,4 +386,69 @@ func TestHermesDBWatcher_SetSessionIDResetsLastTS(t *testing.T) {
 	if events[0].Text != "b1" || events[1].Text != "b2" {
 		t.Fatalf("unexpected events: %+v", events)
 	}
+}
+
+// TestHermesDBWatcher_SendingCheckerSuppressesSessionSwitch verifies M4 §4.3:
+// when isSending() returns true, OnSessionSwitch must NOT fire even if
+// state.db's most-recent session has flipped. New-message emission within the
+// same session (and recovery once isSending()==false) are tested separately.
+func TestHermesDBWatcher_SendingCheckerSuppressesSessionSwitch(t *testing.T) {
+	dbPath := hermesTestDB(t)
+	withFindHermesStateDBFunc(t, func() string { return dbPath })
+	withHermesDBWatcherInterval(t, 50*time.Millisecond)
+
+	hermesInsertSession(t, dbPath, "A", "2026-05-25T10:00:00Z")
+	hermesInsertMessage(t, dbPath, "A", "user", "a1", "2026-05-25T10:00:01Z")
+
+	col := &eventCollector{}
+	w := NewHermesDBWatcher("agent-1", "A", col.callback)
+	w.SetSkipExisting(true)
+
+	var switched int32
+	var switchedTo string
+	var switchMu sync.Mutex
+	w.OnSessionSwitch(func(newID string) {
+		switchMu.Lock()
+		switched++
+		switchedTo = newID
+		switchMu.Unlock()
+	})
+
+	var sending atomic.Bool
+	sending.Store(true)
+	w.SetSendingChecker(func() bool { return sending.Load() })
+
+	if err := w.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer w.Stop()
+
+	// Hermes flips current session to B while we are "sending".
+	hermesInsertSession(t, dbPath, "B", "2026-05-25T11:00:00Z")
+	hermesInsertMessage(t, dbPath, "B", "user", "b1", "2026-05-25T11:00:01Z")
+
+	// Wait long enough for several poll cycles to pass.
+	time.Sleep(300 * time.Millisecond)
+
+	switchMu.Lock()
+	got := switched
+	switchMu.Unlock()
+	if got != 0 {
+		t.Fatalf("OnSessionSwitch should be suppressed while sending, fired %d times (last=%q)", got, switchedTo)
+	}
+
+	// Now release the suppressor; switch should be observed on the next tick.
+	sending.Store(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		switchMu.Lock()
+		got = switched
+		last := switchedTo
+		switchMu.Unlock()
+		if got >= 1 && last == "B" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("OnSessionSwitch was not called with B after sending cleared")
 }

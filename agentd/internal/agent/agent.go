@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phone-talk/agentd/internal/eventbuf"
@@ -53,6 +54,12 @@ type Agent struct {
 	tmuxTarget           string
 
 	currentPermissionMode string
+
+	// sendingFlag is set while a hermesSend (or equivalent) is in flight.
+	// HermesDBWatcher consults this to suppress OnSessionSwitch when the
+	// app itself is the cause of imminent state.db churn — see
+	// docs/plans/p-hermes-state-db-polling.md §3.6.
+	sendingFlag atomic.Bool
 
 	// Status change callback (set by Manager)
 	onStatusChange StatusChangeCallback
@@ -211,6 +218,19 @@ func (a *Agent) SetCurrentPermissionMode(mode string) {
 	defer a.mu.Unlock()
 	a.currentPermissionMode = mode
 }
+
+// BeginSend marks this agent as actively sending a request. Used by hermesSend
+// to suppress HermesDBWatcher OnSessionSwitch firings while the app itself is
+// driving state.db writes (a chunk.Done is the authoritative session signal in
+// that window).
+func (a *Agent) BeginSend() { a.sendingFlag.Store(true) }
+
+// EndSend clears the in-flight send marker. Always defer this immediately
+// after BeginSend.
+func (a *Agent) EndSend() { a.sendingFlag.Store(false) }
+
+// IsSending reports whether a send is currently in flight for this agent.
+func (a *Agent) IsSending() bool { return a.sendingFlag.Load() }
 
 func (a *Agent) setPermissionPromptActive(active bool) {
 	a.mu.Lock()

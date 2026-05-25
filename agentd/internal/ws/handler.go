@@ -23,6 +23,7 @@ import (
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	"github.com/phone-talk/agentd/internal/hermesclient"
 	"github.com/phone-talk/agentd/internal/scanner"
+	"github.com/phone-talk/agentd/internal/watcher"
 )
 
 type handler struct {
@@ -2313,6 +2314,11 @@ func (h *handler) opencodeModels(req RPCRequest) RPCResponse {
 func (h *handler) hermesSend(req RPCRequest, ag *agent.Agent, message string, imageFiles, imagePaths []string) RPCResponse {
 	agentID := ag.ID
 
+	// Mark this agent as actively sending so HermesDBWatcher's poll loop
+	// suppresses session-switch firings until chunk.Done lands. Plan §3.6 / §4.1.
+	ag.BeginSend()
+	defer ag.EndSend()
+
 	// Record user message to EventBuffer + persistent store
 	eventData := map[string]any{
 		"role":       "user",
@@ -2411,6 +2417,11 @@ func (h *handler) hermesSend(req RPCRequest, ag *agent.Agent, message string, im
 			if chunk.SessionID != "" {
 				if err := h.server.manager.UpdateResumeSessionID(agentID, chunk.SessionID); err != nil {
 					log.Printf("[Hermes] Failed to update session ID for %s: %v", agentID, err)
+				}
+				// Sync the session id into the live HermesDBWatcher so it
+				// doesn't misread the next poll as a /clear-style switch.
+				if hw, ok := ag.Watcher().(*watcher.HermesDBWatcher); ok {
+					hw.SetSessionID(chunk.SessionID)
 				}
 			}
 			// Flush any remaining pending text
