@@ -1507,3 +1507,127 @@ func TestAttachSamePIDSessionSwitchRebindsToScannerSession(t *testing.T) {
 		t.Fatalf("expected rebind to scanner session sess-new, got %q", resumeID)
 	}
 }
+
+// TestLoadFromStoreRescansHermesAttachMetadata verifies that LoadFromStore
+// re-evaluates attach metadata (mode, readOnly, reason, tmuxTarget) for
+// restored hermes agents by scanning the running processes. After agentd
+// restart the in-memory Agent must reflect the live tmux pane situation,
+// not whatever defaults the freshly-constructed Agent struct carries.
+//
+// This is M2 of the hermes tmux migration (plan §6.2). Today it has no
+// user-visible effect (the hermes HTTP path bypasses attachReadOnly), but
+// it prepares the manager for the M3 PTY/tmux send route.
+func TestLoadFromStoreRescansHermesAttachMetadata(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	const pid = 9911
+	const agentID = "hermes-rescan-test"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:       agentID,
+		Name:     "hermes-rescan",
+		Provider: "hermes",
+		WorkDir:  workDir,
+		PID:      pid,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == pid && provider == "hermes"
+	})
+	m.SetHermesGatewayRunChecker(func(int) bool { return false })
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:        pid,
+			PPID:       1,
+			Provider:   "hermes",
+			Cmd:        "hermes",
+			WorkDir:    workDir,
+			Terminal:   "/dev/ttys004",
+			TmuxTarget: "sess:0.1",
+		}}, nil
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("expected hermes agent %s to be restored", agentID)
+	}
+	if got := ag.AttachMode(); got != scanner.AttachModeTmux {
+		t.Fatalf("expected attach mode %q after rescan, got %q", scanner.AttachModeTmux, got)
+	}
+	if ag.AttachReadOnly() {
+		t.Fatalf("expected hermes with tmux pane to be writable, got read-only (reason=%q)", ag.AttachReadOnlyReason())
+	}
+	if got := ag.TmuxTarget(); got != "sess:0.1" {
+		t.Fatalf("expected tmux target sess:0.1 after rescan, got %q", got)
+	}
+}
+
+// TestLoadFromStoreRescansHermesAttachMetadataNoTmux verifies the no-tmux
+// branch: the rescan must mark the agent observe-only with a non-empty
+// reason mentioning tmux availability.
+func TestLoadFromStoreRescansHermesAttachMetadataNoTmux(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	const pid = 9912
+	const agentID = "hermes-rescan-notmux"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:       agentID,
+		Name:     "hermes-rescan",
+		Provider: "hermes",
+		WorkDir:  workDir,
+		PID:      pid,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == pid && provider == "hermes"
+	})
+	m.SetHermesGatewayRunChecker(func(int) bool { return false })
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:      pid,
+			PPID:     1,
+			Provider: "hermes",
+			Cmd:      "hermes",
+			WorkDir:  workDir,
+			// No TmuxTarget -> read-only
+		}}, nil
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("expected hermes agent %s to be restored", agentID)
+	}
+	if !ag.AttachReadOnly() {
+		t.Fatalf("expected hermes without tmux pane to be read-only after rescan")
+	}
+	if reason := ag.AttachReadOnlyReason(); reason == "" {
+		t.Fatalf("expected non-empty read-only reason after rescan")
+	}
+}
