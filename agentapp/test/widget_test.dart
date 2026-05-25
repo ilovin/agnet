@@ -17,6 +17,7 @@ import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
 import 'package:agentapp/services/native_ws_channel.dart';
+import 'package:agentapp/widgets/permission_request_card.dart';
 
 Future<void> pumpNodeCard(
   WidgetTester tester,
@@ -1175,4 +1176,113 @@ void main() {
     // No timestamp text should appear
     expect(find.text('16:00'), findsNothing);
   });
+
+  // ─── R-010 T5: PermissionRequestCard widget tests ──────────────────────
+
+  testWidgets('PermissionRequestCard renders Bash tool with command',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PermissionRequestCard(
+            permissionRequest: {
+              'tool_name': 'Bash',
+              'request_id': 'req-001',
+              'input': {'command': 'git status'},
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Tool: Bash'), findsOneWidget);
+    expect(find.text('git status'), findsOneWidget);
+    expect(find.text('Allow'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+  });
+
+  testWidgets('PermissionRequestCard renders Edit tool with file path and new_string',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PermissionRequestCard(
+            permissionRequest: {
+              'tool_name': 'Edit',
+              'request_id': 'req-002',
+              'input': {
+                'file_path': '/tmp/foo.dart',
+                'old_string': 'old content',
+                'new_string': 'new content',
+              },
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Tool: Edit'), findsOneWidget);
+    expect(find.text('/tmp/foo.dart'), findsOneWidget);
+    expect(find.text('new content'), findsOneWidget);
+    expect(find.text('Allow'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+  });
+
+  testWidgets('PermissionRequestCard renders Write tool with file path and content',
+      (WidgetTester tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: PermissionRequestCard(
+            permissionRequest: {
+              'tool_name': 'Write',
+              'request_id': 'req-003',
+              'input': {
+                'file_path': '/tmp/bar.txt',
+                'content': 'Hello, world!',
+              },
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Tool: Write'), findsOneWidget);
+    expect(find.text('/tmp/bar.txt'), findsOneWidget);
+    expect(find.text('Hello, world!'), findsOneWidget);
+    expect(find.text('Allow'), findsOneWidget);
+    expect(find.text('Deny'), findsOneWidget);
+  });
+
+  test(
+    'convertEventsToMessages passes permission_request payload to ChatMessage',
+    () {
+      final messages = convertEventsToMessages([
+        {
+          'seq': 1,
+          'role': 'system',
+          'text': '权限请求: Bash',
+          'raw': false,
+          'kind': 'permission_request',
+          'permissionRequest': {
+            'tool_name': 'Bash',
+            'request_id': 'req-x',
+            'input': {'command': 'ls -la'},
+          },
+        },
+      ]);
+
+      expect(messages, hasLength(1));
+      expect(messages[0].kind, equals('permission_request'));
+      expect(messages[0].permissionRequest, isNotNull);
+      expect(messages[0].permissionRequest!['tool_name'], equals('Bash'));
+      expect(
+        (messages[0].permissionRequest!['input'] as Map)['command'],
+        equals('ls -la'),
+      );
+    },
+  );
 }

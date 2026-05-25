@@ -24,6 +24,7 @@ import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
 import '../widgets/browser_screenshot_widget.dart';
+import '../widgets/permission_request_card.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
 /// Handles complex sequences including claude-code specific output.
@@ -190,6 +191,9 @@ class ChatMessage {
   final List<Map<String, dynamic>> activities;
   final List<String> images;
   final int? timestamp;
+  /// Non-null for `kind == 'permission_request'` events.
+  /// Shape: { tool_name: String, request_id: String, input: Map }
+  final Map<String, dynamic>? permissionRequest;
 
   /// true if this is a tool call (e.g. [Bash: git status])
   bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
@@ -228,6 +232,7 @@ class ChatMessage {
     this.activities = const [],
     this.images = const [],
     this.timestamp,
+    this.permissionRequest,
   });
 }
 
@@ -674,6 +679,28 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
 
     // Handle permission prompts - don't add to message list, handled by overlay
     if (kind == 'permission_prompt') {
+      continue;
+    }
+
+    // Handle permission_request events: carry the payload in ChatMessage.
+    if (kind == 'permission_request') {
+      flushMergeBuf();
+      flushActivityBuf();
+      flushThinkingBuf();
+      final payload = e['permissionRequest'];
+      messages.add(
+        ChatMessage(
+          role: role,
+          text: e['text'] as String? ?? '',
+          seq: seq,
+          isRaw: false,
+          kind: 'permission_request',
+          timestamp: _currentTimestamp,
+          permissionRequest: payload is Map
+              ? Map<String, dynamic>.from(payload)
+              : null,
+        ),
+      );
       continue;
     }
 
@@ -2265,6 +2292,10 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                 onResolvePermissionPrompt:
                                     reversed[idx].isPermissionPrompt
                                     ? _resolvePermissionPrompt
+                                    : null,
+                                onPermissionResponse:
+                                    reversed[idx].kind == 'permission_request'
+                                    ? _sendPermissionResponse
                                     : null,
                                 onToggleExpand: () {
                                   _lastUserTap = DateTime.now();
@@ -3990,6 +4021,8 @@ class MessageBubble extends StatelessWidget {
   final bool isLastAssistant;
   final bool showTimestamp;
   final Future<void> Function()? onResolvePermissionPrompt;
+  final Future<void> Function(String requestId, String behavior)?
+  onPermissionResponse;
   final VoidCallback? onToggleExpand;
 
   const MessageBubble({
@@ -3997,6 +4030,7 @@ class MessageBubble extends StatelessWidget {
     this.isLastAssistant = false,
     this.showTimestamp = false,
     this.onResolvePermissionPrompt,
+    this.onPermissionResponse,
     this.onToggleExpand,
   });
 
@@ -4014,6 +4048,15 @@ class MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Render structured permission_request card (kind == 'permission_request').
+    if (message.kind == 'permission_request' &&
+        message.permissionRequest != null) {
+      return PermissionRequestCard(
+        permissionRequest: message.permissionRequest!,
+        onPermissionResponse: onPermissionResponse,
+      );
+    }
+
     if (message.isPermissionPrompt) {
       final scheme = Theme.of(context).colorScheme;
       return Padding(
