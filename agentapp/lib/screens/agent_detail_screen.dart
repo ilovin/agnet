@@ -426,6 +426,10 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
         <String>[],
     if (map.containsKey('permissionRequest'))
       'permissionRequest': map['permissionRequest'],
+    // R-010 T1: pass through new interaction payloads without error if absent.
+    if (map.containsKey('askUserQuestion'))
+      'askUserQuestion': map['askUserQuestion'],
+    if (map.containsKey('exitPlanMode')) 'exitPlanMode': map['exitPlanMode'],
   };
   if (map['timestamp'] != null) {
     result['timestamp'] = (map['timestamp'] as num).toInt();
