@@ -1370,6 +1370,98 @@ func TestLoadFromStoreKeepsInteractiveHermesWhenNotGatewayRun(t *testing.T) {
 	}
 }
 
+// TestLoadFromStoreSpawnsClaudeJsonlWatcher verifies that after agentd restart,
+// LoadFromStore not only restores Claude agents from the store but also re-spawns
+// the JSONL watcher, so live appends by the running Claude CLI continue to flow
+// into the agent's event buffer. Regression test for the bug where Claude agents
+// went silent for 30+ minutes after agentd restart because the watcher was never
+// recreated.
+func TestLoadFromStoreSpawnsClaudeJsonlWatcher(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// Use the running test process as the "claude" PID so the OS-level
+	// process check will succeed; we still inject SetProcessRunningChecker
+	// so the provider check passes regardless of comm name.
+	pid := os.Getpid()
+	sessionID := "sess-loadfromstore-test"
+
+	// Build the Claude session fixture under HOME:
+	//   ~/.claude/sessions/<PID>.json    -> { "sessionId": "<sessionID>" }
+	//   ~/.claude/projects/<dirName>/<sessionID>.jsonl  (empty file is fine)
+	sessionsDir := filepath.Join(homeDir, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	pidFilePath := filepath.Join(sessionsDir, strconv.Itoa(pid)+".json")
+	if err := os.WriteFile(pidFilePath, []byte(`{"sessionId":"`+sessionID+`"}`), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+
+	// Mirror manager's projectDirName transformation for the workDir.
+	dirName := agent.NewManager(nil, "").FindSessionFileProjectDirName(workDir)
+	projectDir := filepath.Join(homeDir, ".claude", "projects", dirName)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	// Persist a Claude agent record as if it had been running before restart.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	agentID := "claude-restart-test"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:              agentID,
+		Name:            "claude-restart",
+		Provider:        "claude",
+		WorkDir:         workDir,
+		ResumeSessionID: sessionID,
+		PID:             pid,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == pid && provider == "claude"
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("expected Claude agent %s to be restored", agentID)
+	}
+	// Allow the watcher goroutine (started by Start) to settle if needed.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ag.Watcher() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ag.Watcher() == nil {
+		t.Fatalf("expected jsonl watcher to be spawned for restored Claude agent %s, got nil", agentID)
+	}
+	t.Cleanup(func() {
+		if w := ag.Watcher(); w != nil {
+			w.Stop()
+		}
+	})
+}
+
 func TestAttachSamePIDSessionSwitchRebindsToScannerSession(t *testing.T) {
 	m := newTestManager(t)
 	repoDir := t.TempDir()
