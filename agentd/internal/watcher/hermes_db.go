@@ -5,14 +5,23 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
+// findHermesStateDBFunc allows tests to inject a custom DB locator.
+var findHermesStateDBFunc = findHermesStateDB
+
+// hermesDBWatcherInterval is the polling interval for HermesDBWatcher.
+// Exposed as a var so tests can shorten it.
+var hermesDBWatcherInterval = 3 * time.Second
+
 // HermesStateDBHistory loads all conversation events from the Hermes state.db
 // for the most recently active session. Returns events, the session ID, and any error.
 func HermesStateDBHistory() ([]ConversationEvent, string, error) {
-	dbPath := findHermesStateDB()
+	dbPath := findHermesStateDBFunc()
 	if dbPath == "" {
 		return nil, "", nil
 	}
@@ -55,6 +64,44 @@ func HermesStateDBHistory() ([]ConversationEvent, string, error) {
 	return events, sessionID, nil
 }
 
+// HermesStateDBLoadSession loads all messages for a specific Hermes session ID.
+// Returns an empty slice (no error) if the DB is missing or the session has
+// no messages, so callers can use it without special-casing absence.
+func HermesStateDBLoadSession(sessionID string) ([]ConversationEvent, error) {
+	dbPath := findHermesStateDBFunc()
+	if dbPath == "" {
+		return nil, nil
+	}
+	if sessionID == "" {
+		return nil, nil
+	}
+
+	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT role, content, timestamp FROM messages WHERE session_id=? ORDER BY timestamp ASC`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []ConversationEvent
+	for rows.Next() {
+		var role, content, timestamp string
+		if err := rows.Scan(&role, &content, &timestamp); err != nil {
+			continue
+		}
+		events = append(events, ConversationEvent{
+			Role: role,
+			Text: content,
+		})
+	}
+	return events, nil
+}
+
 func findHermesStateDB() string {
 	home, _ := os.UserHomeDir()
 	candidates := []string{
@@ -75,4 +122,236 @@ func findHermesStateDB() string {
 		}
 	}
 	return ""
+}
+
+// HermesDBWatcher polls the Hermes state.db on a fixed interval and emits
+// ConversationEvents for new messages, plus an OnSessionSwitch callback when
+// Hermes' "current" session (the one with the latest message timestamp) flips
+// to a different ID — which is how Hermes signals a /clear-equivalent reset.
+//
+// Notes on scope (M1+M2):
+//   - This watcher only detects switches; it does not itself perform any
+//     manager-side bookkeeping (resume-id rewrite, history flush, etc.). The
+//     onSwitch callback is injected by the caller (Manager) and is responsible
+//     for that.
+//   - We assume one Hermes process per host. Multi-Hermes is out of scope.
+type HermesDBWatcher struct {
+	dbPath  string
+	agentID string // for logging only
+
+	callback func(event ConversationEvent)
+	onSwitch func(newSessionID string)
+
+	stop chan struct{}
+	once sync.Once
+
+	mu           sync.Mutex
+	sessionID    string
+	lastTS       string // last emitted message timestamp (RFC3339-ish string from messages.timestamp)
+	skipExisting bool
+	seeded       bool // true once we've initialised lastTS for the current session
+}
+
+// NewHermesDBWatcher returns a HermesDBWatcher bound to the given initial
+// session id. callback receives ConversationEvents for newly-appeared messages.
+func NewHermesDBWatcher(agentID, initialSessionID string, callback func(ConversationEvent)) *HermesDBWatcher {
+	return &HermesDBWatcher{
+		dbPath:    findHermesStateDBFunc(),
+		agentID:   agentID,
+		sessionID: initialSessionID,
+		callback:  callback,
+		stop:      make(chan struct{}),
+	}
+}
+
+// SetSkipExisting tells the watcher not to emit events that exist in the DB
+// at the time Start runs — useful when the caller has already loaded history
+// via HermesStateDBLoadSession and just wants live tail behaviour.
+func (w *HermesDBWatcher) SetSkipExisting(skip bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.skipExisting = skip
+}
+
+// OnSessionSwitch registers a callback that fires when Hermes' active session
+// (latest-message-timestamp) becomes different from the one this watcher was
+// constructed with (or last told about via SetSessionID).
+func (w *HermesDBWatcher) OnSessionSwitch(fn func(newSessionID string)) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onSwitch = fn
+}
+
+// SetSessionID updates the session this watcher is tracking. Used after a
+// chunk.Done that established a fresh session id; we reset lastTS to the
+// latest message timestamp of the new session so the next poll doesn't
+// re-emit chunk.Done's already-shipped messages.
+func (w *HermesDBWatcher) SetSessionID(sessionID string) {
+	w.mu.Lock()
+	w.sessionID = sessionID
+	w.lastTS = w.latestTimestampForSessionLocked(sessionID)
+	w.seeded = true
+	w.mu.Unlock()
+}
+
+// Start launches the polling goroutine. If no Hermes DB is found, Start is a
+// no-op (returns nil) — same convention as OpenCodeDBWatcher.
+func (w *HermesDBWatcher) Start() error {
+	if w.dbPath == "" {
+		return nil
+	}
+	go w.loop()
+	return nil
+}
+
+// Stop signals the polling goroutine to exit. Safe to call multiple times.
+func (w *HermesDBWatcher) Stop() {
+	w.once.Do(func() {
+		close(w.stop)
+	})
+}
+
+func (w *HermesDBWatcher) loop() {
+	ticker := time.NewTicker(hermesDBWatcherInterval)
+	defer ticker.Stop()
+	// Run an immediate first poll so skipExisting / lastTS seeding doesn't
+	// have to wait a whole tick.
+	w.poll()
+	for {
+		select {
+		case <-w.stop:
+			return
+		case <-ticker.C:
+			w.poll()
+		}
+	}
+}
+
+// poll executes one polling cycle. Concurrency-safe: only the goroutine
+// started by Start invokes it, but it shares state with public setters via
+// w.mu.
+func (w *HermesDBWatcher) poll() {
+	db, err := sql.Open("sqlite", w.dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
+	if err != nil {
+		return
+	}
+	defer db.Close()
+
+	var latestSessionID, latestTS string
+	err = db.QueryRow(`SELECT s.id, MAX(m.timestamp)
+		FROM sessions s JOIN messages m ON s.id=m.session_id
+		GROUP BY s.id ORDER BY MAX(m.timestamp) DESC LIMIT 1`).Scan(&latestSessionID, &latestTS)
+	if err != nil {
+		return
+	}
+
+	w.mu.Lock()
+	currentSession := w.sessionID
+	skipExisting := w.skipExisting
+	seeded := w.seeded
+	lastTS := w.lastTS
+	onSwitch := w.onSwitch
+
+	if currentSession == "" {
+		// Watcher was constructed without an initial session id; nothing to
+		// do until SetSessionID is called.
+		w.mu.Unlock()
+		return
+	}
+
+	if latestSessionID != currentSession {
+		// Session switch detected. Don't try to track lastTS for the new
+		// session here — let the caller decide what to do (typically: write
+		// a session-changed marker + call SetSessionID, which seeds lastTS).
+		w.mu.Unlock()
+		if onSwitch != nil {
+			onSwitch(latestSessionID)
+		}
+		return
+	}
+
+	// Same session. Seed lastTS on first poll so we don't emit historical
+	// content that the caller already loaded via HermesStateDBLoadSession.
+	if !seeded {
+		// Always seed to current latest, regardless of skipExisting — when
+		// skipExisting is false we still expect the caller to have flushed
+		// history; the live-emit guard is "timestamp > lastTS".
+		w.lastTS = latestTS
+		w.seeded = true
+		w.mu.Unlock()
+		_ = skipExisting // currently both branches behave the same; kept for clarity
+		return
+	}
+
+	if latestTS <= lastTS {
+		// No new messages.
+		w.mu.Unlock()
+		return
+	}
+
+	// New messages exist for the current session. Load them and emit those
+	// strictly newer than lastTS.
+	w.mu.Unlock()
+
+	rows, err := db.Query(`SELECT role, content, timestamp FROM messages
+		WHERE session_id=? AND timestamp>?
+		ORDER BY timestamp ASC`, currentSession, lastTS)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var newEvents []ConversationEvent
+	var newLast string
+	for rows.Next() {
+		var role, content, ts string
+		if err := rows.Scan(&role, &content, &ts); err != nil {
+			continue
+		}
+		newEvents = append(newEvents, ConversationEvent{
+			Role: role,
+			Text: content,
+		})
+		newLast = ts
+	}
+
+	if len(newEvents) == 0 {
+		return
+	}
+
+	for _, ev := range newEvents {
+		if w.callback != nil {
+			w.callback(ev)
+		}
+	}
+
+	w.mu.Lock()
+	// Only advance lastTS if the session hasn't been swapped out from
+	// underneath us during the emit loop.
+	if w.sessionID == currentSession && newLast > w.lastTS {
+		w.lastTS = newLast
+	}
+	w.mu.Unlock()
+}
+
+// latestTimestampForSessionLocked must be called with w.mu held. It opens a
+// short-lived connection to the DB and returns the latest message timestamp
+// for the given session, or "" on error / no rows.
+func (w *HermesDBWatcher) latestTimestampForSessionLocked(sessionID string) string {
+	if w.dbPath == "" || sessionID == "" {
+		return ""
+	}
+	db, err := sql.Open("sqlite", w.dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=3000")
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	var ts sql.NullString
+	if err := db.QueryRow(`SELECT MAX(timestamp) FROM messages WHERE session_id=?`, sessionID).Scan(&ts); err != nil {
+		return ""
+	}
+	if !ts.Valid {
+		return ""
+	}
+	return ts.String
 }
