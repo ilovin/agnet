@@ -7,12 +7,13 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var tuiDecorationRe = regexp.MustCompile(`[─━│┃┌┐└┘├┤┬┴┼╔╗╚╝║═⏺⏵✻※❯⎿]`)
 var whitespaceRe = regexp.MustCompile(`\s+`)
 var markdownRe = regexp.MustCompile("[*`#\\[\\]]")
-var nonWordRe = regexp.MustCompile(`[^a-z0-9]+`)
+var nonWordRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 
 const (
 	contentMatchMinScore = 2
@@ -232,8 +233,8 @@ func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate
 	}
 
 	paneText := cleanTUIText(paneRaw)
-	if len(paneText) < 20 {
-		log.Printf("[ContentMatch] reject: pane text too short (%d)", len(paneText))
+	if utf8.RuneCountInString(paneText) < 20 {
+		log.Printf("[ContentMatch] reject: pane text too short (%d runes)", utf8.RuneCountInString(paneText))
 		return nil
 	}
 

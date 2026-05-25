@@ -37,7 +37,25 @@ Thumbs.db
 
 # Claude worktrees and project files
 .claude/
+
+# Agentd binaries and data
 agentd/agentd
+agentd/agentd-*
+agentd/*.db
+agentd/~/.agentd/
+
+# Agentgw binaries
+agentgw/agentgw
+agentgw/cmd/agentgw/agentgw
+
+# Mobile builds
+*.apk
+*.ipa
+
+# npm package build artifacts (populated by release.sh)
+npm/agnet/platform/
+npm/agnet/static/
+npm/agnet/install.sh
 
 # Debug artifacts
 scripts/debug/

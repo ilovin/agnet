@@ -716,6 +716,75 @@ func TestContentMatchSessionByPaneTextAcceptsClearWinner(t *testing.T) {
 	}
 }
 
+func TestCleanTUITextPreservesUnicode(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"需要把 hermes client 的 URL 指向正确的地址", "需要把 hermes client 的 url 指向正确的地址"},
+		{"有 2 个测试失败", "有 2 个测试失败"},
+		{"为什么捕获的panel就那么点信息", "为什么捕获的panel就那么点信息"},
+		{"根据这个 PRD 的开发路径", "根据这个 prd 的开发路径"},
+		{"Bash(go test ./...) の結果", "bash go test の結果"},
+		{"⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt", "bypass permissions on shift tab to cycle esc to interrupt"},
+	}
+
+	for _, c := range cases {
+		got := cleanTUIText(c.input)
+		if got != c.expected {
+			t.Errorf("cleanTUIText(%q) = %q, want %q", c.input, got, c.expected)
+		}
+	}
+}
+
+func TestContentMatchSessionByPaneTextWithChinese(t *testing.T) {
+	dir := t.TempDir()
+
+	leftPath := filepath.Join(dir, "sess-cn-left.jsonl")
+	rightPath := filepath.Join(dir, "sess-cn-right.jsonl")
+
+	left := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"需要把 hermes client 的 URL 指向正确的地址，然后检查端口是否开放\"}]}}\n"
+	right := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"为什么捕获的panel就那么点信息，可能和contentmatch有关\"}]}}\n"
+	if err := os.WriteFile(leftPath, []byte(left), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rightPath, []byte(right), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []SessionCandidate{
+		{SessionID: "sess-cn-left", JSONLPath: leftPath, LastActivity: time.Now()},
+		{SessionID: "sess-cn-right", JSONLPath: rightPath, LastActivity: time.Now().Add(-time.Second)},
+	}
+
+	// Pane content contains Chinese text matching sess-cn-left
+	pane := "需要把 hermes client 的 URL 指向正确的地址"
+	matched := contentMatchSessionByPaneText(pane, candidates, nil)
+	if matched == nil || matched.SessionID != "sess-cn-left" {
+		t.Fatalf("expected sess-cn-left clear match, got %+v", matched)
+	}
+}
+
+func TestContentMatchSessionByPaneTextWithMixedCJKAndToolUse(t *testing.T) {
+	dir := t.TempDir()
+
+	leftPath := filepath.Join(dir, "sess-cjk-tool.jsonl")
+	left := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"echo 你好世界\"}}]}}\n"
+	if err := os.WriteFile(leftPath, []byte(left), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []SessionCandidate{
+		{SessionID: "sess-cjk-tool", JSONLPath: leftPath, LastActivity: time.Now()},
+	}
+
+	pane := "echo 你好世界"
+	matched := contentMatchSessionByPaneText(pane, candidates, nil)
+	if matched == nil || matched.SessionID != "sess-cjk-tool" {
+		t.Fatalf("expected sess-cjk-tool match for CJK tool_use fingerprint, got %+v", matched)
+	}
+}
+
 func TestFilterByPaneActivityDoesNotHardPruneOutsideTolerance(t *testing.T) {
 	paneActivity := time.Now()
 	inTolerance := SessionCandidate{SessionID: "near", LastActivity: paneActivity.Add(-2 * time.Minute)}
