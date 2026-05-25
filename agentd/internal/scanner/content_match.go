@@ -1,12 +1,18 @@
 package scanner
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unicode/utf8"
 )
 
@@ -16,9 +22,98 @@ var markdownRe = regexp.MustCompile("[*`#\\[\\]]")
 var nonWordRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 
 const (
-	contentMatchMinScore = 2
+	contentMatchMinScore  = 2
 	contentMatchMinMargin = 2
 )
+
+// Cache TTLs are vars so tests can inject shorter values.
+var (
+	contentMatchCacheTTL = 30 * time.Second
+	fingerprintsCacheTTL = 60 * time.Second
+)
+
+// contentMatchCacheMaxEntries caps both caches to keep memory bounded.
+const contentMatchCacheMaxEntries = 200
+
+// contentMatchCacheEntry stores a cached match result with expiry.
+// Result may be nil (negative cache) — both presence-of-entry and result==nil are valid.
+type contentMatchCacheEntry struct {
+	result *SessionCandidate
+	expiry time.Time
+}
+
+var (
+	contentMatchCacheMu sync.Mutex
+	contentMatchCache   = map[string]contentMatchCacheEntry{}
+)
+
+// fingerprintsCacheEntry stores extracted fingerprints keyed by path+mtime+size.
+type fingerprintsCacheEntry struct {
+	fps      []string
+	maxFPs   int
+	expiry   time.Time
+}
+
+var (
+	fingerprintsCacheMu sync.Mutex
+	fingerprintsCache   = map[string]fingerprintsCacheEntry{}
+)
+
+// extractFingerprintsCallCount counts every full extractFingerprints recompute.
+// Used by tests via atomicLoadFingerprintCallCount to verify cache behavior.
+var extractFingerprintsCallCount int64
+
+func atomicLoadFingerprintCallCount() int64 {
+	return atomic.LoadInt64(&extractFingerprintsCallCount)
+}
+
+func clearContentMatchCache() {
+	contentMatchCacheMu.Lock()
+	contentMatchCache = map[string]contentMatchCacheEntry{}
+	contentMatchCacheMu.Unlock()
+}
+
+func clearFingerprintsCache() {
+	fingerprintsCacheMu.Lock()
+	fingerprintsCache = map[string]fingerprintsCacheEntry{}
+	fingerprintsCacheMu.Unlock()
+}
+
+// candidateSetHash builds a stable hash from sorted session IDs so that any
+// change in candidate set (add/remove) yields a different cache key.
+func candidateSetHash(candidates []SessionCandidate) string {
+	ids := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		ids = append(ids, c.SessionID)
+	}
+	sort.Strings(ids)
+	h := sha1.New()
+	for _, id := range ids {
+		h.Write([]byte(id))
+		h.Write([]byte{'|'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// forcedSetHash hashes forcedSessionIDs deterministically; nil/empty -> "".
+func forcedSetHash(forcedSessionIDs map[string]bool) string {
+	if len(forcedSessionIDs) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(forcedSessionIDs))
+	for k, v := range forcedSessionIDs {
+		if v {
+			ids = append(ids, k)
+		}
+	}
+	sort.Strings(ids)
+	h := sha1.New()
+	for _, id := range ids {
+		h.Write([]byte(id))
+		h.Write([]byte{'|'})
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // captureTmuxPane captures the visible content of a tmux pane.
 func captureTmuxPane(target string) (string, error) {
@@ -86,7 +181,67 @@ func appendToolUseFingerprints(dst []string, block map[string]interface{}) []str
 // extractFingerprints extracts text snippets from a JSONL session file.
 // Scans backwards from the end, collecting fingerprints from assistant text,
 // user messages, and tool_use blocks. Stops when maxFPs fingerprints are collected.
+//
+// Results are cached by (path, mtime, size). Cache is invalidated when the file
+// is rewritten (mtime/size change) or when the entry exceeds fingerprintsCacheTTL.
 func extractFingerprints(jsonlPath string, maxFPs int) []string {
+	info, err := os.Stat(jsonlPath)
+	if err != nil {
+		return nil
+	}
+
+	cacheKey := jsonlPath + "|" + info.ModTime().UTC().Format(time.RFC3339Nano) + "|" +
+		strconvFormatInt(info.Size())
+
+	now := time.Now()
+	fingerprintsCacheMu.Lock()
+	if entry, ok := fingerprintsCache[cacheKey]; ok && now.Before(entry.expiry) && entry.maxFPs >= maxFPs {
+		// Slice down to requested size.
+		fps := entry.fps
+		if len(fps) > maxFPs {
+			fps = fps[:maxFPs]
+		}
+		fingerprintsCacheMu.Unlock()
+		return fps
+	}
+	fingerprintsCacheMu.Unlock()
+
+	fps := extractFingerprintsUncached(jsonlPath, maxFPs)
+	atomic.AddInt64(&extractFingerprintsCallCount, 1)
+
+	fingerprintsCacheMu.Lock()
+	if len(fingerprintsCache) >= contentMatchCacheMaxEntries {
+		// Simple eviction: clear the whole cache when full.
+		fingerprintsCache = map[string]fingerprintsCacheEntry{}
+	}
+	fingerprintsCache[cacheKey] = fingerprintsCacheEntry{
+		fps:    fps,
+		maxFPs: maxFPs,
+		expiry: now.Add(fingerprintsCacheTTL),
+	}
+	fingerprintsCacheMu.Unlock()
+
+	return fps
+}
+
+// strconvFormatInt avoids importing strconv just for size formatting.
+func strconvFormatInt(n int64) string {
+	// Tiny manual base-10 formatter; size is non-negative.
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// extractFingerprintsUncached is the actual JSONL parsing path.
+func extractFingerprintsUncached(jsonlPath string, maxFPs int) []string {
 	f, err := os.Open(jsonlPath)
 	if err != nil {
 		return nil
@@ -224,7 +379,45 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, force
 		return nil
 	}
 
-	return contentMatchSessionByPaneText(paneRaw, candidates, forcedSessionIDs)
+	return contentMatchSessionWithCache(tmuxTarget, paneRaw, candidates, forcedSessionIDs)
+}
+
+// contentMatchSessionWithCache wraps the scoring path with a result cache keyed
+// by tmuxTarget + candidate set hash + forced set hash. The cache TTL must be
+// longer than the AutoAttachExisting scan period (15s) so consecutive scans
+// find a hit; default 30s.
+//
+// Cached negative results (nil) are also returned to skip recomputation when
+// no candidate matches the pane.
+func contentMatchSessionWithCache(tmuxTarget, paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	key := tmuxTarget + "|" + candidateSetHash(candidates) + "|" + forcedSetHash(forcedSessionIDs)
+
+	now := time.Now()
+	contentMatchCacheMu.Lock()
+	if entry, ok := contentMatchCache[key]; ok && now.Before(entry.expiry) {
+		contentMatchCacheMu.Unlock()
+		log.Printf("[ContentMatch] cache hit key=%s", key)
+		return entry.result
+	}
+	contentMatchCacheMu.Unlock()
+
+	result := contentMatchSessionByPaneText(paneRaw, candidates, forcedSessionIDs)
+
+	contentMatchCacheMu.Lock()
+	if len(contentMatchCache) >= contentMatchCacheMaxEntries {
+		contentMatchCache = map[string]contentMatchCacheEntry{}
+	}
+	contentMatchCache[key] = contentMatchCacheEntry{
+		result: result,
+		expiry: now.Add(contentMatchCacheTTL),
+	}
+	contentMatchCacheMu.Unlock()
+
+	return result
 }
 
 func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
