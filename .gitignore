@@ -8,6 +8,8 @@
 
 # Build output
 /out/
+/dist/
+.buildhash
 /release/**/*.tar.gz
 /release/**/bin/
 /release/**/static/

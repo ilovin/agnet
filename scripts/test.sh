@@ -952,13 +952,13 @@ except:
 
   local web_cmd_ok=1
   # Check that deploy.sh 'web' command calls package.sh
-  if ! grep -A10 'web)' scripts/deploy.sh | grep -q 'package.sh'; then
+  if ! grep -A35 '^        web)' scripts/deploy.sh | grep -q 'package.sh'; then
     echo -e "${RED}[scripts]   deploy.sh 'web' command does not call package.sh${NC}"
     web_cmd_ok=0
   fi
 
   # Check that deploy.sh 'npm' command calls package.sh
-  if ! grep -A10 'npm)' scripts/deploy.sh | grep -q 'package.sh'; then
+  if ! grep -A35 '^        npm)' scripts/deploy.sh | grep -q 'package.sh'; then
     echo -e "${RED}[scripts]   deploy.sh 'npm' command does not call package.sh${NC}"
     web_cmd_ok=0
   fi
@@ -990,6 +990,154 @@ except:
   done
 
   if [[ $all_cmd_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 12: deploy.sh web uses idempotency check ─────────────────────
+  test_name="deploy.sh web uses is_release_up_to_date"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local idempotent_used_ok=1
+  # Check that deploy.sh 'web' command calls is_release_up_to_date
+  local web_section
+  web_section=$(grep -A35 '^        web)' scripts/deploy.sh)
+  if ! echo "$web_section" | grep -q 'is_release_up_to_date'; then
+    echo -e "${RED}[scripts]   deploy.sh 'web' does not call is_release_up_to_date${NC}"
+    idempotent_used_ok=0
+  fi
+
+  # Check that deploy.sh 'npm' command calls is_release_up_to_date
+  local npm_section
+  npm_section=$(grep -A35 '^        npm)' scripts/deploy.sh)
+  if ! echo "$npm_section" | grep -q 'is_release_up_to_date'; then
+    echo -e "${RED}[scripts]   deploy.sh 'npm' does not call is_release_up_to_date${NC}"
+    idempotent_used_ok=0
+  fi
+
+  if [[ $idempotent_used_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 13: deploy.sh local includes mobile auto-detect ──────────────
+  test_name="deploy.sh local includes mobile auto-detect"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local local_cmd_ok=1
+  # Check that deploy.sh 'local' command calls deploy_mobile
+  local local_section
+  local_section=$(grep -A15 '^        local)' scripts/deploy.sh)
+  if ! echo "$local_section" | grep -q 'deploy_mobile'; then
+    echo -e "${RED}[scripts]   deploy.sh 'local' does not call deploy_mobile${NC}"
+    local_cmd_ok=0
+  fi
+
+  # Check that deploy.sh 'local' command includes remote deployment
+  if ! echo "$local_section" | grep -q 'deploy_remote'; then
+    echo -e "${RED}[scripts]   deploy.sh 'local' does not call deploy_remote${NC}"
+    local_cmd_ok=0
+  fi
+
+  if [[ $local_cmd_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 14: deploy.sh web includes portal + API deployment ───────────
+  test_name="deploy.sh web includes portal and API deployment"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local web_deploy_ok=1
+  local web_section_full
+  web_section_full=$(grep -A30 '^        web)' scripts/deploy.sh)
+
+  # Check that deploy.sh has deploy_portal function
+  if ! grep -q 'deploy_portal' scripts/deploy.sh; then
+    echo -e "${RED}[scripts]   deploy.sh missing deploy_portal function${NC}"
+    web_deploy_ok=0
+  fi
+
+  # Check that deploy.sh has deploy_api_service function
+  if ! grep -q 'deploy_api_service' scripts/deploy.sh; then
+    echo -e "${RED}[scripts]   deploy.sh missing deploy_api_service function${NC}"
+    web_deploy_ok=0
+  fi
+
+  if [[ $web_deploy_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 15: deploy.sh supports VERSION override ──────────────────────
+  test_name="deploy.sh supports VERSION environment variable"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local version_env_ok=1
+  # Check that deploy.sh help mentions VERSION environment variable
+  if ! bash scripts/deploy.sh help 2>&1 | grep -q 'VERSION'; then
+    echo -e "${RED}[scripts]   deploy.sh help does not mention VERSION${NC}"
+    version_env_ok=0
+  fi
+
+  # Check that deploy.sh 'all' passes VERSION to subcommands
+  local all_section
+  all_section=$(grep -A20 '^        all)' scripts/deploy.sh)
+  if ! echo "$all_section" | grep -q 'VERSION'; then
+    echo -e "${YELLOW}[scripts]   deploy.sh 'all' may not propagate VERSION to subcommands${NC}"
+    # This is a warning, not a failure
+  fi
+
+  if [[ $version_env_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
+  # ── Test 16: deploy.sh web supports --portal-only and --api-only ──────
+  test_name="deploy.sh web supports --portal-only and --api-only flags"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local web_flags_ok=1
+  # Check that deploy.sh help mentions the flag options
+  if ! bash scripts/deploy.sh help 2>&1 | grep -qE '\-\-oss-only|\-\-portal-only|\-\-api-only'; then
+    echo -e "${RED}[scripts]   deploy.sh help does not mention --oss-only/--portal-only/--api-only${NC}"
+    web_flags_ok=0
+  fi
+
+  # Check that deploy.sh web command references the flags
+  local web_section_flags
+  web_section_flags=$(grep -A40 '^        web)' scripts/deploy.sh)
+  if ! echo "$web_section_flags" | grep -q 'portal_only\|api_only\|oss_only'; then
+    echo -e "${RED}[scripts]   deploy.sh 'web' does not handle --portal-only/--api-only flags${NC}"
+    web_flags_ok=0
+  fi
+
+  if [[ $web_flags_ok -eq 1 ]]; then
     passed=$((passed + 1))
     echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
   else

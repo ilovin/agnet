@@ -664,6 +664,7 @@ binaries have not changed (compared against last manifest.json).
 TARGETS:
   local       Build + deploy local runtime + remote servers + auto-install mobile
   web         Build + package + OSS publish + portal deploy + API deploy
+              Options: --oss-only, --portal-only, --api-only
   npm         Build + package + npm publish
   tunnelhub   Trigger tunnelhub build and deploy
   all         Run local + web + npm + tunnelhub (full release cycle)
@@ -720,16 +721,40 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             deploy_mobile
             ;;
         web)
-            echo "[deploy] Running web release..."
+            shift || true
+            local oss_only=false portal_only=false api_only=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --oss-only)    oss_only=true; shift ;;
+                    --portal-only) portal_only=true; shift ;;
+                    --api-only)    api_only=true; shift ;;
+                    *) echo "Unknown web option: $1"; exit 1 ;;
+                esac
+            done
+            local do_oss=true do_portal=true do_api=true
+            if [[ "$oss_only" == true ]]; then
+                do_portal=false; do_api=false
+            elif [[ "$portal_only" == true ]]; then
+                do_oss=false; do_api=false
+            elif [[ "$api_only" == true ]]; then
+                do_oss=false; do_portal=false
+            fi
+            echo "[deploy] Running web release (oss=$do_oss portal=$do_portal api=$do_api)..."
             if is_release_up_to_date; then
                 echo "[deploy] Binaries unchanged since last release. Skipping web release."
                 exit 0
             fi
             ./scripts/build.sh web
             ./scripts/package.sh
-            deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
-            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
-            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+            if [[ "$do_oss" == true ]]; then
+                deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
+            fi
+            if [[ "$do_portal" == true ]]; then
+                deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
+            fi
+            if [[ "$do_api" == true ]]; then
+                deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+            fi
             echo "[deploy] Web release completed"
             ;;
         npm)
