@@ -795,3 +795,176 @@ func TestFilterByPaneActivityDoesNotHardPruneOutsideTolerance(t *testing.T) {
 		t.Fatalf("expected no hard prune (2 candidates), got %d", len(got))
 	}
 }
+
+func TestContentMatchCache_HitReturnsSameResult(t *testing.T) {
+	clearContentMatchCache()
+	clearFingerprintsCache()
+
+	dir := t.TempDir()
+	winPath := filepath.Join(dir, "sess-win.jsonl")
+	losePath := filepath.Join(dir, "sess-lose.jsonl")
+
+	winner := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	loser := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"noise only\"}]}}\n"
+	if err := os.WriteFile(winPath, []byte(winner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(losePath, []byte(loser), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := []SessionCandidate{
+		{SessionID: "sess-win", JSONLPath: winPath, LastActivity: time.Now()},
+		{SessionID: "sess-lose", JSONLPath: losePath, LastActivity: time.Now().Add(-time.Second)},
+	}
+
+	pane := "deploy alpha beta gamma epsilon"
+
+	// First call: scoring runs, cache populates.
+	first := contentMatchSessionWithCache("tmux-target-A", pane, candidates, nil)
+	if first == nil || first.SessionID != "sess-win" {
+		t.Fatalf("expected first call to return sess-win, got %+v", first)
+	}
+
+	calls := atomicLoadFingerprintCallCount()
+
+	// Second call with same key: should hit cache and not invoke extractFingerprints.
+	second := contentMatchSessionWithCache("tmux-target-A", pane, candidates, nil)
+	if second == nil || second.SessionID != "sess-win" {
+		t.Fatalf("expected second call to return cached sess-win, got %+v", second)
+	}
+	if atomicLoadFingerprintCallCount() != calls {
+		t.Fatalf("expected cache hit (no new extractFingerprints calls); before=%d after=%d", calls, atomicLoadFingerprintCallCount())
+	}
+}
+
+func TestContentMatchCache_TTLExpires(t *testing.T) {
+	clearContentMatchCache()
+	clearFingerprintsCache()
+
+	prevTTL := contentMatchCacheTTL
+	contentMatchCacheTTL = 50 * time.Millisecond
+	defer func() { contentMatchCacheTTL = prevTTL }()
+
+	dir := t.TempDir()
+	winPath := filepath.Join(dir, "sess-win.jsonl")
+	winner := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	if err := os.WriteFile(winPath, []byte(winner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []SessionCandidate{
+		{SessionID: "sess-win", JSONLPath: winPath, LastActivity: time.Now()},
+	}
+	pane := "deploy alpha beta gamma epsilon"
+
+	first := contentMatchSessionWithCache("tmux-target-TTL", pane, candidates, nil)
+	if first == nil {
+		t.Fatalf("expected first call to populate cache")
+	}
+
+	// Force fingerprint cache invalidation so we can detect a recompute by call count.
+	clearFingerprintsCache()
+	callsBefore := atomicLoadFingerprintCallCount()
+
+	time.Sleep(80 * time.Millisecond)
+
+	second := contentMatchSessionWithCache("tmux-target-TTL", pane, candidates, nil)
+	if second == nil {
+		t.Fatalf("expected post-TTL call to recompute and return result")
+	}
+	if atomicLoadFingerprintCallCount() == callsBefore {
+		t.Fatalf("expected extractFingerprints to be called again after TTL expiry")
+	}
+}
+
+func TestContentMatchCache_InvalidatesOnCandidateChange(t *testing.T) {
+	clearContentMatchCache()
+	clearFingerprintsCache()
+
+	dir := t.TempDir()
+	aPath := filepath.Join(dir, "sess-a.jsonl")
+	bPath := filepath.Join(dir, "sess-b.jsonl")
+	a := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	b := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"another distinct fingerprint set\"}]}}\n"
+	if err := os.WriteFile(aPath, []byte(a), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bPath, []byte(b), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pane := "deploy alpha beta gamma epsilon"
+
+	cands1 := []SessionCandidate{
+		{SessionID: "sess-a", JSONLPath: aPath, LastActivity: time.Now()},
+	}
+	cands2 := []SessionCandidate{
+		{SessionID: "sess-a", JSONLPath: aPath, LastActivity: time.Now()},
+		{SessionID: "sess-b", JSONLPath: bPath, LastActivity: time.Now()},
+	}
+
+	_ = contentMatchSessionWithCache("tmux-target-INV", pane, cands1, nil)
+	callsBefore := atomicLoadFingerprintCallCount()
+
+	// Different candidate set -> different key -> must recompute.
+	_ = contentMatchSessionWithCache("tmux-target-INV", pane, cands2, nil)
+	if atomicLoadFingerprintCallCount() == callsBefore {
+		t.Fatalf("expected extractFingerprints to be called for changed candidate set")
+	}
+}
+
+func TestExtractFingerprintsCache_HitOnSameMtime(t *testing.T) {
+	clearFingerprintsCache()
+
+	dir := t.TempDir()
+	jsonlPath := filepath.Join(dir, "sess-cache.jsonl")
+	line := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"some fingerprint content here\"}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first := extractFingerprints(jsonlPath, 20)
+	if len(first) == 0 {
+		t.Fatalf("expected first call to return fingerprints")
+	}
+	callsBefore := atomicLoadFingerprintCallCount()
+
+	second := extractFingerprints(jsonlPath, 20)
+	if len(second) != len(first) {
+		t.Fatalf("expected cached fingerprints to match first call: first=%d second=%d", len(first), len(second))
+	}
+	if atomicLoadFingerprintCallCount() != callsBefore {
+		t.Fatalf("expected fingerprints cache hit (no recompute); before=%d after=%d", callsBefore, atomicLoadFingerprintCallCount())
+	}
+}
+
+func TestExtractFingerprintsCache_InvalidatesOnMtime(t *testing.T) {
+	clearFingerprintsCache()
+
+	dir := t.TempDir()
+	jsonlPath := filepath.Join(dir, "sess-mtime.jsonl")
+	line := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"first content fingerprint\"}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = extractFingerprints(jsonlPath, 20)
+	callsBefore := atomicLoadFingerprintCallCount()
+
+	// Modify mtime by writing fresh content with a slight delay (filesystem mtime resolution).
+	time.Sleep(20 * time.Millisecond)
+	newLine := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"different content fingerprint after change\"}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(newLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Bump mtime explicitly to be safe across filesystems.
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(jsonlPath, future, future); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = extractFingerprints(jsonlPath, 20)
+	if atomicLoadFingerprintCallCount() == callsBefore {
+		t.Fatalf("expected fingerprints recompute after mtime change")
+	}
+}
