@@ -17,6 +17,9 @@ import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/screens/connections_screen.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
 import 'package:agentapp/services/native_ws_channel.dart';
+import 'package:agentapp/widgets/ask_user_question_card.dart';
+import 'package:agentapp/widgets/exit_plan_mode_card.dart';
+import 'package:agentapp/models/claude_interaction_models.dart';
 import 'package:agentapp/widgets/permission_request_card.dart';
 
 Future<void> pumpNodeCard(
@@ -1283,6 +1286,238 @@ void main() {
         (messages[0].permissionRequest!['input'] as Map)['command'],
         equals('ls -la'),
       );
+    },
+  );
+
+  // ─── R-010 T3: AskUserQuestionCard widget tests ────────────────────────
+
+  testWidgets('AskUserQuestionCard single-select: tap option submits immediately',
+      (WidgetTester tester) async {
+    String? sent;
+    final payload = AskUserQuestionPayload(
+      toolUseId: 'tid-1',
+      questions: [
+        const AskUserQuestion(
+          question: 'Choose a fruit',
+          header: 'Fruits',
+          multiSelect: false,
+          options: [
+            AskUserQuestionOption(label: 'Apple', description: 'A red fruit'),
+            AskUserQuestionOption(label: 'Banana'),
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AskUserQuestionCard(
+            payload: payload,
+            onSend: (c) => sent = c,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Options rendered
+    expect(find.text('Apple'), findsOneWidget);
+    expect(find.text('Banana'), findsOneWidget);
+    expect(find.text('Fruits'), findsOneWidget);
+
+    // Tap first option — should send immediately
+    await tester.tap(find.text('Apple'));
+    await tester.pump();
+
+    expect(sent, equals('Choose a fruit: Apple'));
+    expect(find.text('已提交'), findsOneWidget);
+  });
+
+  testWidgets('AskUserQuestionCard multi-select: shows submit button, requires selection',
+      (WidgetTester tester) async {
+    String? sent;
+    final payload = AskUserQuestionPayload(
+      toolUseId: 'tid-2',
+      questions: [
+        const AskUserQuestion(
+          question: 'Pick languages',
+          multiSelect: true,
+          options: [
+            AskUserQuestionOption(label: 'Dart'),
+            AskUserQuestionOption(label: 'Go'),
+            AskUserQuestionOption(label: 'Python'),
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AskUserQuestionCard(
+            payload: payload,
+            onSend: (c) => sent = c,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Submit button is present but disabled (nothing selected)
+    final submitBtn = find.widgetWithText(FilledButton, '提交');
+    expect(submitBtn, findsOneWidget);
+
+    // Select Dart and Go
+    await tester.tap(find.text('Dart'));
+    await tester.pump();
+    await tester.tap(find.text('Go'));
+    await tester.pump();
+
+    // Now submit
+    await tester.tap(submitBtn);
+    await tester.pump();
+
+    expect(sent, equals('Pick languages: Dart, Go'));
+    expect(find.text('已提交'), findsOneWidget);
+  });
+
+  // ─── R-010 T4: ExitPlanModeCard widget tests ───────────────────────────
+
+  testWidgets('ExitPlanModeCard approve: sends 批准计划 immediately',
+      (WidgetTester tester) async {
+    String? sent;
+    final payload = ExitPlanModePayload(
+      toolUseId: 'tid-3',
+      plan: '1. Analyse\n2. Code\n3. Test',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ExitPlanModeCard(
+            payload: payload,
+            onSend: (c) => sent = c,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('批准'), findsOneWidget);
+    expect(find.text('拒绝'), findsOneWidget);
+    expect(find.text('1. Analyse\n2. Code\n3. Test'), findsOneWidget);
+
+    await tester.tap(find.text('批准'));
+    await tester.pump();
+
+    expect(sent, equals('批准计划'));
+    expect(find.text('已批准'), findsOneWidget);
+  });
+
+  testWidgets('ExitPlanModeCard reject with feedback: shows field, sends 拒绝计划:feedback',
+      (WidgetTester tester) async {
+    String? sent;
+    final payload = ExitPlanModePayload(
+      toolUseId: 'tid-4',
+      plan: 'Step 1',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: ExitPlanModeCard(
+              payload: payload,
+              onSend: (c) => sent = c,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // First tap shows feedback field
+    await tester.tap(find.text('拒绝'));
+    await tester.pump();
+
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('确认拒绝'), findsOneWidget);
+
+    // Type feedback
+    await tester.enterText(find.byType(TextField), 'Too risky');
+    await tester.pump();
+
+    // Second tap (now "确认拒绝") submits
+    await tester.tap(find.text('确认拒绝'));
+    await tester.pump();
+
+    expect(sent, equals('拒绝计划：Too risky'));
+    expect(find.text('已拒绝'), findsOneWidget);
+  });
+
+  // ─── R-010 T3+T4: convertEventsToMessages integration tests ───────────
+
+  test(
+    'convertEventsToMessages recognises ask_user_question kind and passes payload',
+    () {
+      final messages = convertEventsToMessages([
+        {
+          'seq': 1,
+          'role': 'assistant',
+          'text': '',
+          'raw': false,
+          'kind': 'ask_user_question',
+          'askUserQuestion': {
+            'tool_use_id': 'tu-1',
+            'questions': [
+              {
+                'question': 'Choose one',
+                'header': 'H',
+                'multi_select': false,
+                'options': [
+                  {'label': 'A', 'description': ''},
+                ],
+              },
+            ],
+          },
+        },
+      ]);
+
+      expect(messages, hasLength(1));
+      expect(messages[0].kind, equals('ask_user_question'));
+      expect(messages[0].askUserQuestion, isNotNull);
+      expect(messages[0].askUserQuestion!.toolUseId, equals('tu-1'));
+      expect(messages[0].askUserQuestion!.questions, hasLength(1));
+      expect(
+        messages[0].askUserQuestion!.questions[0].question,
+        equals('Choose one'),
+      );
+    },
+  );
+
+  test(
+    'convertEventsToMessages recognises exit_plan_mode kind and passes payload',
+    () {
+      final messages = convertEventsToMessages([
+        {
+          'seq': 1,
+          'role': 'assistant',
+          'text': '',
+          'raw': false,
+          'kind': 'exit_plan_mode',
+          'exitPlanMode': {
+            'tool_use_id': 'tu-2',
+            'plan': 'Step 1\nStep 2',
+          },
+        },
+      ]);
+
+      expect(messages, hasLength(1));
+      expect(messages[0].kind, equals('exit_plan_mode'));
+      expect(messages[0].exitPlanMode, isNotNull);
+      expect(messages[0].exitPlanMode!.toolUseId, equals('tu-2'));
+      expect(messages[0].exitPlanMode!.plan, equals('Step 1\nStep 2'));
     },
   );
 }

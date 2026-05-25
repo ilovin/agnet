@@ -23,7 +23,10 @@ import '../theme/agent_status_theme.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
+import '../models/claude_interaction_models.dart';
+import '../widgets/ask_user_question_card.dart';
 import '../widgets/browser_screenshot_widget.dart';
+import '../widgets/exit_plan_mode_card.dart';
 import '../widgets/permission_request_card.dart';
 
 /// Strips ANSI escape sequences from PTY output and handles terminal control characters.
@@ -195,6 +198,12 @@ class ChatMessage {
   /// Shape: { tool_name: String, request_id: String, input: Map }
   final Map<String, dynamic>? permissionRequest;
 
+  /// Non-null for `kind == 'ask_user_question'` events.
+  final AskUserQuestionPayload? askUserQuestion;
+
+  /// Non-null for `kind == 'exit_plan_mode'` events.
+  final ExitPlanModePayload? exitPlanMode;
+
   /// true if this is a tool call (e.g. [Bash: git status])
   bool get isToolCall => role == 'assistant' && _toolCallPattern.hasMatch(text);
 
@@ -233,6 +242,8 @@ class ChatMessage {
     this.images = const [],
     this.timestamp,
     this.permissionRequest,
+    this.askUserQuestion,
+    this.exitPlanMode,
   });
 }
 
@@ -699,6 +710,60 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           permissionRequest: payload is Map
               ? Map<String, dynamic>.from(payload)
               : null,
+        ),
+      );
+      continue;
+    }
+
+    // Handle ask_user_question events.
+    if (kind == 'ask_user_question') {
+      flushMergeBuf();
+      flushActivityBuf();
+      flushThinkingBuf();
+      final raw2 = e['askUserQuestion'];
+      AskUserQuestionPayload? askPayload;
+      if (raw2 is Map) {
+        try {
+          askPayload = AskUserQuestionPayload.fromJson(
+              Map<String, dynamic>.from(raw2));
+        } catch (_) {}
+      }
+      messages.add(
+        ChatMessage(
+          role: role,
+          text: e['text'] as String? ?? '',
+          seq: seq,
+          isRaw: false,
+          kind: 'ask_user_question',
+          timestamp: _currentTimestamp,
+          askUserQuestion: askPayload,
+        ),
+      );
+      continue;
+    }
+
+    // Handle exit_plan_mode events.
+    if (kind == 'exit_plan_mode') {
+      flushMergeBuf();
+      flushActivityBuf();
+      flushThinkingBuf();
+      final raw2 = e['exitPlanMode'];
+      ExitPlanModePayload? planPayload;
+      if (raw2 is Map) {
+        try {
+          planPayload = ExitPlanModePayload.fromJson(
+              Map<String, dynamic>.from(raw2));
+        } catch (_) {}
+      }
+      messages.add(
+        ChatMessage(
+          role: role,
+          text: e['text'] as String? ?? '',
+          seq: seq,
+          isRaw: false,
+          kind: 'exit_plan_mode',
+          timestamp: _currentTimestamp,
+          exitPlanMode: planPayload,
         ),
       );
       continue;
@@ -2296,6 +2361,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                                 onPermissionResponse:
                                     reversed[idx].kind == 'permission_request'
                                     ? _sendPermissionResponse
+                                    : null,
+                                onSend: (reversed[idx].kind ==
+                                            'ask_user_question' ||
+                                        reversed[idx].kind == 'exit_plan_mode')
+                                    ? (content) {
+                                        _inputCtrl.text = content;
+                                        _sendMessage();
+                                      }
                                     : null,
                                 onToggleExpand: () {
                                   _lastUserTap = DateTime.now();
@@ -4024,6 +4097,7 @@ class MessageBubble extends StatelessWidget {
   final Future<void> Function(String requestId, String behavior)?
   onPermissionResponse;
   final VoidCallback? onToggleExpand;
+  final void Function(String content)? onSend;
 
   const MessageBubble({
     required this.message,
@@ -4032,6 +4106,7 @@ class MessageBubble extends StatelessWidget {
     this.onResolvePermissionPrompt,
     this.onPermissionResponse,
     this.onToggleExpand,
+    this.onSend,
   });
 
   void _showCopyMenu(BuildContext context, String text) {
@@ -4056,6 +4131,24 @@ class MessageBubble extends StatelessWidget {
         onPermissionResponse: onPermissionResponse,
       );
     }
+
+    // Render ask_user_question card.
+    if (message.kind == 'ask_user_question' &&
+        message.askUserQuestion != null) {
+      return AskUserQuestionCard(
+        payload: message.askUserQuestion!,
+        onSend: onSend,
+      );
+    }
+
+    // Render exit_plan_mode card.
+    if (message.kind == 'exit_plan_mode' && message.exitPlanMode != null) {
+      return ExitPlanModeCard(
+        payload: message.exitPlanMode!,
+        onSend: onSend,
+      );
+    }
+
 
     if (message.isPermissionPrompt) {
       final scheme = Theme.of(context).colorScheme;
