@@ -769,7 +769,7 @@ func TestContentMatchSessionByPaneTextWithMixedCJKAndToolUse(t *testing.T) {
 	dir := t.TempDir()
 
 	leftPath := filepath.Join(dir, "sess-cjk-tool.jsonl")
-	left := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"echo 你好世界\"}}]}}\n"
+	left := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"echo 你好世界 这是测试命令\"}}]}}\n"
 	if err := os.WriteFile(leftPath, []byte(left), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -778,7 +778,7 @@ func TestContentMatchSessionByPaneTextWithMixedCJKAndToolUse(t *testing.T) {
 		{SessionID: "sess-cjk-tool", JSONLPath: leftPath, LastActivity: time.Now()},
 	}
 
-	pane := "echo 你好世界"
+	pane := "在终端中执行 echo 你好世界 这是测试命令"
 	matched := contentMatchSessionByPaneText(pane, candidates, nil)
 	if matched == nil || matched.SessionID != "sess-cjk-tool" {
 		t.Fatalf("expected sess-cjk-tool match for CJK tool_use fingerprint, got %+v", matched)
