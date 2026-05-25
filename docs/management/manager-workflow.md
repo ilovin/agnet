@@ -18,6 +18,7 @@ originSessionId: c4bab9a8-29f4-4593-b301-34fa487e5c93
 
 ### Phase 2 — Code exploration (Explore agent)
 - Spawn an Explore agent with a 15-minute time box.
+- **After spawning, Manager must immediately broadcast to the user**: agent name, the `agentId` from the tool result, and the attach hint: `想看实时进度？另开终端跑 \`claude agents\`，在面板里找该 agentId 按 Enter 进入。`
 - Manager may auto-extend once without asking user, if the initial report shows partial progress.
 - **Mandatory output format**:
   1. Root cause in one sentence
@@ -52,6 +53,7 @@ originSessionId: c4bab9a8-29f4-4593-b301-34fa487e5c93
 
 ### Phase 6 — Development + Testing (Dev agent + Test agent)
 - Assign implementation to a dev agent.
+- **After spawning each dev/test agent, Manager must immediately broadcast to the user**: agent name, the `agentId` from the tool result, and the attach hint: `想看实时进度？另开终端跑 \`claude agents\`，在面板里找该 agentId 按 Enter 进入。`
 - **Dev agent self-test**: unit tests (red-green-refactor).
 - **Independent test agent**: integration tests and Chrome validation (for UI work).
 - Manager reviews both reports before final acceptance.
@@ -60,3 +62,26 @@ originSessionId: c4bab9a8-29f4-4593-b301-34fa487e5c93
 - Update `docs/management/progress.md`.
 - Update requirement status.
 - Document risks / blockers / follow-ups.
+
+## 附录：Agent View 用户操作
+
+当 Manager 播报了子 agent 的 agentId 后，用户可按以下步骤实时查看进度：
+
+```
+看子 agent 实时进度
+─────────────────
+1. 在另一个终端窗口运行：
+   claude agents
+2. 面板中找到 Manager 播报的 agentId 对应行
+3. 按 Enter attach
+4. 看完按 ← 返回面板
+5. 多次 Ctrl+C 或退出面板回到原终端
+```
+
+**相关快捷键**：
+- `Enter` — attach 进入子 agent 会话
+- `←`（左箭头）— detach 返回面板
+- `Ctrl+T` — pin 后台会话（保持活跃）
+- `Ctrl+R` — 重命名会话
+
+**前提**：`~/.claude/settings.json` 中须含 `"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": 1`。

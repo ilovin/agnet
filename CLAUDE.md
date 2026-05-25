@@ -33,6 +33,7 @@ Priority order: **direct user request > this `CLAUDE.md` > design plans/docs**.
 - [ ] Am I about to fix a bug or implement a feature myself? → **STOP. Create a Task and assign it.**
 - [ ] Have I used TaskCreate to track the task before acting? → If not, create it first.
 - [ ] Is the task scope clearly defined with acceptance criteria? → If not, clarify before delegating.
+- [ ] 派出子 agent 后是否给用户播报了 agentId 和 attach 提示（`claude agents`）？→ 没播报就 STOP，立即补上。
 
 **Rule of thumb**: If the action involves touching `lib/`, `test/`, `cmd/`, or any source file — you are doing a developer's job. Stop and delegate.
 
