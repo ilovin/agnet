@@ -35,8 +35,10 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
     final kind = params['kind'] as String?;
     if (kind == 'tool_use' || kind == 'tool_result') return;
 
-    // Skip permission requests
-    if (kind == 'permission_request') return;
+    // Skip permission requests and structured interaction prompts
+    if (kind == 'permission_request' ||
+        kind == 'ask_user_question' ||
+        kind == 'exit_plan_mode') return;
 
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';

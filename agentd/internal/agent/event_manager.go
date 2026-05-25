@@ -69,6 +69,9 @@ func (em *EventManager) LoadPersistedEventsLatest(agentID string, limit int) ([]
 			"kind":      r.Kind,
 			"timestamp": parseEventRowTimestamp(r.CreatedAt),
 		}
+		for k, v := range r.Payload {
+			data[k] = v
+		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
 	return events, nil
@@ -89,6 +92,9 @@ func (em *EventManager) LoadPersistedEventsSince(agentID string, afterSeq uint64
 			"kind":      r.Kind,
 			"timestamp": parseEventRowTimestamp(r.CreatedAt),
 		}
+		for k, v := range r.Payload {
+			data[k] = v
+		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}
 	return events, nil
@@ -108,6 +114,9 @@ func (em *EventManager) LoadPersistedEventsBefore(agentID string, beforeSeq uint
 			"raw":       r.Raw,
 			"kind":      r.Kind,
 			"timestamp": parseEventRowTimestamp(r.CreatedAt),
+		}
+		for k, v := range r.Payload {
+			data[k] = v
 		}
 		events = append(events, eventbuf.Event{Seq: r.Seq, Data: data})
 	}

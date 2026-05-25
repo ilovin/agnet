@@ -1635,3 +1635,55 @@ func TestConversationKey(t *testing.T) {
 		t.Fatalf("expected -32602 for unsupported key, got %d", got)
 	}
 }
+
+// TestSetOnOutput_BroadcastIncludesKindAndPayload verifies that the real-time
+// SetOnOutput broadcast (Gap 1 fix, R-010 T2b) includes "kind" and the
+// kind-specific camelCase payload field (e.g. "askUserQuestion").
+func TestSetOnOutput_BroadcastIncludesKindAndPayload(t *testing.T) {
+	s, _ := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	mgr := agent.NewManager(s, t.TempDir())
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() { ts.Close(); s.Close() })
+
+	conn := dialWS(t, ts, "testtoken")
+
+	askPayload := map[string]any{
+		"tool_use_id": "toolu_01",
+		"questions": []any{
+			map[string]any{"question": "Which option?", "multi_select": false, "options": []any{}},
+		},
+	}
+	data := map[string]any{
+		"role":            "assistant",
+		"raw":             false,
+		"kind":            "ask_user_question",
+		"askUserQuestion": askPayload,
+	}
+
+	// Trigger the broadcast via the manager's onOutput callback.
+	go mgr.FireOnOutput("agent-broadcast-test", data)
+
+	// Read the conversation.message event from the WS.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var event map[string]any
+	for {
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatalf("read failed: %v", err)
+		}
+		if event["method"] == "conversation.message" {
+			break
+		}
+	}
+
+	params, _ := event["params"].(map[string]any)
+	if params == nil {
+		t.Fatalf("params nil in broadcast event: %v", event)
+	}
+	if got, _ := params["kind"].(string); got != "ask_user_question" {
+		t.Errorf("broadcast params missing kind; got %q", got)
+	}
+	if params["askUserQuestion"] == nil {
+		t.Errorf("broadcast params missing askUserQuestion; params=%v", params)
+	}
+}

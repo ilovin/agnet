@@ -198,3 +198,66 @@ func TestLastConversationEventTime(t *testing.T) {
 		t.Fatal("expected non-zero time after saving event")
 	}
 }
+
+// TestLoadPersisted_InteractivePayloadPreserved verifies that AskUserQuestion
+// and ExitPlanMode events round-trip through save → LoadPersisted* with their
+// camelCase payload keys intact (Gap 2 regression, R-010 T2b).
+func TestLoadPersisted_InteractivePayloadPreserved(t *testing.T) {
+	em, s := newTestEventManager(t)
+	ag := agent.NewTestAgent("ask-agent", "custom")
+
+	askData := map[string]any{
+		"role": "assistant",
+		"raw":  false,
+		"kind": "ask_user_question",
+		"askUserQuestion": map[string]any{
+			"tool_use_id": "toolu_ask",
+			"questions":   []any{map[string]any{"question": "Pick one", "multi_select": false, "options": []any{}}},
+		},
+	}
+	exitData := map[string]any{
+		"role": "assistant",
+		"raw":  false,
+		"kind": "exit_plan_mode",
+		"exitPlanMode": map[string]any{
+			"tool_use_id": "toolu_exit",
+			"plan":        "Step A, Step B",
+		},
+	}
+
+	_ = s.SaveConversationEvent(ag.ID, 1, askData)
+	_ = s.SaveConversationEvent(ag.ID, 2, exitData)
+
+	// LoadPersistedEventsLatest
+	latest, err := em.LoadPersistedEventsLatest(ag.ID, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsLatest: %v", err)
+	}
+	if len(latest) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(latest))
+	}
+	if latest[0].Data["askUserQuestion"] == nil {
+		t.Errorf("askUserQuestion missing from LoadPersistedEventsLatest result: %v", latest[0].Data)
+	}
+	if latest[1].Data["exitPlanMode"] == nil {
+		t.Errorf("exitPlanMode missing from LoadPersistedEventsLatest result: %v", latest[1].Data)
+	}
+
+	// LoadPersistedEventsSince
+	since, err := em.LoadPersistedEventsSince(ag.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsSince: %v", err)
+	}
+	if since[0].Data["askUserQuestion"] == nil {
+		t.Errorf("askUserQuestion missing from LoadPersistedEventsSince result")
+	}
+
+	// LoadPersistedEventsBefore
+	before, err := em.LoadPersistedEventsBefore(ag.ID, 3, 10)
+	if err != nil {
+		t.Fatalf("LoadPersistedEventsBefore: %v", err)
+	}
+	if before[1].Data["exitPlanMode"] == nil {
+		t.Errorf("exitPlanMode missing from LoadPersistedEventsBefore result")
+	}
+}

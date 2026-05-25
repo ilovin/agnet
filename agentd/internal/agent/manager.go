@@ -470,6 +470,18 @@ func (m *Manager) SetOnOutput(fn func(agentID string, data map[string]any)) {
 	m.onOutput = fn
 }
 
+// FireOnOutput invokes the onOutput callback synchronously.
+// Intended for use in tests that need to simulate an agent output broadcast
+// without running a real agent process.
+func (m *Manager) FireOnOutput(agentID string, data map[string]any) {
+	m.mu.Lock()
+	cb := m.onOutput
+	m.mu.Unlock()
+	if cb != nil {
+		cb(agentID, data)
+	}
+}
+
 // SetOnStatusChange registers a callback invoked whenever an agent's status changes.
 func (m *Manager) SetOnStatusChange(fn func(agentID string, data map[string]any)) {
 	m.mu.Lock()
@@ -726,6 +738,30 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 		}
 
 	case "tool_use":
+		toolUseID, _ := ev.Raw["id"].(string)
+		if kind, payload, ok := ParseInteractiveToolUse(ev.Name, toolUseID, ev.Input); ok {
+			// AskUserQuestion or ExitPlanMode: emit structured interactive event.
+			payloadBytes, _ := json.Marshal(payload)
+			var payloadMap map[string]any
+			_ = json.Unmarshal(payloadBytes, &payloadMap)
+			data = map[string]any{
+				"role": "assistant",
+				"raw":  false,
+				"kind": kind,
+			}
+			if key := PayloadKeyForKind(kind); key != "" {
+				data[key] = payloadMap
+			}
+			if ev.Timestamp != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
+					data["timestamp"] = parsed.UnixMilli()
+				} else if parsed, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil {
+					data["timestamp"] = parsed.UnixMilli()
+				}
+			}
+			ag.setStatus(StatusWorking)
+			break
+		}
 		summary := buildToolInputSummary(ev.Name, ev.Input)
 		var toolText string
 		if summary != "" {
@@ -803,28 +839,44 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			blockType, _ := contentBlock["type"].(string)
 			if blockType == "tool_use" {
 				name, _ := contentBlock["name"].(string)
+				toolUseID, _ := contentBlock["id"].(string)
 				inputRaw, _ := json.Marshal(contentBlock["input"])
-				summary := buildToolInputSummary(name, inputRaw)
-				var toolText string
-				if summary != "" {
-					toolText = fmt.Sprintf("[%s: %s]", name, summary)
+				var blockData map[string]any
+				if kind, payload, ok := ParseInteractiveToolUse(name, toolUseID, inputRaw); ok {
+					payloadBytes, _ := json.Marshal(payload)
+					var payloadMap map[string]any
+					_ = json.Unmarshal(payloadBytes, &payloadMap)
+					blockData = map[string]any{
+						"role": "assistant",
+						"raw":  false,
+						"kind": kind,
+					}
+					if key := PayloadKeyForKind(kind); key != "" {
+						blockData[key] = payloadMap
+					}
 				} else {
-					toolText = fmt.Sprintf("[%s]", name)
+					summary := buildToolInputSummary(name, inputRaw)
+					var toolText string
+					if summary != "" {
+						toolText = fmt.Sprintf("[%s: %s]", name, summary)
+					} else {
+						toolText = fmt.Sprintf("[%s]", name)
+					}
+					blockData = map[string]any{
+						"role":     "assistant",
+						"text":     toolText,
+						"raw":      false,
+						"kind":     "tool_use",
+						"toolName": name,
+					}
 				}
-				data := map[string]any{
-					"role":     "assistant",
-					"text":     toolText,
-					"raw":      false,
-					"kind":     "tool_use",
-					"toolName": name,
-				}
-				seq := m.appendAndPersistEvent(agentID, ag, data)
-				data["seq"] = seq
+				seq := m.appendAndPersistEvent(agentID, ag, blockData)
+				blockData["seq"] = seq
 				m.mu.RLock()
 				cb := m.onOutput
 				m.mu.RUnlock()
 				if cb != nil {
-					cb(agentID, data)
+					cb(agentID, blockData)
 				}
 				ag.setStatus(StatusWorking)
 			}
