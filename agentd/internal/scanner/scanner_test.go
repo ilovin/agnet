@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -515,6 +516,24 @@ func TestProcessInfoAttachRoutingMetadata(t *testing.T) {
 			t.Fatal("expected non-empty read-only reason")
 		}
 	})
+}
+
+func TestAttachReadOnlyReason_HermesNoTmux(t *testing.T) {
+	proc := ProcessInfo{Provider: "hermes"}
+	reason := proc.AttachReadOnlyReason()
+	if reason == "" {
+		t.Fatal("expected non-empty read-only reason for hermes without tmux")
+	}
+	if !strings.Contains(reason, "no tmux pane") {
+		t.Fatalf("expected reason to mention 'no tmux pane', got %q", reason)
+	}
+}
+
+func TestAttachReadOnlyReason_HermesTmux(t *testing.T) {
+	proc := ProcessInfo{Provider: "hermes", TmuxTarget: "sess:0.1"}
+	if got := proc.AttachReadOnlyReason(); got != "" {
+		t.Fatalf("expected empty read-only reason for hermes with tmux, got %q", got)
+	}
 }
 
 func TestIsClaudeSubagentArgs(t *testing.T) {

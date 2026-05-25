@@ -157,7 +157,9 @@ func (p *ProcessInfo) AttachReadOnlyReason() string {
 		}
 		return "no session ID available for OpenCode resume"
 	case "hermes":
-		// Hermes via HTTP does not need tmux/PTY
+		if p.TmuxTarget == "" {
+			return "no tmux pane found for hermes process; attach is observe-only (state.db history available)"
+		}
 		return ""
 	default:
 		return "attached input routing is not supported for this provider"
