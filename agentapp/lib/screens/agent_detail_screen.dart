@@ -765,17 +765,12 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
           mergeBufKind = kind;
         }
         mergeBuf.write(cleaned);
-        // Flush when we see sentence-ending content or significant length
-        if (cleaned.contains('？') ||
-            cleaned.contains('。') ||
-            cleaned.contains('！') ||
-            cleaned.endsWith('?') ||
-            cleaned.endsWith('.') ||
-            cleaned.endsWith('!') ||
-            cleaned.endsWith('\n') ||
-            mergeBuf.length > 200) {
-          flushMergeBuf();
-        }
+        // Do NOT flush mid-stream on sentence boundaries. A single Claude
+        // assistant turn often contains many `。` / `.` characters and
+        // streaming flush would shatter one message into many fragmented
+        // bubbles (e.g. "行级别的修复" stranded between two `。`). Flush only
+        // when a non-fragment event arrives or at end of stream — see the
+        // boundary handling below and at the end of this loop.
       }
       continue;
     }
