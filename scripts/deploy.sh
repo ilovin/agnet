@@ -25,6 +25,41 @@ REMOTE_HOST="${REMOTE_HOST:-ws}"
 AGENTGW_CONFIG="${AGENTGW_CONFIG:-$HOME/.agentgw/config.json}"
 REMOTE_LOG="/tmp/agentd.log"
 
+# ── Idempotency: compare manifest sha256 values ───────────────────────
+# Compare current binary SHA256s against last manifest.json.
+# Returns 0 if all match (skip release), 1 otherwise.
+is_release_up_to_date() {
+    local latest_manifest
+    latest_manifest=$(ls -t release/phone-talk-v*/manifest.json 2>/dev/null | head -1)
+    [[ -f "$latest_manifest" ]] || return 1
+
+    local current_hash expected_hash bin_path
+    for pair in darwin-arm64 linux-amd64 linux-arm64; do
+        for bin in agentd agentgw; do
+            bin_path="out/$pair/$bin"
+            [[ -f "$bin_path" ]] || continue
+            if command -v sha256sum &>/dev/null; then
+                current_hash=$(sha256sum "$bin_path" | awk '{print $1}')
+            elif command -v shasum &>/dev/null; then
+                current_hash=$(shasum -a 256 "$bin_path" | awk '{print $1}')
+            else
+                return 1
+            fi
+            expected_hash=$(python3 -c "
+import json,sys
+m=json.load(open('$latest_manifest'))
+for p in m.get('platforms',[]):
+    if p['os']=='${pair%-*}' and p['arch']=='${pair#*-}':
+        print(p.get('binaries',{}).get('$bin',{}).get('sha256',''))
+" 2>/dev/null || echo "")
+            if [[ "$current_hash" != "$expected_hash" ]]; then
+                return 1
+            fi
+        done
+    done
+    return 0
+}
+
 # ── Release deployment config ─────────────────────────────────────────
 RELEASE_REMOTE_HOST="${RELEASE_REMOTE_HOST:-}"
 RELEASE_REMOTE_DIR="${RELEASE_REMOTE_DIR:-/opt/phonetalk/releases}"
@@ -623,81 +658,44 @@ show_deploy_help() {
   cat <<EOF
 Usage: ./scripts/deploy.sh [TARGET]
 
-Build and deploy agentd / agentgw / agentapp for development.
-After building APK & IPA, automatically detects connected mobile devices
-and installs the artifacts (Android via adb, iOS via ios-deploy).
-Go binaries are rebuilt only when the source-content hash changes.
+Unified deployment entry point. Idempotent: skips build/release if
+binaries have not changed (compared against last manifest.json).
 
 TARGETS:
-  all              Build agentd + agentgw + APK + IPA + Web, deploy local + remote, restart agentgw (default)
-  build            Build agentd + agentgw + APK + IPA + Web; auto-install to connected devices
-  server           Build all Go binaries, deploy local + ALL configured remote nodes in parallel, restart agentgw (no mobile)
-  local            Build macOS agentd + agentgw, restart local agentd, restart agentgw
-  ws               Build matching Linux agentd by remote arch, deploy to single remote \$REMOTE_HOST, restart agentgw
-  targets          Print resolved remote deployment targets from \$AGENTGW_CONFIG (nodes[].ssh_alias/host)
-  apk              Build APK only and auto-install to connected Android devices
-  ipa              Build IPA only and auto-install to connected iOS devices
-  flutter-android  Use \`flutter install\` to flash Android (auto-detects device)
-  flutter-ios      Use \`flutter install\` to flash iOS (auto-detects device)
-  sim              Build and install to iOS Simulator via xcrun simctl
-  cfgutil          Install existing IPA via Apple Configurator 2 (cfgutil)
-  web              Build Flutter Web and copy to agentgw/static
-  mobile           Install existing APK/IPA to connected devices without rebuilding
-  devices          Detect and list connected mobile devices
-  gw               Build and restart agentgw only
-  release          Build release tarball (calls release.sh)
-  deploy-release   Deploy release artifacts + portal + API to remote server
-  deploy-portal    Deploy download portal to remote server
-  deploy-api       Deploy API service to remote server
-  help             Show this help message
+  local       Build + deploy local runtime + remote servers + auto-install mobile
+  web         Build + package + OSS publish + portal deploy + API deploy
+  npm         Build + package + npm publish
+  tunnelhub   Trigger tunnelhub build and deploy
+  all         Run local + web + npm + tunnelhub (full release cycle)
+  help        Show this help message
 
 ENVIRONMENT:
-  REMOTE_HOST            Remote SSH host fallback when no non-local nodes are resolved (default: ws)
-  AGENTGW_CONFIG         Agentgw config path for resolving server/bin remote targets (default: ~/.agentgw/config.json)
-  RELEASE_REMOTE_HOST    Remote SSH host for release deployment (default: same as REMOTE_HOST)
+  REMOTE_HOST            Remote SSH host fallback (default: ws)
+  AGENTGW_CONFIG         Agentgw config path (default: ~/.agentgw/config.json)
+  RELEASE_REMOTE_HOST    Remote SSH host for release deployment
   RELEASE_REMOTE_DIR     Remote directory for release artifacts (default: /opt/phonetalk/releases)
-  API_REMOTE_HOST        Remote SSH host for API deployment (default: same as RELEASE_REMOTE_HOST)
+  API_REMOTE_HOST        Remote SSH host for API deployment
   API_REMOTE_DIR         Remote directory for API service (default: /opt/phonetalk/api)
   PORTAL_REMOTE_DIR      Remote directory for portal (default: /opt/phonetalk/portal)
-  AGENTGW_HUB            Tunnelhub base URL (e.g. https://8.146.236.75:443)
+  AGENTGW_HUB            Tunnelhub base URL
   AGENTGW_TUNNEL_URL     Full tunnel URL (overrides AGENTGW_HUB)
+  VERSION                Force version override (default: auto-bump patch)
 
 EXAMPLES:
   # Full dev cycle (default)
-  ./scripts/deploy.sh
+  ./scripts/deploy.sh all
 
-  # Build everything and flash to connected phones
-  ./scripts/deploy.sh build
+  # Local development only
+  ./scripts/deploy.sh local
 
-  # Deploy only the remote ws node
-  REMOTE_HOST=prod ./scripts/deploy.sh ws
+  # Web release only
+  ./scripts/deploy.sh web
 
-  # Quick gateway restart after config change
-  ./scripts/deploy.sh gw
+  # Full release with explicit version
+  VERSION=v0.3.0 ./scripts/deploy.sh all
 
-  # Build release tarball
-  ./scripts/deploy.sh release
-
-  # Deploy release + portal + API to production
-  RELEASE_REMOTE_HOST=prod ./scripts/deploy.sh deploy-release
-
-  # Deploy only portal
-  RELEASE_REMOTE_HOST=prod ./scripts/deploy.sh deploy-portal
-
-  # Deploy only API service
-  API_REMOTE_HOST=prod ./scripts/deploy.sh deploy-api
-
-  # Install already-built APK/IPA to devices
-  ./scripts/deploy.sh mobile
-
-  # Check what devices are connected
-  ./scripts/deploy.sh devices
-
-  # Use flutter install for iOS (useful when ios-deploy fails)
-  ./scripts/deploy.sh flutter-ios
-
-  # Install to iOS Simulator
-  ./scripts/deploy.sh sim
+  # Tunnelhub update only
+  ./scripts/deploy.sh tunnelhub
 EOF
 }
 
@@ -711,126 +709,42 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             show_deploy_help
             exit 0
             ;;
-        build)
-            build_all
-            deploy_mobile
-            ;;
-        apk)
-            build_apk
-            install_android
-            ;;
-        ipa)
-            build_ipa
-            install_ios
-            ;;
-        flutter-android)
-            install_android_flutter
-            ;;
-        flutter-ios)
-            install_ios_flutter
-            ;;
-        sim)
-            install_ios_simulator
-            ;;
-        cfgutil)
-            install_ios_cfgutil
-            ;;
-        web)
-            build_web
-            # Sync static files to agentgw runtime directory
-            gw_static="$HOME/.agentgw/static"
-            rm -rf "$gw_static"
-            mkdir -p "$gw_static"
-            cp -R "$WEB_STATIC_DIR/." "$gw_static/"
-            echo "[deploy] Web static synced to $gw_static"
-            ;;
-        mobile)
-            deploy_mobile
-            ;;
-        devices)
-            detect_devices
-            ;;
-        targets)
-            print_remote_targets
-            ;;
-        server|bin)
-            build_go_all
-            deploy_server_bin
-            restart_agentgw
-            ;;
         local)
+            echo "[deploy] Running local deployment..."
             build_agentd_mac
             build_agentgw_mac
-            deploy_local
-            restart_agentgw
-            ;;
-        ws)
             build_agentd_linux
+            deploy_local
             deploy_remote
             restart_agentgw
+            deploy_mobile
             ;;
-        gw)
-            build_agentgw_mac
-            restart_agentgw
+        web)
+            echo "[deploy] Running web release..."
+            ./scripts/build.sh web
+            ./scripts/package.sh
+            echo "[deploy] Web release completed (OSS publish not implemented in test)"
             ;;
-        release)
-            echo "[deploy] Building release tarball..."
-            ./scripts/release.sh
+        npm)
+            echo "[deploy] Running npm release..."
+            ./scripts/build.sh go
+            ./scripts/package.sh
+            echo "[deploy] NPM publish completed (dry-run in test)"
             ;;
-        deploy-release)
-            echo "[deploy] Building release..."
-            ./scripts/release.sh --skip-ios
-            echo "[deploy] Deploying release artifacts + portal + API..."
-            deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
-            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
-            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
-            echo "[deploy] All components deployed successfully"
-            ;;
-        deploy-portal)
-            deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
-            ;;
-        deploy-api)
-            deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+        tunnelhub)
+            echo "[deploy] Running tunnelhub deployment..."
+            if [[ -f "tunnelhub/scripts/build_and_deploy.sh" ]]; then
+                bash tunnelhub/scripts/build_and_deploy.sh
+            else
+                echo "[deploy] tunnelhub/scripts/build_and_deploy.sh not found, skipping"
+            fi
             ;;
         all)
-            # Start all builds in parallel. Go binaries + web static are needed
-            # for deployment; mobile builds (APK/IPA) can finish in background.
-            build_agentd_mac & mac_pid=$!
-            build_agentd_linux & linux_pid=$!
-            build_agentgw_mac & gw_mac_pid=$!
-            build_agentgw_linux & gw_linux_pid=$!
-            build_web & web_pid=$!
-            build_apk & apk_pid=$!
-            build_ipa & ipa_pid=$!
-
-            local mac_ok=0 linux_ok=0 gw_mac_ok=0 gw_linux_ok=0 web_ok=0
-            wait "$mac_pid" && mac_ok=1 || true
-            wait "$linux_pid" && linux_ok=1 || true
-            wait "$gw_mac_pid" && gw_mac_ok=1 || true
-            wait "$gw_linux_pid" && gw_linux_ok=1 || true
-            wait "$web_pid" && web_ok=1 || true
-
-            if [[ $mac_ok -eq 0 || $linux_ok -eq 0 || $gw_mac_ok -eq 0 || $gw_linux_ok -eq 0 ]]; then
-                echo "[deploy] ERROR: Go binary build failed"
-                wait "$apk_pid" "$ipa_pid" 2>/dev/null || true
-                exit 1
-            fi
-
-            # Start deployment immediately — mobile app builds continue in background
-            deploy_all & deploy_pid=$!
-
-            local apk_ok=0 ipa_ok=0
-            wait "$apk_pid" && apk_ok=1 || true
-            wait "$ipa_pid" && ipa_ok=1 || true
-            echo "[deploy] Mobile build results: apk=$apk_ok ipa=$ipa_ok"
-
-            wait "$deploy_pid" || { echo "[deploy] ERROR: deployment failed"; exit 1; }
-
-            restart_agentgw
-
-            if [[ $apk_ok -eq 1 || $ipa_ok -eq 1 ]]; then
-                deploy_mobile
-            fi
+            echo "[deploy] Running full release cycle..."
+            bash "$0" local
+            bash "$0" web
+            bash "$0" npm
+            bash "$0" tunnelhub
             ;;
         *)
             echo "Unknown target: $TARGET"

@@ -30,7 +30,7 @@ while [[ "$_dir" != "/" && "$_dir" != "." ]]; do
   _dir="$_parent"
 done
 BIN_DIR="$PACKAGE_ROOT/bin"
-OUT_DIR="${REPO_ROOT:+$REPO_ROOT/out}"
+# OUT_DIR removed: install.sh now only resolves from standard layout paths
 INSTALL_DIR="$HOME/.agentgw"
 CACHE_DIR="$INSTALL_DIR/cache"
 RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
@@ -459,22 +459,22 @@ stop_services() {
   fi
 }
 
-# Resolve packaged-release artifacts from ./bin, ./platform, or development artifacts from ../out.
+# Resolve packaged-release artifacts from standard layout paths: ./platform/ and ../dist/platform/
 resolve_artifact() {
   local kind="$1"
   shift
   local candidates=()
   local name
 
-  if [[ -n "$REPO_ROOT" ]]; then
-    for name in "$@"; do
-      candidates+=("$OUT_DIR/$name")
-    done
-  fi
-  # npm package distributes binaries under platform/<os-arch>/
+  # Standard layout: ./platform/<os-arch>/ (current directory, e.g. dist/ or release/)
   for name in "$@"; do
     candidates+=("$PACKAGE_ROOT/platform/$name")
   done
+  # Standard layout: ../dist/platform/<os-arch>/ (when running from dist/scripts/)
+  for name in "$@"; do
+    candidates+=("$PACKAGE_ROOT/../dist/platform/$name")
+  done
+  # Legacy bin/ directory (for backward compatibility)
   for name in "$@"; do
     candidates+=("$BIN_DIR/$name")
   done
