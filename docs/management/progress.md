@@ -1,9 +1,9 @@
 # Delivery Progress Tracking
 
 ## 1) Sprint / Work Window
-- Window: 2026-05-21
+- Window: 2026-05-25
 - Manager: team-lead
-- Last updated: 2026-05-21
+- Last updated: 2026-05-25
 
 ## 2) Overall Progress
 - Total tasks: 28 active (4 new: R-007)
@@ -51,6 +51,13 @@
 ## 5) Change Log
 | Date | What Changed | By | Notes |
 |---|---|---|---|
+| 2026-05-25 | **PERF-CONTENTMATCH cached** | dev agent | commit `b2fb5e3` + merge `99e2420` `perf(scanner): cache contentMatch results and JSONL fingerprints`; 修 CJK 修复后 dashboard 打开 10s+ 回归（根因: AutoAttachExisting 每 15s 完整 staged matching, CJK 修复消除了"空字符串提前 reject"快路径）; 方案 A: contentMatch 整体结果 30s TTL 缓存（key=tmuxTarget+sortedCandidateIDs）; 方案 F: extractFingerprints 按 JSONL path+mtime+size 60s TTL 缓存; 5 个新缓存测试 PASS（含 race detector）; oracle/local 实测 cache hit 日志每 15s 出现，重路径密度从 15s 一次降到 30-45s 一次 |
+| 2026-05-25 | **M3+M4 Manager 集成 shipped** | dev agent | commit `cfe031e` + merge `afa9890` `feat(agent): integrate HermesDBWatcher for real-time session switch detection`; newSessionWatcher 加 hermes 分支, OnSessionSwitch 复用 OpenCode 模板（UpdateResumeSessionID → ClearConversationEvents → EventBuf.Reset → load new session → broadcast conversation.cleared + agent.status_changed）; 三处启动 watcher: Attach / Re-Attach / LoadFromStore; Agent.sendingFlag (atomic.Bool) + BeginSend/EndSend/IsSending 解决与 chunk.Done 的竞态; 新增集成测试 manager_hermes_session_test.go + agent_sending_test.go; 全部测试 PASS（注: TestHermesDBWatcher_SendingCheckerSuppressesSessionSwitch 出现 sqlite BUSY flake, 重跑 PASS, 已建跟踪任务 #11）|
+| 2026-05-25 | **M1+M2 HermesDBWatcher 包级实现 shipped** | dev agent | commit `f1ad44a` + merge `4865b4a` `feat(watcher): add HermesStateDBLoadSession and HermesDBWatcher`; 新增 `HermesStateDBLoadSession(sessionID)` 按指定 session 加载历史; 新增 `HermesDBWatcher` 类型（Start/Stop/SetSkipExisting/SetSessionID/OnSessionSwitch）; 3s 默认轮询 ticker（`hermesDBWatcherInterval` var 可注入）; 单测 10 个全 PASS |
+| 2026-05-25 | **FIX-CONTENTMATCH-CJK + 测试加长 shipped** | dev agent | commit `3419d52` `feat(scanner): Unicode-aware content matching and test coverage`: nonWordRe 从 `[^a-z0-9]+` 改为 `[^\p{L}\p{N}]+`, pane 长度判断从 byte len 改为 utf8.RuneCountInString, 新增 3 个 CJK 测试; 解决中文用户 contentMatch 全部失效（中文清洗后空字符串）的 bug; commit `d3310f5` `test(scanner): lengthen CJK fixtures above 20-rune minimum`: 调整一个 CJK fixture 让 pane 长度过 20 rune 阈值 |
+| 2026-05-25 | **scripts dry-run + CHECK_ONLY** | dev agent | commit `d8a7617` `chore(scripts): add deploy dry-run + install CHECK_ONLY + script test coverage`: deploy.sh 支持 `DEPLOY_DRY_RUN=1`, install.sh 加 `CHECK_ONLY=1`, 新增 scripts/test.sh |
+| 2026-05-25 | **docs: hermes plan + slowness triage + deploy isolation** | team-lead | commit `1248b0c` `docs: add hermes polling plan, slowness triage, deploy isolation requirement`: 写入 plan 文档与诊断文档 |
+| 2026-05-25 | **R-007 用户验收通过** | team-lead | 用户在已存在 Chrome tab 完成验收三件事: dashboard 速度恢复 ✅; contentMatch 不再串号 ✅; hermes session 切换实时感知 ✅（oracle 节点实测）; 关联任务 #1/#2/#4/#5/#6/#7/#8/#9 全部 completed |
 | 2026-05-25 | **FIX-CONTENTMATCH-CJK shipped local** | dev/test agent | content_match.go nonWordRe 改 `[^\p{L}\p{N}]+` + utf8.RuneCountInString; scanner 单测全部 PASS（含 3 个新 CJK 测试）; scripts/build.sh + scripts/deploy.sh local 完成; /tmp/agentd-local.log 中文 pane 出现 `pane match success bestScore=13 secondBest=6 margin=7`（修复前为 score=0），同 pane 另一个 candidate 13/13 ambiguous reject 属于内容近似的预期行为；待用户在已存在 Chrome tab 完成最终业务验收 |
 | 2026-05-21 | **R-007 需求+计划完成** | team-lead | docs/requirements/r-007-hermes-agent.md; docs/plans/hermes-provider-impl.md; Gateway API集成路径 |
 | 2026-05-21 | **hermes-explorer 完成** | hermes-explorer | CLI协议探测: oneshot/REPL/gateway全面分析; 推荐Gateway HTTP API路径 |
@@ -66,6 +73,7 @@
 | 2026-05-01 | **i-012 fixed** | dev agent | `/clear` tmux bug + session switch re-tracking; 6文件; agentd Go tests + 117 Flutter tests pass |
 
 ## 6) Completion Summary
+- 2026-05-25: R-007 hermes session 切换实时感知 + contentMatch CJK 修复 + perf 回归紧急修复 — 用户 Chrome 验收通过（dashboard 速度恢复、contentMatch 不串号、hermes session 实时切换在 oracle 实测）；本轮交付 M1+M2 HermesDBWatcher 包级实现 (`f1ad44a`/`4865b4a`)、M3+M4 Manager 集成 (`cfe031e`/`afa9890`)、CJK 修复 (`3419d52`/`d3310f5`)、perf 缓存修复 (`b2fb5e3`/`99e2420`)、scripts dry-run/CHECK_ONLY (`d8a7617`)、文档 (`1248b0c`)；关联任务 #1/#2/#4/#5/#6/#7/#8/#9 全部 completed
 - 2026-05-21: R-007 hermes 支持启动 — 需求文档、设计计划、CLI协议探索完成，hermesclient TDD开发中
 - 2026-05-09 deliveries: ARCH-002 (WS Service层), ARCH-003 (SessionWatcher真seam), ARCH-006 (JSON-RPC类型安全), CLI client骨架+验证
 - 2026-05-08 deliveries: R-006 (Portal本机QR连接), i-012-followup (`currentBound()` fix)
