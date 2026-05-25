@@ -30,6 +30,9 @@ type ConversationEventRecord struct {
 	Raw       bool
 	Kind      string
 	CreatedAt string
+	// Payload holds any kind-specific camelCase fields extracted from data_json
+	// (e.g. "askUserQuestion", "exitPlanMode", "permissionRequest").
+	Payload map[string]any
 }
 
 // Store wraps a SQLite database for agent metadata.
@@ -217,6 +220,21 @@ func (s *Store) SaveConversationEvent(agentID string, seq uint64, data map[strin
 	return nil
 }
 
+// extractPayloadFields picks camelCase payload keys from a decoded data_json map
+// and returns them as a Payload map (nil if none present).
+func extractPayloadFields(data map[string]any) map[string]any {
+	var payload map[string]any
+	for _, key := range []string{"askUserQuestion", "exitPlanMode", "permissionRequest"} {
+		if v, ok := data[key]; ok {
+			if payload == nil {
+				payload = make(map[string]any)
+			}
+			payload[key] = v
+		}
+	}
+	return payload
+}
+
 func (s *Store) ListConversationEventsSince(agentID string, afterSeq uint64, limit int) ([]ConversationEventRecord, error) {
 	if limit <= 0 {
 		limit = 5000
@@ -249,6 +267,7 @@ func (s *Store) ListConversationEventsSince(agentID string, afterSeq uint64, lim
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
 		r.Kind, _ = data["kind"].(string)
+		r.Payload = extractPayloadFields(data)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -286,6 +305,7 @@ func (s *Store) ListConversationEventsBefore(agentID string, beforeSeq uint64, l
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
 		r.Kind, _ = data["kind"].(string)
+		r.Payload = extractPayloadFields(data)
 		tmp = append(tmp, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -330,6 +350,7 @@ func (s *Store) ListConversationEventsLatest(agentID string, limit int) ([]Conve
 		r.Text, _ = data["text"].(string)
 		r.Raw, _ = data["raw"].(bool)
 		r.Kind, _ = data["kind"].(string)
+		r.Payload = extractPayloadFields(data)
 		tmp = append(tmp, r)
 	}
 	if err := rows.Err(); err != nil {

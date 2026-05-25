@@ -470,6 +470,18 @@ func (m *Manager) SetOnOutput(fn func(agentID string, data map[string]any)) {
 	m.onOutput = fn
 }
 
+// FireOnOutput invokes the onOutput callback synchronously.
+// Intended for use in tests that need to simulate an agent output broadcast
+// without running a real agent process.
+func (m *Manager) FireOnOutput(agentID string, data map[string]any) {
+	m.mu.Lock()
+	cb := m.onOutput
+	m.mu.Unlock()
+	if cb != nil {
+		cb(agentID, data)
+	}
+}
+
 // SetOnStatusChange registers a callback invoked whenever an agent's status changes.
 func (m *Manager) SetOnStatusChange(fn func(agentID string, data map[string]any)) {
 	m.mu.Lock()
@@ -733,10 +745,12 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 			var payloadMap map[string]any
 			_ = json.Unmarshal(payloadBytes, &payloadMap)
 			data = map[string]any{
-				"role":    "assistant",
-				"raw":     false,
-				"kind":    kind,
-				"payload": payloadMap,
+				"role": "assistant",
+				"raw":  false,
+				"kind": kind,
+			}
+			if key := PayloadKeyForKind(kind); key != "" {
+				data[key] = payloadMap
 			}
 			if ev.Timestamp != "" {
 				if parsed, err := time.Parse(time.RFC3339Nano, ev.Timestamp); err == nil {
@@ -833,10 +847,12 @@ func (m *Manager) handleStreamJSONEvent(agentID string, ag *Agent, ev *streamJSO
 					var payloadMap map[string]any
 					_ = json.Unmarshal(payloadBytes, &payloadMap)
 					blockData = map[string]any{
-						"role":    "assistant",
-						"raw":     false,
-						"kind":    kind,
-						"payload": payloadMap,
+						"role": "assistant",
+						"raw":  false,
+						"kind": kind,
+					}
+					if key := PayloadKeyForKind(kind); key != "" {
+						blockData[key] = payloadMap
 					}
 				} else {
 					summary := buildToolInputSummary(name, inputRaw)

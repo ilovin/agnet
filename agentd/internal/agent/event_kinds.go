@@ -53,6 +53,23 @@ type ExitPlanModePayload struct {
 	Plan      string `json:"plan"`
 }
 
+// PayloadKeyForKind returns the camelCase JSON key used to nest the payload
+// for a given interactive event kind. Flutter models expect this nesting
+// (e.g. {"kind":"ask_user_question","askUserQuestion":{...}}).
+// Returns "" for kinds that do not carry a structured payload.
+func PayloadKeyForKind(kind string) string {
+	switch kind {
+	case KindAskUserQuestion:
+		return "askUserQuestion"
+	case KindExitPlanMode:
+		return "exitPlanMode"
+	case KindPermissionRequest:
+		return "permissionRequest"
+	default:
+		return ""
+	}
+}
+
 // ParseInteractiveToolUse inspects a Claude tool_use block and returns
 // (kind, payload, true) for AskUserQuestion / ExitPlanMode, otherwise
 // returns ("", nil, false) so the caller can fall back to default tool_use.

@@ -211,3 +211,24 @@ func TestParseInteractiveToolUse_Malformed(t *testing.T) {
 		ParseInteractiveToolUse("ExitPlanMode", "", json.RawMessage(`{"plan": 42}`))
 	})
 }
+
+// TestPayloadKeyForKind verifies that the camelCase payload key mapping matches
+// what Flutter models expect (R-010 T2b Gap 3 fix).
+func TestPayloadKeyForKind(t *testing.T) {
+	cases := []struct {
+		kind string
+		want string
+	}{
+		{KindAskUserQuestion, "askUserQuestion"},
+		{KindExitPlanMode, "exitPlanMode"},
+		{KindPermissionRequest, "permissionRequest"},
+		{"tool_use", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := PayloadKeyForKind(tc.kind)
+		if got != tc.want {
+			t.Errorf("PayloadKeyForKind(%q) = %q, want %q", tc.kind, got, tc.want)
+		}
+	}
+}

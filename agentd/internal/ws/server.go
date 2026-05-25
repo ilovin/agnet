@@ -122,6 +122,16 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 		if msgID, ok := data["msg_id"].(string); ok && msgID != "" {
 			params["msg_id"] = msgID
 		}
+		// Forward kind and structured payload fields so Flutter receives them.
+		if kind, ok := data["kind"].(string); ok && kind != "" {
+			params["kind"] = kind
+			// Forward the camelCase payload key matching the kind.
+			for _, key := range []string{"askUserQuestion", "exitPlanMode", "permissionRequest"} {
+				if v, exists := data[key]; exists {
+					params[key] = v
+				}
+			}
+		}
 		srv.broadcast(RPCEvent{
 			JSONRPC: "2.0",
 			Method:  "conversation.message",
