@@ -15,6 +15,7 @@ import (
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
+	"github.com/phone-talk/agentd/internal/watcher"
 )
 
 func newTestManager(t *testing.T) *agent.Manager {
@@ -1630,4 +1631,79 @@ func TestLoadFromStoreRescansHermesAttachMetadataNoTmux(t *testing.T) {
 	if reason := ag.AttachReadOnlyReason(); reason == "" {
 		t.Fatalf("expected non-empty read-only reason after rescan")
 	}
+}
+
+// TestLoadFromStoreSpawnsOpenCodeWatcher verifies that after agentd restart,
+// LoadFromStore re-spawns the OpenCode DB watcher for restored opencode
+// agents so live messages from the running OpenCode CLI continue to flow
+// into the agent's event buffer. Mirrors the Claude jsonl watcher fix
+// (commit 8d16b8f); without this, opencode agents went silent after
+// agentd restart for the same reason.
+//
+// We point HOME at a tmpdir so FindOpenCodeDB() returns "" and the
+// watcher's Start() is a no-op; we only assert that the watcher was
+// constructed and bound to the agent (this is the same minimal coverage
+// pattern used by TestLoadFromStoreSpawnsClaudeJsonlWatcher when no
+// real DB schema is available).
+func TestLoadFromStoreSpawnsOpenCodeWatcher(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	pid := os.Getpid()
+	sessionID := "sess-opencode-restart"
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	agentID := "opencode-restart-test"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:              agentID,
+		Name:            "opencode-restart",
+		Provider:        "opencode",
+		WorkDir:         workDir,
+		ResumeSessionID: sessionID,
+		PID:             pid,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == pid && provider == "opencode"
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("expected OpenCode agent %s to be restored", agentID)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ag.Watcher() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	w := ag.Watcher()
+	if w == nil {
+		t.Fatalf("expected OpenCode DB watcher to be spawned for restored agent %s, got nil", agentID)
+	}
+	if _, ok := w.(*watcher.OpenCodeDBWatcher); !ok {
+		t.Fatalf("expected watcher to be *OpenCodeDBWatcher, got %T", w)
+	}
+	t.Cleanup(func() {
+		if w := ag.Watcher(); w != nil {
+			w.Stop()
+		}
+	})
 }

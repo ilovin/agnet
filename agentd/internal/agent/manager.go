@@ -168,6 +168,18 @@ func (m *Manager) LoadFromStore() error {
 	}
 	var hermesTodos []hermesAttachTodo
 
+	// opencodeWatcherTodo collects OpenCode agents whose DB watcher must
+	// be re-spawned after agentd restart. Same deadlock concern as
+	// claudeTodos: newSessionWatcher() takes m.mu.RLock internally.
+	type opencodeWatcherTodo struct {
+		agentID   string
+		ag        *Agent
+		workDir   string
+		pid       int
+		sessionID string
+	}
+	var opencodeTodos []opencodeWatcherTodo
+
 	m.mu.Lock()
 	loadedAttached := make(map[string]struct{})
 	loadedByPID := make(map[string]struct{})
@@ -291,6 +303,21 @@ func (m *Manager) LoadFromStore() error {
 				pid:     r.PID,
 			})
 		}
+
+		// Queue OpenCode agents for DB watcher re-spawn after the lock is
+		// released. Without this, the agent's EventBuf stays frozen at the
+		// pre-restart state and live messages from the running OpenCode CLI
+		// are never reflected in the API. Mirrors the Claude jsonl watcher
+		// fix (commit 8d16b8f).
+		if r.Provider == "opencode" && r.PID > 0 {
+			opencodeTodos = append(opencodeTodos, opencodeWatcherTodo{
+				agentID:   r.ID,
+				ag:        ag,
+				workDir:   r.WorkDir,
+				pid:       r.PID,
+				sessionID: r.ResumeSessionID,
+			})
+		}
 	}
 	m.mu.Unlock()
 
@@ -338,6 +365,24 @@ func (m *Manager) LoadFromStore() error {
 				t.ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
 			}
 		}
+	}
+
+	// Spawn DB watchers for restored OpenCode agents now that the lock is
+	// released; newSessionWatcher() acquires m.mu.RLock internally.
+	for _, t := range opencodeTodos {
+		cb := m.makeWatcherCallback(t.agentID, t.ag)
+		w := m.newSessionWatcher("opencode", t.sessionID, "", t.workDir, t.pid, cb, t.agentID)
+		if w == nil {
+			log.Printf("[LoadFromStore] No watcher built for OpenCode agent %s (session %q); skipping", t.agentID, t.sessionID)
+			continue
+		}
+		w.SetSkipExisting(true)
+		if err := w.Start(); err != nil {
+			log.Printf("[LoadFromStore] Watcher start failed for OpenCode agent %s: %v", t.agentID, err)
+			continue
+		}
+		t.ag.setWatcher(w)
+		log.Printf("[LoadFromStore] Spawned DB watcher for OpenCode agent %s (PID %d, session %s)", t.agentID, t.pid, t.sessionID)
 	}
 	return nil
 }
