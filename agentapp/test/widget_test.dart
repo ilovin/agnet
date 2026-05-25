@@ -314,6 +314,117 @@ void main() {
   });
 
   test(
+    'streamed text_delta with multiple sentence boundaries merges into one message',
+    () {
+      // Reproduces the production bug where the app showed only a fragment
+      // like "行级别的修复" because each `。` mid-stream flushed mergeBuf into
+      // a separate ChatMessage, fragmenting one assistant turn into many.
+      // The authoritative final assistant/result event with the full text
+      // (kind '' / 'text' / 'result') was then skipped because hadTextDelta
+      // was true, so the UI only kept the broken fragments.
+      final deltas = <Map<String, dynamic>>[
+        {'seq': 1069, 'kind': 'text_delta', 'text': '（单'},
+        {'seq': 1070, 'kind': 'text_delta', 'text': ' `REMOTE_'},
+        {'seq': 1071, 'kind': 'text_delta', 'text': 'HOST=ws`），'},
+        {'seq': 1072, 'kind': 'text_delta', 'text': '不'},
+        {'seq': 1073, 'kind': 'text_delta', 'text': '是 `deploy_rem'},
+        {'seq': 1074, 'kind': 'text_delta', 'text': 'ote_targets_parallel'},
+        {'seq': 1075, 'kind': 'text_delta', 'text': '`（'},
+        {'seq': 1076, 'kind': 'text_delta', 'text': '读'},
+        {'seq': 1077, 'kind': 'text_delta', 'text': ' nodes 列表全'},
+        {'seq': 1078, 'kind': 'text_delta', 'text': '推'},
+        {'seq': 1079, 'kind': 'text_delta', 'text': '）。一'},
+        {'seq': 1080, 'kind': 'text_delta', 'text': '行级别的'},
+        {'seq': 1081, 'kind': 'text_delta', 'text': '修'},
+        {'seq': 1082, 'kind': 'text_delta', 'text': '复。\n\n派'},
+        {'seq': 1083, 'kind': 'text_delta', 'text': ' dev agent 改'},
+        {'seq': 1084, 'kind': 'text_delta', 'text': '脚本 '},
+        {'seq': 1085, 'kind': 'text_delta', 'text': '+'},
+        {'seq': 1086, 'kind': 'text_delta', 'text': ' 加'},
+        {'seq': 1087, 'kind': 'text_delta', 'text': '测'},
+        {'seq': 1088, 'kind': 'text_delta', 'text': '试。同'},
+        {'seq': 1089, 'kind': 'text_delta', 'text': '时立'},
+        {'seq': 1090, 'kind': 'text_delta', 'text': '刻'},
+        {'seq': 1091, 'kind': 'text_delta', 'text': '紧急推'},
+        {'seq': 1092, 'kind': 'text_delta', 'text': ' oracle（不能'},
+        {'seq': 1093, 'kind': 'text_delta', 'text': '等'},
+        {'seq': 1094, 'kind': 'text_delta', 'text': '脚本修完）'},
+        {'seq': 1095, 'kind': 'text_delta', 'text': '。'},
+      ].map(
+        (e) => {
+          'seq': e['seq'],
+          'role': 'assistant',
+          'raw': false,
+          'kind': e['kind'],
+          'text': e['text'],
+        },
+      ).toList();
+
+      final messages = convertEventsToMessages(deltas);
+
+      expect(
+        messages,
+        hasLength(1),
+        reason: 'streamed deltas should produce a single merged message',
+      );
+      // Each delta is trimmed individually before concatenation, so leading
+      // spaces between fragments are squeezed. The critical invariant for
+      // this regression test is that the full sentence "一行级别的修复" stays
+      // inside one message — never stranded as its own bubble.
+      expect(messages.first.text, contains('一行级别的修复'));
+      expect(messages.first.text, contains('派'));
+      expect(messages.first.text, contains('紧急推'));
+      expect(messages.first.text, contains('脚本修完'));
+      expect(messages.first.kind, equals('text_delta'));
+    },
+  );
+
+  test(
+    'streamed text_delta followed by complete message keeps full content',
+    () {
+      // Same scenario plus the trailing kind '' authoritative event that
+      // Claude jsonl emits when the turn ends. The merged delta text and
+      // the full text should converge — the authoritative event must not
+      // be silently dropped while the deltas remain fragmented.
+      final events = <Map<String, dynamic>>[
+        {
+          'seq': 1,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '第一段。',
+        },
+        {
+          'seq': 2,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '第二段。',
+        },
+        {
+          'seq': 3,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '第三段。',
+        },
+        {
+          'seq': 4,
+          'role': 'assistant',
+          'raw': false,
+          'kind': '',
+          'text': '第一段。第二段。第三段。',
+        },
+      ];
+
+      final messages = convertEventsToMessages(events);
+
+      expect(messages, hasLength(1));
+      expect(messages.first.text, equals('第一段。第二段。第三段。'));
+    },
+  );
+
+  test(
     'mergeConversationEvents preserves order and refreshes duplicate seqs',
     () {
       final merged = mergeConversationEvents(
