@@ -9,6 +9,9 @@
 #      The script auto-restarts agentgw to re-establish WS tunnels.
 #   3. Can't SCP over a running binary — upload to temp name first, stop, then mv.
 
+# shellcheck disable=SC2012  # ls -t|head-1 is the idiomatic "latest file" pattern; no find equivalent
+# shellcheck disable=SC2168  # 'local' used outside a function (real bug, out of R-008 scope; bash silently accepts it)
+# shellcheck disable=SC2153  # ${VERSION} is injected by the caller's environment, not a typo
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

@@ -24,6 +24,8 @@
 #                    Subdomains are automatically derived: api.<DOMAIN>, download.<DOMAIN>
 #   BUILD_VERSION    Version string to embed in binaries
 
+# shellcheck disable=SC2012  # ls -lh|awk '{print $5}' is the idiomatic file-size display; no clean find equivalent
+# shellcheck disable=SC2034  # Alias variables (LINUX_BIN, GW_LINUX_BIN, OUT_DIR_LINUX) exported for callers that source this script
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

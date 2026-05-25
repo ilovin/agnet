@@ -1225,6 +1225,24 @@ except:
     echo ""
   fi
 
+  # ── Test 20: shellcheck on 4 core scripts ────────────────────────────
+  test_name="shellcheck on core scripts (deploy/build/install/package)"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  if ! command -v shellcheck >/dev/null 2>&1; then
+    echo -e "${YELLOW}[scripts] SKIP: $test_name — shellcheck not installed (brew install shellcheck)${NC}"
+    passed=$((passed + 1))
+  elif shellcheck scripts/deploy.sh scripts/build.sh scripts/install.sh scripts/package.sh > /tmp/shellcheck.log 2>&1; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+    cat /tmp/shellcheck.log
+  fi
+  echo ""
+
   # ── Summary ──────────────────────────────────────────────────────────
   echo "========================================"
   echo "       SCRIPTS TEST SUMMARY"

@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2001  # sed used for complex regex stripping; ${var//pat/rep} can't replicate all patterns
+# shellcheck disable=SC2012  # ls used for file-size display; no clean find equivalent
+# shellcheck disable=SC2034  # REPO_ROOT/AGENTD_REMOTE_DIR set as discovery results; may be used by sourcing callers
+# shellcheck disable=SC2088  # AGENTD_REMOTE_DIR="~/bin": tilde is intentionally unexpanded (expands on remote via SSH)
+# shellcheck disable=SC1012  # \n inside Python heredoc passed over SSH — it's Python source, not a bash escape
+# shellcheck disable=SC2140  # Same heredoc: "A"B"C" form is part of the shell-quoted Python string literal
+# shellcheck disable=SC2015  # A && B || C is intentional; C (warn) should always run on failure path
 # phone-talk one-click installer
 #
 # Scans SSH config for remote nodes, deploys agentd, starts agentgw,

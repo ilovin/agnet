@@ -15,6 +15,7 @@
 #   dist/scripts/
 #   dist/manifest.json
 
+# shellcheck disable=SC2034  # os/arch loop variables used for naming context; kept for readability
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
