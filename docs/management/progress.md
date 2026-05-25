@@ -51,6 +51,7 @@
 ## 5) Change Log
 | Date | What Changed | By | Notes |
 |---|---|---|---|
+| 2026-05-25 | **FIX-CONTENTMATCH-CJK shipped local** | dev/test agent | content_match.go nonWordRe 改 `[^\p{L}\p{N}]+` + utf8.RuneCountInString; scanner 单测全部 PASS（含 3 个新 CJK 测试）; scripts/build.sh + scripts/deploy.sh local 完成; /tmp/agentd-local.log 中文 pane 出现 `pane match success bestScore=13 secondBest=6 margin=7`（修复前为 score=0），同 pane 另一个 candidate 13/13 ambiguous reject 属于内容近似的预期行为；待用户在已存在 Chrome tab 完成最终业务验收 |
 | 2026-05-21 | **R-007 需求+计划完成** | team-lead | docs/requirements/r-007-hermes-agent.md; docs/plans/hermes-provider-impl.md; Gateway API集成路径 |
 | 2026-05-21 | **hermes-explorer 完成** | hermes-explorer | CLI协议探测: oneshot/REPL/gateway全面分析; 推荐Gateway HTTP API路径 |
 | 2026-05-21 | **hermes-dev-client 启动** | team-lead | TDD开发 hermesclient HTTP client包 |
