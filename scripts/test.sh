@@ -1197,28 +1197,33 @@ except:
   total=$((total + 1))
   echo "[scripts] TEST $total: $test_name (~1-2 min)"
 
-  # Pre-condition: dry-run CHECK_ONLY validates existing dist artifacts before
-  # package.sh recreates them; ensure dist/ has real binaries from a prior build.
-  if [[ ! -e "dist/platform/darwin-arm64/agentgw" ]]; then
-    echo "[scripts]   Pre-condition: dist/agentgw absent, running build.sh + package.sh..."
-    bash scripts/build.sh >/dev/null 2>&1 && bash scripts/package.sh >/dev/null 2>&1 || true
-  fi
-
-  local dry_run_log
-  dry_run_log=$(mktemp -t phone-talk-dry-run.XXXX)
-  if DEPLOY_DRY_RUN=1 bash scripts/deploy.sh local >"$dry_run_log" 2>&1; then
-    passed=$((passed + 1))
-    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
-    rm -f "$dry_run_log"
-  else
-    local dry_rc=$?
+  # Explicit pre-requisite: build real binaries and package them so dist/ has
+  # real artifacts for CHECK_ONLY to validate (earlier tests rm -rf out/ dist/).
+  if ! bash scripts/build.sh >/dev/null 2>&1; then
     failed=$((failed + 1))
-    echo -e "${RED}[scripts] FAIL: $test_name (exit=$dry_rc)${NC}"
-    echo "--- last 30 lines ---"
-    tail -30 "$dry_run_log"
-    rm -f "$dry_run_log"
+    echo -e "${RED}[scripts] FAIL: $test_name (pre-requisite build.sh failed)${NC}"
+    echo ""
+  elif ! bash scripts/package.sh >/dev/null 2>&1; then
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name (pre-requisite package.sh failed)${NC}"
+    echo ""
+  else
+    local dry_run_log
+    dry_run_log=$(mktemp -t phone-talk-dry-run.XXXX)
+    if DEPLOY_DRY_RUN=1 bash scripts/deploy.sh local >"$dry_run_log" 2>&1; then
+      passed=$((passed + 1))
+      echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+      rm -f "$dry_run_log"
+    else
+      local dry_rc=$?
+      failed=$((failed + 1))
+      echo -e "${RED}[scripts] FAIL: $test_name (exit=$dry_rc)${NC}"
+      echo "--- last 30 lines ---"
+      tail -30 "$dry_run_log"
+      rm -f "$dry_run_log"
+    fi
+    echo ""
   fi
-  echo ""
 
   # ── Summary ──────────────────────────────────────────────────────────
   echo "========================================"
