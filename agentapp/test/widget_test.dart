@@ -1631,4 +1631,129 @@ void main() {
       expect(messages[0].exitPlanMode!.plan, equals('Step 1\nStep 2'));
     },
   );
+
+  // ─── Bug fix: message fragmentation across polling and non-streaming ────
+
+  test(
+    'text_delta stream followed by kind=assistant complete event produces one bubble',
+    () {
+      // Reproduces the core fragmentation bug: the backend emits text_delta
+      // events during streaming, then emits a final kind='assistant' event
+      // with the full text.  The guard at line ~880 only covered kind=='',
+      // kind=='text', and kind=='result' — it did NOT cover kind=='assistant'.
+      // As a result flushMergeBuf() flushed the deltas as bubble #1 and then
+      // the kind='assistant' complete event was added as bubble #2.
+      final events = <Map<String, dynamic>>[
+        {
+          'seq': 1,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '本次清理工作完成。',
+        },
+        {
+          'seq': 2,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '如果还需要其他操作',
+        },
+        {
+          'seq': 3,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'text_delta',
+          'text': '（比如 force push），告诉我。',
+        },
+        // Backend emits a final kind='assistant' event with the full text.
+        {
+          'seq': 4,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'assistant',
+          'text': '本次清理工作完成。如果还需要其他操作（比如 force push），告诉我。',
+        },
+      ];
+
+      final messages = convertEventsToMessages(events);
+
+      expect(
+        messages,
+        hasLength(1),
+        reason:
+            'text_delta stream + final kind=assistant event should produce exactly one bubble',
+      );
+      expect(messages.first.text, contains('本次清理工作完成'));
+      expect(messages.first.text, contains('告诉我'));
+    },
+  );
+
+  test(
+    'short non-streaming kind=assistant message is shown completely without truncation',
+    () {
+      // A single complete assistant event (no text_delta precursor) should be
+      // added as-is without any truncation.  This ensures the isNoiseOnlyText /
+      // processTerminalOutput pipeline does not drop content from short Chinese
+      // sentences that contain parentheses and punctuation.
+      const fullText =
+          '本次清理工作完成。如果还需要其他操作（比如 force push、删除 release 旧目录、'
+          '清理工作区中其他未 track 的大文件），告诉我。';
+
+      final messages = convertEventsToMessages([
+        {
+          'seq': 5,
+          'role': 'assistant',
+          'raw': false,
+          'kind': 'assistant',
+          'text': fullText,
+        },
+      ]);
+
+      expect(
+        messages,
+        hasLength(1),
+        reason: 'single non-streaming assistant event should produce one bubble',
+      );
+      expect(
+        messages.first.text,
+        equals(fullText),
+        reason: 'full text must be preserved without truncation',
+      );
+    },
+  );
+
+  test(
+    'mergeConversationEvents preserves both events when both have seq=0 (seq missing)',
+    () {
+      // If two events arrive without a seq field they both default to seq=0.
+      // The previous implementation stored them by seq in a Map<int,…>, so the
+      // second event silently overwrote the first one — dropping half the
+      // conversation.  Both events must survive the merge.
+      final merged = mergeConversationEvents(
+        [],
+        [
+          {
+            'role': 'assistant',
+            'text': '第一条消息（无 seq）',
+            'raw': false,
+          },
+          {
+            'role': 'assistant',
+            'text': '第二条消息（无 seq）',
+            'raw': false,
+          },
+        ],
+      );
+
+      expect(
+        merged,
+        hasLength(2),
+        reason:
+            'both seq=0 events must be preserved; the second must not overwrite the first',
+      );
+      final texts = merged.map((e) => e['text'] as String).toSet();
+      expect(texts, contains('第一条消息（无 seq）'));
+      expect(texts, contains('第二条消息（无 seq）'));
+    },
+  );
 }

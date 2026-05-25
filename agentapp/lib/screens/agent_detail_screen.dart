@@ -477,12 +477,20 @@ List<Map<String, dynamic>> mergeConversationEvents(
   List<Map<String, dynamic>> existing,
   Iterable<dynamic> incoming,
 ) {
+  // Events with a real seq (>0) are deduplicated: incoming wins over existing.
+  // Events with seq==0 (missing seq field) cannot be deduplicated safely —
+  // each one is kept as a distinct entry so content is not silently dropped.
   final bySeq = <int, Map<String, dynamic>>{};
+  final seqZeroEvents = <Map<String, dynamic>>[];
 
   void addEvent(Map<dynamic, dynamic> raw) {
     final normalized = normalizeHistoryEvent(raw);
     final seq = (normalized['seq'] as num?)?.toInt() ?? 0;
-    bySeq[seq] = normalized;
+    if (seq > 0) {
+      bySeq[seq] = normalized;
+    } else {
+      seqZeroEvents.add(normalized);
+    }
   }
 
   for (final event in existing) {
@@ -492,12 +500,14 @@ List<Map<String, dynamic>> mergeConversationEvents(
     addEvent(event as Map);
   }
 
-  final merged = bySeq.values.toList()
-    ..sort(
-      (a, b) => ((a['seq'] as num?)?.toInt() ?? 0).compareTo(
-        (b['seq'] as num?)?.toInt() ?? 0,
-      ),
-    );
+  final merged = [
+    ...seqZeroEvents,
+    ...bySeq.values,
+  ]..sort(
+    (a, b) => ((a['seq'] as num?)?.toInt() ?? 0).compareTo(
+      (b['seq'] as num?)?.toInt() ?? 0,
+    ),
+  );
   return merged;
 }
 
@@ -874,13 +884,17 @@ List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
     // Non-fragment assistant message (complete message from stream-json).
     // If we already received text_delta fragments for this turn, the content
     // was already flushed via mergeBuf — skip to avoid duplicates.
-    // Also handle legacy events where kind is empty.
-    // For 'result' events: extract extra content (e.g. btw addendum) that wasn't
-    // in text_deltas. Only skip if result text is fully covered by delta text.
+    // Covered kinds:
+    //   ''/'text'  — legacy authoritative event (same full text as deltas)
+    //   'result'   — stream-json result; may contain extra "btw" content
+    //   'assistant' — backend emits this after streaming deltas with the full
+    //                 text; without this guard the deltas would be flushed as
+    //                 bubble #1 and the 'assistant' event added as bubble #2,
+    //                 fragmenting one Claude turn into two separate bubbles.
     if (role == 'assistant' &&
         !raw &&
         hadTextDelta &&
-        (kind == 'text' || kind == '' || kind == 'result')) {
+        (kind == 'text' || kind == '' || kind == 'result' || kind == 'assistant')) {
       flushMergeBuf();
       if (kind == 'result') {
         // Check if result contains extra content beyond text_deltas (e.g. btw)
