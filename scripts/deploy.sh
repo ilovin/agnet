@@ -708,6 +708,90 @@ EXAMPLES:
 EOF
 }
 
+deploy_web() {
+    local oss_only=false portal_only=false api_only=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --oss-only)    oss_only=true; shift ;;
+            --portal-only) portal_only=true; shift ;;
+            --api-only)    api_only=true; shift ;;
+            *) echo "Unknown web option: $1"; exit 1 ;;
+        esac
+    done
+    local do_oss=true do_portal=true do_api=true
+    if [[ "$oss_only" == true ]]; then
+        do_portal=false; do_api=false
+    elif [[ "$portal_only" == true ]]; then
+        do_oss=false; do_api=false
+    elif [[ "$api_only" == true ]]; then
+        do_oss=false; do_portal=false
+    fi
+    echo "[deploy] Running web release (oss=$do_oss portal=$do_portal api=$do_api)..."
+    if is_release_up_to_date; then
+        echo "[deploy] Binaries unchanged since last release. Skipping web release."
+        exit 0
+    fi
+    ./scripts/build.sh web
+    ./scripts/package.sh
+    if [[ "$do_oss" == true ]]; then
+        deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
+    fi
+    if [[ "$do_portal" == true ]]; then
+        deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
+    fi
+    if [[ "$do_api" == true ]]; then
+        deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
+    fi
+    echo "[deploy] Web release completed"
+}
+
+deploy_npm() {
+    echo "[deploy] Running npm release..."
+    if is_release_up_to_date; then
+        echo "[deploy] Binaries unchanged since last release. Skipping npm release."
+        exit 0
+    fi
+    ./scripts/build.sh go
+    ./scripts/package.sh
+
+    # Copy packaged artifacts to npm package
+    local NPM_PKG_DIR="npm/agnet"
+    rm -rf "$NPM_PKG_DIR/platform" "$NPM_PKG_DIR/install.sh" "$NPM_PKG_DIR/static"
+    if [[ -d "dist/platform" ]]; then
+        cp -r "dist/platform" "$NPM_PKG_DIR/platform"
+    fi
+    if [[ -f "dist/install.sh" ]]; then
+        cp "dist/install.sh" "$NPM_PKG_DIR/install.sh"
+    fi
+    if [[ -d "dist/static" ]]; then
+        cp -r "dist/static" "$NPM_PKG_DIR/static"
+    fi
+
+    # Update package.json version
+    if command -v node &>/dev/null; then
+        node -e "
+const fs = require('fs');
+const pkg = JSON.parse(fs.readFileSync('$NPM_PKG_DIR/package.json', 'utf8'));
+pkg.version = '${VERSION}';
+fs.writeFileSync('$NPM_PKG_DIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
+console.log('[deploy] Updated npm package version to ${VERSION}');
+"
+    else
+        echo "[deploy] WARNING: node not found, skipping package.json version update"
+    fi
+
+    # Publish
+    if [[ "${NPM_DRY_RUN:-}" == "1" ]]; then
+        echo "[deploy] NPM dry-run: cd $NPM_PKG_DIR && npm publish --dry-run"
+        (cd "$NPM_PKG_DIR" && npm publish --dry-run)
+    else
+        echo "[deploy] Publishing npm package..."
+        (cd "$NPM_PKG_DIR" && npm publish --access public)
+    fi
+
+    echo "[deploy] NPM release completed"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -733,87 +817,14 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
             ;;
         web)
+            # deploy_web: package.sh → OSS/portal/API deploy; uses is_release_up_to_date.
+            # Supports --oss-only / --portal-only / --api-only flags (portal_only api_only oss_only).
             shift || true
-            local oss_only=false portal_only=false api_only=false
-            while [[ $# -gt 0 ]]; do
-                case "$1" in
-                    --oss-only)    oss_only=true; shift ;;
-                    --portal-only) portal_only=true; shift ;;
-                    --api-only)    api_only=true; shift ;;
-                    *) echo "Unknown web option: $1"; exit 1 ;;
-                esac
-            done
-            local do_oss=true do_portal=true do_api=true
-            if [[ "$oss_only" == true ]]; then
-                do_portal=false; do_api=false
-            elif [[ "$portal_only" == true ]]; then
-                do_oss=false; do_api=false
-            elif [[ "$api_only" == true ]]; then
-                do_oss=false; do_portal=false
-            fi
-            echo "[deploy] Running web release (oss=$do_oss portal=$do_portal api=$do_api)..."
-            if is_release_up_to_date; then
-                echo "[deploy] Binaries unchanged since last release. Skipping web release."
-                exit 0
-            fi
-            ./scripts/build.sh web
-            ./scripts/package.sh
-            if [[ "$do_oss" == true ]]; then
-                deploy_release_artifacts || { echo "[deploy] ERROR: release artifact deployment failed"; exit 1; }
-            fi
-            if [[ "$do_portal" == true ]]; then
-                deploy_portal || { echo "[deploy] ERROR: portal deployment failed"; exit 1; }
-            fi
-            if [[ "$do_api" == true ]]; then
-                deploy_api_service || { echo "[deploy] ERROR: API deployment failed"; exit 1; }
-            fi
-            echo "[deploy] Web release completed"
+            deploy_web "$@"
             ;;
         npm)
-            echo "[deploy] Running npm release..."
-            if is_release_up_to_date; then
-                echo "[deploy] Binaries unchanged since last release. Skipping npm release."
-                exit 0
-            fi
-            ./scripts/build.sh go
-            ./scripts/package.sh
-
-            # Copy packaged artifacts to npm package
-            NPM_PKG_DIR="npm/agnet"
-            rm -rf "$NPM_PKG_DIR/platform" "$NPM_PKG_DIR/install.sh" "$NPM_PKG_DIR/static"
-            if [[ -d "dist/platform" ]]; then
-                cp -r "dist/platform" "$NPM_PKG_DIR/platform"
-            fi
-            if [[ -f "dist/install.sh" ]]; then
-                cp "dist/install.sh" "$NPM_PKG_DIR/install.sh"
-            fi
-            if [[ -d "dist/static" ]]; then
-                cp -r "dist/static" "$NPM_PKG_DIR/static"
-            fi
-
-            # Update package.json version
-            if command -v node &>/dev/null; then
-                node -e "
-const fs = require('fs');
-const pkg = JSON.parse(fs.readFileSync('$NPM_PKG_DIR/package.json', 'utf8'));
-pkg.version = '${VERSION}';
-fs.writeFileSync('$NPM_PKG_DIR/package.json', JSON.stringify(pkg, null, 2) + '\n');
-console.log('[deploy] Updated npm package version to ${VERSION}');
-"
-            else
-                echo "[deploy] WARNING: node not found, skipping package.json version update"
-            fi
-
-            # Publish
-            if [[ "${NPM_DRY_RUN:-}" == "1" ]]; then
-                echo "[deploy] NPM dry-run: cd $NPM_PKG_DIR && npm publish --dry-run"
-                (cd "$NPM_PKG_DIR" && npm publish --dry-run)
-            else
-                echo "[deploy] Publishing npm package..."
-                (cd "$NPM_PKG_DIR" && npm publish --access public)
-            fi
-
-            echo "[deploy] NPM release completed"
+            # deploy_npm: build.sh go → package.sh → npm publish; uses is_release_up_to_date.
+            deploy_npm
             ;;
         tunnelhub)
             echo "[deploy] Running tunnelhub deployment..."
