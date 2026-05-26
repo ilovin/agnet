@@ -1920,3 +1920,79 @@ func TestLoadFromStoreSpawnsOpenCodeWatcher(t *testing.T) {
 		}
 	})
 }
+
+// TestPeriodicScan_RebuildsWatcherWhenMissing verifies that when an agent is
+// already in memory (PID matches) but its watcher is nil (e.g. after agentd
+// restart where LoadFromStore's contentMatch returned ""), PeriodicScan
+// falls through to the attach path and rebuilds the watcher.
+func TestPeriodicScan_RebuildsWatcherWhenMissing(t *testing.T) {
+	m := newTestManager(t)
+	tmpDir := t.TempDir()
+
+	// Create a minimal .jsonl session file so Attach can start a watcher.
+	sessionFile := filepath.Join(tmpDir, "abc123.jsonl")
+	if err := os.WriteFile(sessionFile, []byte{}, 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	ownPID := os.Getpid()
+
+	// Make processRunning always return true for ownPID as claude so that
+	// CleanupDeadAgents does not remove the rescued agent.
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == ownPID
+	})
+
+	// Simulate a display-only agent (nil watcher) already in memory for ownPID.
+	// We attach once with no session file, creating a display-only agent.
+	existingAg, err := m.Attach(scanner.ProcessInfo{
+		PID:         ownPID,
+		Provider:    "claude",
+		WorkDir:     tmpDir,
+		SessionFile: "",
+		SessionID:   "",
+	})
+	if err != nil {
+		t.Fatalf("initial Attach (display-only) failed: %v", err)
+	}
+	if existingAg.Watcher() != nil {
+		t.Fatalf("precondition failed: expected nil watcher on display-only agent")
+	}
+
+	// Now simulate PeriodicScan finding the same PID but this time with a
+	// session file available (e.g. tmuxTarget gave enough signal).
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:         ownPID,
+			Provider:    "claude",
+			WorkDir:     tmpDir,
+			SessionFile: sessionFile,
+			SessionID:   "abc123",
+			Terminal:    "/dev/ttys001", // non-empty → AttachDecisionAuto
+		}}, nil
+	})
+
+	// Override session file finder to use the injected session file.
+	m.SetFindSessionFile(func(info scanner.ProcessInfo) string {
+		return info.SessionFile
+	})
+
+	// Run the periodic attach logic once.
+	m.RunPeriodicScanOnce()
+
+	// The display-only agent should now have been rescued with a real watcher,
+	// OR a new agent with a watcher was created. Either way, at least one
+	// claude agent for ownPID should have a non-nil watcher.
+	agents := m.List()
+	var rescued bool
+	for _, ag := range agents {
+		if ag.PID == ownPID && ag.Provider == "claude" && ag.Watcher() != nil {
+			rescued = true
+			t.Cleanup(func() { ag.Watcher().Stop() })
+			break
+		}
+	}
+	if !rescued {
+		t.Fatalf("expected at least one claude agent (PID %d) with active watcher after PeriodicScan rescue, got %d agents total", ownPID, len(agents))
+	}
+}

@@ -2733,87 +2733,93 @@ func (m *Manager) PeriodicScanAndAttach() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		// Scan for new processes
-		s := scanner.New()
-		processes, err := s.Scan()
-		if err != nil {
-			log.Printf("[PeriodicScan] Scan failed: %v", err)
+		m.RunPeriodicScanOnce()
+	}
+}
+
+// RunPeriodicScanOnce executes one iteration of the periodic scan-and-attach
+// loop. It is exported so tests can drive it directly without waiting for the
+// ticker. The logic mirrors what PeriodicScanAndAttach runs on each tick.
+func (m *Manager) RunPeriodicScanOnce() {
+	// Scan for new processes (uses the scanExisting hook in tests).
+	processes, err := m.ScanExisting()
+	if err != nil {
+		log.Printf("[PeriodicScan] Scan failed: %v", err)
+		return
+	}
+
+	// Filter out processes that are children of existing agents
+	var filteredProcesses []scanner.ProcessInfo
+	m.mu.RLock()
+	for _, proc := range processes {
+		isChildAgent := false
+		for _, ag := range m.agents {
+			if ag.PID > 0 && proc.PPID == ag.PID {
+				isChildAgent = true
+				break
+			}
+		}
+		if !isChildAgent {
+			filteredProcesses = append(filteredProcesses, proc)
+		}
+	}
+	m.mu.RUnlock()
+
+	// Find new processes to attach to, and rescue existing ones whose watcher
+	// is nil (e.g. after agentd restart with ambiguous contentMatch).
+	for _, proc := range filteredProcesses {
+		candidate := m.ClassifyAttachCandidate(proc)
+		if candidate.Decision != AttachDecisionAuto {
 			continue
 		}
 
-		// Filter out processes that are children of existing agents
-		var filteredProcesses []scanner.ProcessInfo
+		// Check if we already have an agent for this PID.
+		// If found but the watcher is nil, fall through to the attach path so
+		// the agent gets a live watcher (rescue path for Bug 2).
+		foundWithWatcher := false
 		m.mu.RLock()
-		for _, proc := range processes {
-			isChildAgent := false
-			for _, ag := range m.agents {
-				if ag.PID > 0 && proc.PPID == ag.PID {
-					isChildAgent = true
-					break
-				}
-			}
-			if !isChildAgent {
-				filteredProcesses = append(filteredProcesses, proc)
-			}
-		}
-		m.mu.RUnlock()
-
-		// Get current agents to compare
-		m.mu.RLock()
-		currentAgents := make(map[string]bool)
-		for id := range m.agents {
-			currentAgents[id] = true
-		}
-		m.mu.RUnlock()
-
-		// Track which PIDs we already have
-		existingPIDs := make(map[int]bool)
-		for _, proc := range filteredProcesses {
-			existingPIDs[proc.PID] = true
-		}
-
-		// Find new processes to attach to
-		for _, proc := range filteredProcesses {
-			candidate := m.ClassifyAttachCandidate(proc)
-			if candidate.Decision != AttachDecisionAuto {
-				continue
-			}
-
-			// Check if we already have an agent for this PID
-			found := false
-			m.mu.RLock()
-			for _, ag := range m.agents {
-				if ag.PID == proc.PID && ag.Provider == proc.Provider {
-					found = true
-					break
-				}
-			}
-			m.mu.RUnlock()
-
-			if !found {
-				log.Printf("[PeriodicScan] Found new %s process (PID %d), attaching...", proc.Provider, proc.PID)
-				if ag, err := m.Attach(proc); err != nil {
-					log.Printf("[PeriodicScan] Failed to attach to PID %d: %v", proc.PID, err)
+		for _, ag := range m.agents {
+			if ag.PID == proc.PID && ag.Provider == proc.Provider {
+				if ag.Watcher() != nil {
+					foundWithWatcher = true
 				} else {
-					log.Printf("[PeriodicScan] Successfully attached to %s (PID %d) as agent %s",
-						proc.Provider, proc.PID, ag.ID)
+					log.Printf("[PeriodicScan] Rescuing %s pid %d: watcher is nil, triggering attach", proc.Provider, proc.PID)
 				}
+				break
 			}
 		}
+		m.mu.RUnlock()
 
-		// Cleanup dead agents
-		m.CleanupDeadAgents()
+		if foundWithWatcher {
+			// Already tracked with an active watcher — nothing to do.
+			continue
+		}
+
+		log.Printf("[PeriodicScan] Attaching to %s process (PID %d)...", proc.Provider, proc.PID)
+		if ag, err := m.Attach(proc); err != nil {
+			log.Printf("[PeriodicScan] Failed to attach to PID %d: %v", proc.PID, err)
+		} else {
+			log.Printf("[PeriodicScan] Successfully attached to %s (PID %d) as agent %s",
+				proc.Provider, proc.PID, ag.ID)
+		}
 	}
+
+	// Cleanup dead agents
+	m.CleanupDeadAgents()
 }
 
 // CleanupDeadAgents removes agents whose underlying process is no longer running.
 // When a dead agent is removed, any display-only agents sharing the same session
 // are promoted to full agents with a watcher.
 func (m *Manager) CleanupDeadAgents() {
+	procRunning := m.processRunning
+	if procRunning == nil {
+		procRunning = isProcessRunning
+	}
 	m.mu.Lock()
 	var removedSessions []string
 	for id, ag := range m.agents {
-		if ag.PID > 0 && !isProcessRunning(ag.PID, ag.Provider) {
+		if ag.PID > 0 && !procRunning(ag.PID, ag.Provider) {
 			log.Printf("[PeriodicScan] Cleaning up dead agent %s (%s, PID %d)", ag.ID, ag.Name, ag.PID)
 			resumeID, _ := m.GetResumeSessionID(ag.ID)
 			if resumeID != "" {
@@ -2836,7 +2842,7 @@ func (m *Manager) CleanupDeadAgents() {
 			if agentResumeID != sessionID {
 				continue
 			}
-			if !isProcessRunning(ag.PID, ag.Provider) {
+			if !procRunning(ag.PID, ag.Provider) {
 				continue
 			}
 			log.Printf("[PeriodicScan] Promoting display-only agent %s (PID %d) for freed session %s", ag.ID, ag.PID, sessionID)
