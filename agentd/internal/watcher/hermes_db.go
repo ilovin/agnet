@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -169,6 +170,14 @@ type HermesDBWatcher struct {
 	// same session is unaffected.
 	isSending func() bool
 
+	// pid is the OS pid of the hermes CLI process this watcher is attached
+	// to. When > 0, each poll() probes it via probeProcessFunc; on first
+	// detection of process death, onProcessDead fires (sync.Once) and the
+	// poll loop exits. Plan §M4 §2.3.
+	pid             int
+	onProcessDead   func()
+	processDeadOnce sync.Once
+
 	stop chan struct{}
 	once sync.Once
 
@@ -221,6 +230,53 @@ func (w *HermesDBWatcher) SetSendingChecker(fn func() bool) {
 	w.isSending = fn
 }
 
+// probeProcessFunc reports whether the given pid is alive. Replaceable for
+// tests via SetProbeProcessFuncForTest. Default uses syscall.Kill(pid, 0):
+// returns nil if the process exists and we have permission to signal it,
+// returns ESRCH if the process is gone. We only treat ESRCH (or any non-nil
+// error) as "dead" — permission errors (EPERM) imply the process is alive.
+var probeProcessFunc = defaultProbeProcess
+
+func defaultProbeProcess(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true
+	}
+	// EPERM means process exists but we lack signal permission — still alive.
+	if err == syscall.EPERM {
+		return true
+	}
+	return false
+}
+
+// SetProbeProcessFuncForTest replaces probeProcessFunc for the duration of a
+// test. Returns a restore function callers should defer.
+func SetProbeProcessFuncForTest(fn func(pid int) bool) (restore func()) {
+	orig := probeProcessFunc
+	probeProcessFunc = fn
+	return func() { probeProcessFunc = orig }
+}
+
+// SetPID records the OS pid of the hermes CLI process this watcher should
+// monitor. When set (>0), each poll() probes the pid; on death, onProcessDead
+// fires once and the loop exits. Plan §M4 §2.3.
+func (w *HermesDBWatcher) SetPID(pid int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.pid = pid
+}
+
+// SetOnProcessDead registers a callback that fires at most once when the
+// monitored hermes pid is detected as dead. Plan §M4 §2.3.
+func (w *HermesDBWatcher) SetOnProcessDead(fn func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.onProcessDead = fn
+}
+
 // SetSessionID updates the session this watcher is tracking. Used after a
 // chunk.Done that established a fresh session id; we reset lastTS to the
 // latest message timestamp of the new session so the next poll doesn't
@@ -255,15 +311,44 @@ func (w *HermesDBWatcher) loop() {
 	defer ticker.Stop()
 	// Run an immediate first poll so skipExisting / lastTS seeding doesn't
 	// have to wait a whole tick.
-	w.poll()
+	if w.checkProcessAlive() {
+		w.poll()
+	} else {
+		return
+	}
 	for {
 		select {
 		case <-w.stop:
 			return
 		case <-ticker.C:
+			if !w.checkProcessAlive() {
+				return
+			}
 			w.poll()
 		}
 	}
+}
+
+// checkProcessAlive probes the monitored hermes pid (if any). Returns true if
+// the process is alive (or no pid is set). On first observation of death, fires
+// onProcessDead exactly once via sync.Once and returns false so the caller can
+// exit the poll loop. Plan §M4 §2.3.
+func (w *HermesDBWatcher) checkProcessAlive() bool {
+	w.mu.Lock()
+	pid := w.pid
+	cb := w.onProcessDead
+	w.mu.Unlock()
+	if pid <= 0 {
+		return true
+	}
+	if probeProcessFunc(pid) {
+		return true
+	}
+	log.Printf("[HermesDB][agent=%s] hermes pid %d gone; firing onProcessDead and stopping watcher", w.agentID, pid)
+	if cb != nil {
+		w.processDeadOnce.Do(cb)
+	}
+	return false
 }
 
 // poll executes one polling cycle. Concurrency-safe: only the goroutine

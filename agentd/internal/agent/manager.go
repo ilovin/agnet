@@ -2456,6 +2456,23 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			}
 			return ag.IsSending()
 		})
+		// Plan §M4 §2.3: detect hermes CLI process death so the agent flips to
+		// stopped without waiting for a user send to discover the dead pane.
+		// pid==0 (LoadFromStore-after-restart path that doesn't carry the live
+		// pid) is a no-op inside the watcher.
+		if pid > 0 {
+			w.SetPID(pid)
+			w.SetOnProcessDead(func() {
+				ag := m.Get(agentID)
+				if ag == nil {
+					return
+				}
+				log.Printf("[HermesDBWatcher] hermes pid %d gone, marking agent %s stopped", pid, agentID)
+				// setStatus(StatusStopped) → wireStatusCallback fires
+				// onStatusChange which broadcasts agent.status_changed.
+				ag.setStatus(StatusStopped)
+			})
+		}
 		w.OnSessionSwitch(func(newSessionID string) {
 			ag := m.Get(agentID)
 			if ag == nil {
