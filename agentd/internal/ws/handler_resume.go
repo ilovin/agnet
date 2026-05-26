@@ -167,8 +167,8 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 			ocArgs = append(ocArgs, "-m", currentModel)
 		}
 
-		// Resolve opencode executable path (reuse findExecutable from handler.go)
-		ocCmd := findExecutable("opencode")
+		// Resolve opencode executable path via AgentService
+		ocCmd := h.service.FindExecutable("opencode")
 		if ocCmd == "opencode" && ag.Cmd != "" {
 			ocCmd = ag.Cmd
 		}
