@@ -68,42 +68,58 @@ EOF
 
 run_unit_tests() {
   local agentd_ok=0 agentgw_ok=0 agentcli_ok=0
-  local agentd_output="" agentgw_output="" agentcli_output=""
 
-  echo "[test] Running Go unit tests..."
+  echo "[test] Running Go unit tests (parallel: agentd + agentgw + agentcli)..."
   echo ""
 
-  # Run agentd unit tests (exclude integration tests)
+  # Run all three Go modules in parallel — they are independent Go modules with
+  # separate caches, and Go itself parallelizes packages within each module via -p.
+  # Output is captured to per-module logs and printed sequentially after all finish.
+  local tmpdir agentd_log agentgw_log agentcli_log
+  tmpdir=$(mktemp -d -t phone-talk-test.XXXXXX)
+  agentd_log="$tmpdir/agentd.log"
+  agentgw_log="$tmpdir/agentgw.log"
+  agentcli_log="$tmpdir/agentcli.log"
+
+  (cd "$AGENTD_DIR"  && go test ./... -tags="!integration" -timeout=120s) >"$agentd_log"  2>&1 &
+  local agentd_pid=$!
+  (cd "$AGENTGW_DIR" && go test ./... -tags="!integration" -timeout=120s) >"$agentgw_log" 2>&1 &
+  local agentgw_pid=$!
+  (cd "$AGENTCLI_DIR" && go test ./...                     -timeout=120s) >"$agentcli_log" 2>&1 &
+  local agentcli_pid=$!
+
+  if wait "$agentd_pid";  then agentd_ok=1;  fi
+  if wait "$agentgw_pid"; then agentgw_ok=1; fi
+  if wait "$agentcli_pid"; then agentcli_ok=1; fi
+
   echo "[test] agentd: go test ./..."
-  if agentd_output=$(cd "$AGENTD_DIR" && go test ./... -tags="!integration" 2>&1); then
-    agentd_ok=1
+  cat "$agentd_log"
+  if [[ $agentd_ok -eq 1 ]]; then
     echo -e "${GREEN}[test] agentd: PASS${NC}"
   else
     echo -e "${RED}[test] agentd: FAIL${NC}"
-    echo "$agentd_output"
   fi
   echo ""
 
-  # Run agentgw unit tests (exclude integration tests)
   echo "[test] agentgw: go test ./..."
-  if agentgw_output=$(cd "$AGENTGW_DIR" && go test ./... -tags="!integration" 2>&1); then
-    agentgw_ok=1
+  cat "$agentgw_log"
+  if [[ $agentgw_ok -eq 1 ]]; then
     echo -e "${GREEN}[test] agentgw: PASS${NC}"
   else
     echo -e "${RED}[test] agentgw: FAIL${NC}"
-    echo "$agentgw_output"
   fi
   echo ""
 
   echo "[test] agentcli: go test ./..."
-  if agentcli_output=$(cd "$AGENTCLI_DIR" && go test ./... 2>&1); then
-    agentcli_ok=1
+  cat "$agentcli_log"
+  if [[ $agentcli_ok -eq 1 ]]; then
     echo -e "${GREEN}[test] agentcli: PASS${NC}"
   else
     echo -e "${RED}[test] agentcli: FAIL${NC}"
-    echo "$agentcli_output"
   fi
   echo ""
+
+  rm -rf "$tmpdir"
 
   # Consolidated summary
   echo "========================================"
