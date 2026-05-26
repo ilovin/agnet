@@ -201,6 +201,21 @@ func (p *ProcessInfo) FindSessionFile() string {
 	return ""
 }
 
+// FindClaudeSessionFile returns the JSONL session file for a Claude process
+// identified by pid and workDir, using the full scanner chain:
+//  1. isClaudeProcess – returns "" immediately if PID is dead or not claude
+//  2. task fd discovery via /proc/<pid>/fd (Linux) or lsof (macOS)
+//  3. tmux pane activity filtering (skipped when tmuxTarget is empty)
+//  4. content matching to disambiguate multiple candidates
+//
+// This is the preferred lookup for LoadFromStore and startSessionWatcher;
+// it replaces the old manager.findSessionFile which bypassed isClaudeProcess
+// and used naive mtime-based candidate selection.
+func FindClaudeSessionFile(pid int, workDir string) string {
+	_, sessionFile := findClaudeSessionInfo(pid, workDir, "")
+	return sessionFile
+}
+
 // IsAttachable returns true if this process can be attached for interaction.
 func (p *ProcessInfo) IsAttachable() bool {
 	return p.Session != "" || p.Terminal != "" || p.TmuxTarget != ""
@@ -283,13 +298,25 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 // It defaults to "/home" but can be overridden in tests.
 var homeBaseDir = "/home"
 
+// isClaudeProcessFn is the function used to check if a PID is a live Claude process.
+// It can be overridden in tests to avoid /proc dependency.
+var isClaudeProcessFn = isClaudeProcess
+
+// SetIsClaudeProcessFn replaces the live-process validator used by FindClaudeSessionFile.
+// Returns a cleanup function that restores the original. For use in tests only.
+func SetIsClaudeProcessFn(fn func(int) bool) (restore func()) {
+	orig := isClaudeProcessFn
+	isClaudeProcessFn = fn
+	return func() { isClaudeProcessFn = orig }
+}
+
 func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", ""
 	}
 
-	if !isClaudeProcess(pid) {
+	if !isClaudeProcessFn(pid) {
 		return "", ""
 	}
 
@@ -777,6 +804,13 @@ func isOpenCodeProcess(pid int) bool {
 	}
 	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
 	return strings.Contains(cmdline, "opencode")
+}
+
+// ProjectDirName converts a workDir path to the Claude project directory name
+// used under ~/.claude/projects/. Exported so Manager can delegate to the same
+// canonical implementation rather than maintaining a duplicate.
+func ProjectDirName(workDir string) string {
+	return projectDirName(workDir)
 }
 
 func projectDirName(workDir string) string {

@@ -324,7 +324,7 @@ func (m *Manager) LoadFromStore() error {
 	// Spawn jsonl watchers for restored Claude agents now that the lock is
 	// released; newSessionWatcher() acquires m.mu.RLock internally.
 	for _, t := range claudeTodos {
-		sessionFile := m.findSessionFile(t.pid, t.workDir)
+		sessionFile := scanner.FindClaudeSessionFile(t.pid, t.workDir)
 		if sessionFile == "" {
 			log.Printf("[LoadFromStore] Could not find jsonl session file for Claude agent %s (PID %d); watcher not started", t.agentID, t.pid)
 			continue
@@ -1436,7 +1436,7 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 			return
 		}
 
-		sessionFile = m.findSessionFile(pid, workDir)
+		sessionFile = scanner.FindClaudeSessionFile(pid, workDir)
 		if sessionFile == "" {
 			retryCount++
 			if retryCount%10 == 0 {
@@ -1465,83 +1465,9 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 	log.Printf("[Watcher] Started session watcher for agent %s", agentID)
 }
 
-// findSessionFile attempts to find the Claude JSONL session file for a given PID.
-// It searches all candidate home directories so agentd running as root can find
-// sessions belonging to non-root users.
-func (m *Manager) findSessionFile(pid int, workDir string) string {
-	for _, home := range allClaudeHomeDirs() {
-		// Step 1: Check ~/.claude/sessions/<PID>.json to get sessionId
-		sessionsDir := filepath.Join(home, ".claude", "sessions")
-		pidFile := filepath.Join(sessionsDir, fmt.Sprintf("%d.json", pid))
-
-		if _, err := os.Stat(pidFile); err == nil {
-			data, err := os.ReadFile(pidFile)
-			if err == nil {
-				var pidInfo struct {
-					SessionID string `json:"sessionId"`
-				}
-				if err := json.Unmarshal(data, &pidInfo); err == nil && pidInfo.SessionID != "" {
-					projectsBase := filepath.Join(home, ".claude", "projects")
-					entries, _ := os.ReadDir(projectsBase)
-					for _, entry := range entries {
-						if entry.IsDir() {
-							jsonlPath := filepath.Join(projectsBase, entry.Name(), pidInfo.SessionID+".jsonl")
-							if _, err := os.Stat(jsonlPath); err == nil {
-								return jsonlPath
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Step 2: Fallback - look for JSONL created after this agent started (within the last 5 min)
-		dirName := projectDirName(workDir)
-		if dirName == "" || dirName == "-" {
-			dirName = "-"
-		}
-
-		projectsDir := filepath.Join(home, ".claude", "projects", dirName)
-		entries, err := os.ReadDir(projectsDir)
-		if err != nil {
-			continue
-		}
-
-		cutoff := time.Now().Add(-5 * time.Minute)
-		var latest string
-		var latestTime time.Time
-		for _, entry := range entries {
-			if strings.HasSuffix(entry.Name(), ".jsonl") {
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				if info.ModTime().After(cutoff) && info.ModTime().After(latestTime) {
-					latestTime = info.ModTime()
-					latest = filepath.Join(projectsDir, entry.Name())
-				}
-			}
-		}
-		if latest != "" {
-			return latest
-		}
-	}
-
-	return ""
-}
-
-// projectDirName mirrors scanner.projectDirName to ensure consistent directory
-// name calculation when locating session files under ~/.claude/projects/.
-func projectDirName(workDir string) string {
-	s := strings.ReplaceAll(strings.TrimRight(workDir, "/"), "/", "-")
-	s = strings.ReplaceAll(s, ".", "-")
-	s = strings.ReplaceAll(s, "_", "-")
-	return s
-}
-
-// FindSessionFileProjectDirName exposes projectDirName for testing.
+// FindSessionFileProjectDirName exposes scanner.ProjectDirName for testing.
 func (m *Manager) FindSessionFileProjectDirName(workDir string) string {
-	return projectDirName(workDir)
+	return scanner.ProjectDirName(workDir)
 }
 
 func (m *Manager) RestartInPlace(id, provider, cmd string, args []string, env []string) error {
