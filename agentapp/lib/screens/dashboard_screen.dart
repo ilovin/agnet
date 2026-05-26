@@ -40,14 +40,22 @@ List<String> buildSessionPreviewLines(
   int maxLines = 2,
   int maxCharsPerLine = 80,
 }) {
-  final lines = <String>[];
-  for (final text in texts) {
-    final normalized = text.replaceAll('\r', '\n');
-    for (final line in normalized.split('\n')) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) continue;
-      lines.add(buildCollapsedPreview(trimmed, maxChars: maxCharsPerLine));
+  // Find the last non-empty text entry only; do not span across multiple texts.
+  String? lastText;
+  for (var i = texts.length - 1; i >= 0; i--) {
+    if (texts[i].trim().isNotEmpty) {
+      lastText = texts[i];
+      break;
     }
+  }
+  if (lastText == null) return const [];
+
+  final lines = <String>[];
+  final normalized = lastText.replaceAll('\r', '\n');
+  for (final line in normalized.split('\n')) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) continue;
+    lines.add(buildCollapsedPreview(trimmed, maxChars: maxCharsPerLine));
   }
   if (lines.length <= maxLines) return lines;
   return lines.sublist(lines.length - maxLines);
