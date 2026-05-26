@@ -73,14 +73,21 @@ echo "[package] Packaging phone-talk v${VERSION}..."
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Platform binaries
+# Platform binaries — only create platform/<pair>/ if at least one binary exists,
+# so tar never encounters an empty skeleton directory and fails traversal.
 for pair in darwin-arm64 linux-amd64 linux-arm64; do
   os="${pair%-*}"
   arch="${pair#*-}"
   src="$OUT_DIR/$pair"
   dst="$DIST_DIR/platform/$pair"
-  mkdir -p "$dst"
 
+  # Skip entirely if no binaries built for this platform
+  if [[ ! -f "$src/agentd" && ! -f "$src/agentgw" ]]; then
+    echo "[package] Skipping $pair (no binaries in $src)"
+    continue
+  fi
+
+  mkdir -p "$dst"
   if [[ -f "$src/agentd" ]]; then
     cp "$src/agentd" "$dst/agentd"
     chmod +x "$dst/agentd"
