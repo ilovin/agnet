@@ -6,6 +6,9 @@
 |---|---|---|---|
 | R-004 | `r-004-tap-session-to-show-last-message-time.md` | Pending | Medium |
 | R-005 | `r-005-session-sort-stable.md` | Completed | High |
+| R-013 | `r-013-dashboard-stale-display.md` | Completed | High |
+| R-014 | `r-014-empty-user-message-filter.md` | Completed | High |
+| R-015 | `r-015-domain-download-portal.md` (PRD: `docs/plans/domain-download-portal-prd.md`) | Pending | High |
 
 ## 已完成需求（见 archive/）
 

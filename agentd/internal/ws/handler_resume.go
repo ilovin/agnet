@@ -20,8 +20,53 @@ func min(a, b int) int {
 
 // extractOpencodeText tries multiple known JSON structures to extract assistant text.
 func extractOpencodeText(generic map[string]interface{}) string {
+	evType, _ := generic["type"].(string)
+
+	// OpenCode wraps events in "part": {"type":"tool","tool":"bash","state":{...}}
+	var part map[string]interface{}
+	if p, ok := generic["part"].(map[string]interface{}); ok {
+		part = p
+	}
+
+	// Structure 0: OpenCode/Claude stream-json wrapped in "part"
+	// tool_use events: {"type":"tool_use","part":{"type":"tool","tool":"bash","state":{...}}}
+	if evType == "tool_use" && part != nil {
+		toolName, _ := part["tool"].(string)
+		if toolName == "" {
+			toolName = "unknown"
+		}
+		if state, ok := part["state"].(map[string]interface{}); ok {
+			if status, _ := state["status"].(string); status == "error" {
+				if errStr, ok := state["error"].(string); ok && errStr != "" {
+					return "❌ " + toolName + " 工具被拒绝: " + errStr
+				}
+				return "❌ " + toolName + " 工具调用被拒绝"
+			}
+			if status, _ := state["status"].(string); status == "completed" || status == "success" {
+				if output, ok := state["output"].(string); ok && output != "" {
+					return "✅ " + toolName + " 执行完成\n" + output
+				}
+			}
+			if input, ok := state["input"].(map[string]interface{}); ok {
+				if cmd, ok := input["command"].(string); ok && cmd != "" {
+					return "🔧 " + toolName + ": " + cmd
+				}
+				if desc, ok := input["description"].(string); ok && desc != "" {
+					return "🔧 " + toolName + ": " + desc
+				}
+			}
+			return "🔧 正在使用 " + toolName + " 工具"
+		}
+		return "🔧 " + toolName
+	}
+
+	// step_start / step_finish have no text content
+	if evType == "step_start" || evType == "step_finish" {
+		return ""
+	}
+
 	// Structure 1: {"type":"text","part":{"type":"text","text":"..."}}
-	if part, ok := generic["part"].(map[string]interface{}); ok {
+	if part != nil {
 		if text, ok := part["text"].(string); ok && text != "" {
 			return text
 		}
@@ -122,14 +167,20 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 			ocArgs = append(ocArgs, "-m", currentModel)
 		}
 
+		// Resolve opencode executable path (reuse findExecutable from handler.go)
+		ocCmd := findExecutable("opencode")
+		if ocCmd == "opencode" && ag.Cmd != "" {
+			ocCmd = ag.Cmd
+		}
+
 		// Use stdbuf to disable output buffering for real-time JSON streaming.
 		// Fall back to direct opencode invocation if stdbuf is not available.
 		var cmd *exec.Cmd
 		if _, err := exec.LookPath("stdbuf"); err == nil {
-			cmd = exec.Command("stdbuf", append([]string{"-o0", "opencode"}, ocArgs...)...)
+			cmd = exec.Command("stdbuf", append([]string{"-o0", ocCmd}, ocArgs...)...)
 		} else {
 			log.Printf("[OpenCode] stdbuf not available, invoking opencode directly")
-			cmd = exec.Command("opencode", ocArgs...)
+			cmd = exec.Command(ocCmd, ocArgs...)
 		}
 		cmd.Dir = ag.WorkDir
 
