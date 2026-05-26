@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1685,5 +1686,157 @@ func TestSetOnOutput_BroadcastIncludesKindAndPayload(t *testing.T) {
 	}
 	if params["askUserQuestion"] == nil {
 		t.Errorf("broadcast params missing askUserQuestion; params=%v", params)
+	}
+}
+
+// TestConversationSendHermesTmuxRoutesThroughSendKeys is the M3 contract test:
+// when a hermes-provider agent has attachMode=tmux + tmuxTarget set, the
+// conversation.send RPC must route input through `tmux send-keys` (the same
+// path Claude tmux-attached agents use) and must NOT call the legacy
+// hermesSend HTTP path. We verify this by stubbing the tmux exec and asserting
+// at least one send-keys call was issued for the user's message.
+//
+// Plan: docs/plans/p-hermes-tmux-migration.md §M3.
+func TestConversationSendHermesTmuxRoutesThroughSendKeys(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:       os.Getpid(),
+		Provider:  "hermes",
+		WorkDir:   t.TempDir(),
+		Cmd:       "hermes",
+		SessionID: "sess-tmux-test",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	// Install tmux pane metadata so the generic tmux branch in handler picks
+	// the agent up. Real hermes agents get this from scanner.ProcessInfo.
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	// Capture every tmux send-keys invocation issued by handler -> WriteInput
+	// -> sendTmuxInput -> sendTmuxLiteral/sendTmuxKey.
+	var (
+		mu       sync.Mutex
+		captured [][]string
+	)
+	restoreSendKeys := agent.SetTmuxSendKeysFuncForTest(func(args ...string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		dup := append([]string(nil), args...)
+		captured = append(captured, dup)
+		return nil, nil
+	})
+	defer restoreSendKeys()
+
+	// validateNonShellPane (M4 §2.2) runs before send-keys; stub the
+	// display-message call so it returns a non-shell command and the guard
+	// passes for this test.
+	restoreDM := agent.SetTmuxDisplayMessageFuncForTest(func(target, format string) (string, error) {
+		return "python3", nil
+	})
+	defer restoreDM()
+
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "hello hermes",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("conversation.send error: %v (hermes should route via tmux, not HTTP)", resp["error"])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) == 0 {
+		t.Fatalf("expected hermes conversation.send to issue at least one tmux send-keys call (M3); got 0 — HTTP path likely still active")
+	}
+	literalSeen := false
+	for _, c := range captured {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "-l hello hermes") {
+			literalSeen = true
+			break
+		}
+	}
+	if !literalSeen {
+		t.Fatalf("expected a -l literal call carrying the user message, got captures=%v", captured)
+	}
+}
+
+// TestConversationSendHermesRejectsShellPane verifies M4 §2.2: when the tmux
+// pane has fallen back to a shell (e.g. hermes CLI crashed and bash regained
+// control), conversation.send must refuse to issue send-keys and return
+// -32000. Without this guard, the user's prompt would be executed as a shell
+// command in the pane (security/safety risk).
+func TestConversationSendHermesRejectsShellPane(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:       os.Getpid(),
+		Provider:  "hermes",
+		WorkDir:   t.TempDir(),
+		Cmd:       "hermes",
+		SessionID: "sess-shell-pane",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	// Stub the tmux send-keys exec to detect erroneous calls (we expect ZERO).
+	var sendKeysCalls int
+	restoreSendKeys := agent.SetTmuxSendKeysFuncForTest(func(args ...string) ([]byte, error) {
+		sendKeysCalls++
+		return nil, nil
+	})
+	defer restoreSendKeys()
+
+	// Make pane_current_command report "bash" — simulating a crashed CLI.
+	restoreDM := agent.SetTmuxDisplayMessageFuncForTest(func(target, format string) (string, error) {
+		return "bash", nil
+	})
+	defer restoreDM()
+
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "this should not reach the shell",
+	})
+	if resp["error"] == nil {
+		t.Fatalf("expected error when pane is a shell, got success: %v", resp)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if got := int(errObj["code"].(float64)); got != -32000 {
+		t.Fatalf("expected -32000, got %d", got)
+	}
+	if sendKeysCalls != 0 {
+		t.Fatalf("expected ZERO send-keys calls when pane is a shell; got %d (shell pollution risk)", sendKeysCalls)
+	}
+	// Agent should be marked stopped so the UI reflects the dead CLI.
+	if status := ag.Status(); status != agent.StatusStopped {
+		t.Fatalf("expected agent status StatusStopped after shell-pane rejection, got %q", status)
 	}
 }

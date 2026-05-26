@@ -17,7 +17,13 @@ func hermesTestDB(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Use _pragma=busy_timeout so concurrent readers (the watcher under
+	// test) and writers (test helpers) both wait on locks instead of
+	// failing immediately with SQLITE_BUSY. We deliberately do NOT enable
+	// WAL because WAL leaves -wal/-shm sidecar files that race t.TempDir
+	// cleanup. The plain rollback journal + busy_timeout is sufficient for
+	// the small, serialised access patterns used in these tests.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -33,7 +39,7 @@ func hermesTestDB(t *testing.T) string {
 
 func hermesInsertSession(t *testing.T, dbPath, sessionID, startedAt string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -45,7 +51,7 @@ func hermesInsertSession(t *testing.T, dbPath, sessionID, startedAt string) {
 
 func hermesInsertMessage(t *testing.T, dbPath, sessionID, role, content, ts string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -451,4 +457,68 @@ func TestHermesDBWatcher_SendingCheckerSuppressesSessionSwitch(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("OnSessionSwitch was not called with B after sending cleared")
+}
+
+// TestHermesDBWatcher_DetectsPIDDeath verifies M4 §2.3: when the hermes CLI
+// process dies, the watcher detects it via the injected probe, fires
+// onProcessDead exactly once (sync.Once guard), and exits its poll loop so it
+// doesn't keep hammering state.db for a process that's gone.
+func TestHermesDBWatcher_DetectsPIDDeath(t *testing.T) {
+	dbPath := hermesTestDB(t)
+	withFindHermesStateDBFunc(t, func() string { return dbPath })
+	withHermesDBWatcherInterval(t, 30*time.Millisecond)
+
+	hermesInsertSession(t, dbPath, "A", "2026-05-25T10:00:00Z")
+	hermesInsertMessage(t, dbPath, "A", "user", "a1", "2026-05-25T10:00:01Z")
+
+	// Inject a probe that always reports the pid is dead, regardless of value.
+	var probeCalls atomic.Int32
+	restoreProbe := SetProbeProcessFuncForTest(func(pid int) bool {
+		probeCalls.Add(1)
+		return false
+	})
+	defer restoreProbe()
+
+	col := &eventCollector{}
+	w := NewHermesDBWatcher("agent-pid-test", "A", col.callback)
+	w.SetSkipExisting(true)
+	// pid=999999 is unimportant — the probe is stubbed to always say dead.
+	// We just need >0 so the gate inside checkProcessAlive doesn't skip.
+	w.SetPID(999999)
+
+	dead := make(chan struct{}, 4) // buffer >1 to detect any erroneous re-fire
+	w.SetOnProcessDead(func() {
+		dead <- struct{}{}
+	})
+
+	if err := w.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer w.Stop()
+
+	// First fire should arrive on the immediate first poll.
+	select {
+	case <-dead:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatalf("onProcessDead never fired (probeCalls=%d)", probeCalls.Load())
+	}
+
+	// Wait long enough for several would-be ticks. The watcher must NOT fire
+	// onProcessDead again, and the poll loop must have exited (so probeCalls
+	// stops climbing).
+	time.Sleep(200 * time.Millisecond)
+	calls1 := probeCalls.Load()
+	time.Sleep(200 * time.Millisecond)
+	calls2 := probeCalls.Load()
+	if calls2 != calls1 {
+		t.Fatalf("watcher loop did not exit after onProcessDead; probeCalls grew %d → %d",
+			calls1, calls2)
+	}
+
+	select {
+	case <-dead:
+		t.Fatalf("onProcessDead fired more than once (sync.Once broken)")
+	default:
+	}
 }

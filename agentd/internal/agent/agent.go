@@ -399,9 +399,56 @@ func sendTmuxInput(target string, text string) error {
 	return nil
 }
 
+// tmuxSendKeysFunc is the function used by sendTmuxLiteral / sendTmuxKey to
+// invoke `tmux send-keys`. Tests may swap this to capture invocations without
+// requiring a real tmux binary. Defaults to runTmuxSendKeys.
+var tmuxSendKeysFunc = runTmuxSendKeys
+
+// SetTmuxSendKeysFuncForTest replaces tmuxSendKeysFunc for the duration of a
+// test. Returns a restore function callers should defer.
+func SetTmuxSendKeysFuncForTest(fn func(args ...string) ([]byte, error)) (restore func()) {
+	orig := tmuxSendKeysFunc
+	tmuxSendKeysFunc = fn
+	return func() { tmuxSendKeysFunc = orig }
+}
+
+func runTmuxSendKeys(args ...string) ([]byte, error) {
+	cmd := exec.Command("tmux", append([]string{"send-keys"}, args...)...)
+	return cmd.CombinedOutput()
+}
+
+// tmuxSendKeysMaxChunk caps the size of a single `tmux send-keys -l` payload
+// so very long messages don't run into ARG_MAX limits or shell argument
+// quoting weirdness. 1024 bytes is well below typical ARG_MAX (~128KB on
+// Linux) but large enough that small messages incur no extra exec overhead.
+// Adjacent chunks concatenate cleanly because each is sent literally (-l).
+//
+// Plan: docs/plans/p-hermes-tmux-migration.md §M4 §2.4 (risk #10).
+const tmuxSendKeysMaxChunk = 1024
+
 func sendTmuxLiteral(target string, text string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", target, "-l", text)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	for len(text) > 0 {
+		end := len(text)
+		if end > tmuxSendKeysMaxChunk {
+			end = tmuxSendKeysMaxChunk
+		}
+		chunk := text[:end]
+		out, err := tmuxSendKeysFunc("-t", target, "-l", chunk)
+		if err != nil {
+			msg := strings.TrimSpace(string(out))
+			if msg == "" {
+				return fmt.Errorf("tmux send-keys failed: %w", err)
+			}
+			return fmt.Errorf("tmux send-keys failed: %s", msg)
+		}
+		text = text[end:]
+	}
+	return nil
+}
+
+func sendTmuxKey(target string, key string) error {
+	out, err := tmuxSendKeysFunc("-t", target, key)
+	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			return fmt.Errorf("tmux send-keys failed: %w", err)
@@ -411,14 +458,67 @@ func sendTmuxLiteral(target string, text string) error {
 	return nil
 }
 
-func sendTmuxKey(target string, key string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", target, key)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			return fmt.Errorf("tmux send-keys failed: %w", err)
-		}
-		return fmt.Errorf("tmux send-keys failed: %s", msg)
+// shellPaneCommands names common interactive shells. ValidateNonShellPane
+// rejects send-keys when tmux's pane_current_command matches one of these,
+// indicating the original CLI process has exited and the pane has fallen back
+// to the parent shell — sending keys in that state would execute them as
+// shell commands (security/safety risk).
+//
+// We rely on a blacklist (not an allowlist matching "hermes") because tmux
+// reports the kernel /proc/PID/comm of the foreground process, which for
+// hermes is "python3" (its venv interpreter) rather than the user-facing CLI
+// name. Recon notes (m3m4-recon.md §3) document this empirically.
+//
+// Plan: docs/plans/p-hermes-tmux-migration.md §M4 §2.2.
+var shellPaneCommands = map[string]bool{
+	"bash": true,
+	"sh":   true,
+	"zsh":  true,
+	"fish": true,
+	"dash": true,
+	"ksh":  true,
+}
+
+// tmuxDisplayMessageFunc is the function used by ValidateNonShellPane to read
+// `tmux display-message`. Tests swap this to control the reported value.
+var tmuxDisplayMessageFunc = runTmuxDisplayMessage
+
+// SetTmuxDisplayMessageFuncForTest replaces tmuxDisplayMessageFunc for the
+// duration of a test. Returns a restore function callers should defer.
+func SetTmuxDisplayMessageFuncForTest(fn func(target, format string) (string, error)) (restore func()) {
+	orig := tmuxDisplayMessageFunc
+	tmuxDisplayMessageFunc = fn
+	return func() { tmuxDisplayMessageFunc = orig }
+}
+
+func runTmuxDisplayMessage(target, format string) (string, error) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", target, format)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ValidateNonShellPane checks the tmux pane's pane_current_command and returns
+// an error if it matches a known interactive shell. Used as a guard before
+// `tmux send-keys` to avoid shell pollution after the CLI process crashes.
+//
+// Plan: docs/plans/p-hermes-tmux-migration.md §M4 §2.2.
+func ValidateNonShellPane(target string) error {
+	if target == "" {
+		return fmt.Errorf("validateNonShellPane: empty target")
+	}
+	cur, err := tmuxDisplayMessageFunc(target, "#{pane_current_command}")
+	if err != nil {
+		return fmt.Errorf("tmux display-message: %w", err)
+	}
+	cur = strings.TrimSpace(cur)
+	if cur == "" {
+		return fmt.Errorf("tmux pane %q reports empty current_command; cannot verify CLI is running", target)
+	}
+	if shellPaneCommands[strings.ToLower(cur)] {
+		return fmt.Errorf("tmux pane %q fell back to shell %q; original CLI is no longer running", target, cur)
 	}
 	return nil
 }
