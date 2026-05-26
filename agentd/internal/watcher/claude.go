@@ -32,6 +32,16 @@ type ConversationEvent struct {
 	ToolSummary  string       // human-readable tool call summary (e.g. "Bash: go test ./...")
 	StatusChange *AgentStatus // non-nil when this line changes agent status
 	MsgID        string       // unique message ID for update tracking (opencode DB message.id)
+
+	// Tool-use payload preserved for downstream interactive-tool detection
+	// (AskUserQuestion / ExitPlanMode). When the assistant message contains
+	// a tool_use block, ToolUseName/ID/Input describe it; otherwise empty.
+	// Only the FIRST tool_use block in the message is captured — interactive
+	// tools always arrive as a single tool_use, and downstream consumers fall
+	// back to the text/ToolSummary representation for multi-tool messages.
+	ToolUseName  string          // e.g. "AskUserQuestion", "Bash"
+	ToolUseID    string          // Claude-assigned tool_use id ("toolu_...")
+	ToolUseInput json.RawMessage // raw JSON object passed as tool input
 }
 
 // SessionWatcher is the interface implemented by all session watchers
@@ -925,6 +935,21 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 						input, _ := block["input"].(map[string]interface{})
 						if input == nil {
 							input = map[string]interface{}{}
+						}
+						// Capture the first tool_use block's identifying fields
+						// so downstream consumers (agent watcher callback) can
+						// invoke ParseInteractiveToolUse for interactive tools
+						// (AskUserQuestion / ExitPlanMode). Subsequent tool_use
+						// blocks in the same message are not captured — the
+						// existing fallback rendering still applies.
+						if ev.ToolUseName == "" {
+							ev.ToolUseName = name
+							if id, ok := block["id"].(string); ok {
+								ev.ToolUseID = id
+							}
+							if rawInput, err := json.Marshal(input); err == nil {
+								ev.ToolUseInput = rawInput
+							}
 						}
 						summary := buildToolSummary(name, input)
 						if summary != "" {

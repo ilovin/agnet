@@ -224,6 +224,48 @@ func TestParseLineLocalCommandMultilineStdout(t *testing.T) {
 	}
 }
 
+// TestParseLineToolUseCapturesPayload verifies that a tool_use block in an
+// assistant message populates ToolUseName/ToolUseID/ToolUseInput so the agent
+// manager's watcher callback can recover the structured payload (e.g. for
+// AskUserQuestion / ExitPlanMode interactive tools). R-010 T2-bis.
+func TestParseLineToolUseCapturesPayload(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_ask01","name":"AskUserQuestion","input":{"questions":[{"question":"Pick one","header":"H","multi_select":false,"options":[{"label":"A","description":"d"}]}]}}]}}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected tool_use line to be parsed")
+	}
+	if ev.ToolUseName != "AskUserQuestion" {
+		t.Errorf("expected ToolUseName=AskUserQuestion, got %q", ev.ToolUseName)
+	}
+	if ev.ToolUseID != "toolu_ask01" {
+		t.Errorf("expected ToolUseID=toolu_ask01, got %q", ev.ToolUseID)
+	}
+	if len(ev.ToolUseInput) == 0 {
+		t.Fatalf("expected non-empty ToolUseInput")
+	}
+	if !strings.Contains(string(ev.ToolUseInput), `"questions"`) {
+		t.Errorf("expected ToolUseInput to contain questions, got %s", string(ev.ToolUseInput))
+	}
+}
+
+// TestParseLineExitPlanModeCapturesPayload covers ExitPlanMode tool_use input.
+func TestParseLineExitPlanModeCapturesPayload(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_plan01","name":"ExitPlanMode","input":{"plan":"Step A then Step B"}}]}}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected ExitPlanMode tool_use line to be parsed")
+	}
+	if ev.ToolUseName != "ExitPlanMode" {
+		t.Errorf("expected ToolUseName=ExitPlanMode, got %q", ev.ToolUseName)
+	}
+	if ev.ToolUseID != "toolu_plan01" {
+		t.Errorf("expected ToolUseID=toolu_plan01, got %q", ev.ToolUseID)
+	}
+	if !strings.Contains(string(ev.ToolUseInput), `"plan"`) {
+		t.Errorf("expected ToolUseInput to contain plan, got %s", string(ev.ToolUseInput))
+	}
+}
+
 func TestClaudeWatcherRefreshPrefersCurrentTaskSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
