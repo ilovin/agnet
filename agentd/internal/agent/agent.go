@@ -399,9 +399,27 @@ func sendTmuxInput(target string, text string) error {
 	return nil
 }
 
+// tmuxSendKeysFunc is the function used by sendTmuxLiteral / sendTmuxKey to
+// invoke `tmux send-keys`. Tests may swap this to capture invocations without
+// requiring a real tmux binary. Defaults to runTmuxSendKeys.
+var tmuxSendKeysFunc = runTmuxSendKeys
+
+// SetTmuxSendKeysFuncForTest replaces tmuxSendKeysFunc for the duration of a
+// test. Returns a restore function callers should defer.
+func SetTmuxSendKeysFuncForTest(fn func(args ...string) ([]byte, error)) (restore func()) {
+	orig := tmuxSendKeysFunc
+	tmuxSendKeysFunc = fn
+	return func() { tmuxSendKeysFunc = orig }
+}
+
+func runTmuxSendKeys(args ...string) ([]byte, error) {
+	cmd := exec.Command("tmux", append([]string{"send-keys"}, args...)...)
+	return cmd.CombinedOutput()
+}
+
 func sendTmuxLiteral(target string, text string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", target, "-l", text)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := tmuxSendKeysFunc("-t", target, "-l", text)
+	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			return fmt.Errorf("tmux send-keys failed: %w", err)
@@ -412,8 +430,8 @@ func sendTmuxLiteral(target string, text string) error {
 }
 
 func sendTmuxKey(target string, key string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", target, key)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := tmuxSendKeysFunc("-t", target, key)
+	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			return fmt.Errorf("tmux send-keys failed: %w", err)

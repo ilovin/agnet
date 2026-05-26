@@ -694,11 +694,15 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	attachMode := ag.AttachMode()
 	isTmuxAttached := attachMode == "tmux"
 	isOpenCode := ag.Provider == "opencode"
+	isHermes := ag.Provider == "hermes"
 	log.Printf("[conversationSend] agent=%s provider=%s attachMode=%s isTmuxAttached=%v isOpenCode=%v readOnly=%v", agentID, ag.Provider, attachMode, isTmuxAttached, isOpenCode, ag.AttachReadOnly())
 	// Guard against Restart/Start on attached non-tmux agents (read-only watcher attach).
 	// OpenCode agents are exempt: openCodeSendWithResume uses `opencode run --session`,
 	// not PTY input, so the read-only watcher attach does not apply.
-	if attachMode != "" && !isTmuxAttached && !isOpenCode && ag.Provider != "hermes" {
+	// Hermes was previously exempt because it used HTTP. Post-M3 hermes goes
+	// through the tmux send-keys path identical to Claude tmux-attached agents,
+	// so the generic guard correctly covers it (no special-case needed).
+	if attachMode != "" && !isTmuxAttached && !isOpenCode {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
 			reason = "attached session is read-only"
@@ -709,14 +713,12 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
 	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
 
-	// For Hermes provider, use HTTP API chat completions (check before tmux path
-	// since hermes CLI runs in a terminal and would otherwise hit the tmux branch).
-	if ag.Provider == "hermes" {
-		log.Printf("[conversationSend] taking hermes path for agent %s", agentID)
-		if len(imageFiles) > 0 {
-			return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
-		}
-		return h.hermesSend(req, ag, message, imageFiles, imagePaths)
+	// Hermes images: rejected even under tmux because the CLI consumes only
+	// stdin, not file flags. (Same restriction as the previous HTTP path; the
+	// generic tmux branch below also rejects images so this check is mostly
+	// kept for a clearer error message, but the tmux branch covers it too.)
+	if isHermes && len(imageFiles) > 0 {
+		return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
 	}
 
 	// For tmux-attached sessions, write directly to PTY via tmux send-keys.

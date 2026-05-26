@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1685,5 +1686,83 @@ func TestSetOnOutput_BroadcastIncludesKindAndPayload(t *testing.T) {
 	}
 	if params["askUserQuestion"] == nil {
 		t.Errorf("broadcast params missing askUserQuestion; params=%v", params)
+	}
+}
+
+// TestConversationSendHermesTmuxRoutesThroughSendKeys is the M3 contract test:
+// when a hermes-provider agent has attachMode=tmux + tmuxTarget set, the
+// conversation.send RPC must route input through `tmux send-keys` (the same
+// path Claude tmux-attached agents use) and must NOT call the legacy
+// hermesSend HTTP path. We verify this by stubbing the tmux exec and asserting
+// at least one send-keys call was issued for the user's message.
+//
+// Plan: docs/plans/p-hermes-tmux-migration.md §M3.
+func TestConversationSendHermesTmuxRoutesThroughSendKeys(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:       os.Getpid(),
+		Provider:  "hermes",
+		WorkDir:   t.TempDir(),
+		Cmd:       "hermes",
+		SessionID: "sess-tmux-test",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	// Install tmux pane metadata so the generic tmux branch in handler picks
+	// the agent up. Real hermes agents get this from scanner.ProcessInfo.
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	// Capture every tmux send-keys invocation issued by handler -> WriteInput
+	// -> sendTmuxInput -> sendTmuxLiteral/sendTmuxKey.
+	var (
+		mu       sync.Mutex
+		captured [][]string
+	)
+	restoreSendKeys := agent.SetTmuxSendKeysFuncForTest(func(args ...string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		dup := append([]string(nil), args...)
+		captured = append(captured, dup)
+		return nil, nil
+	})
+	defer restoreSendKeys()
+
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "hello hermes",
+	})
+	if resp["error"] != nil {
+		t.Fatalf("conversation.send error: %v (hermes should route via tmux, not HTTP)", resp["error"])
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) == 0 {
+		t.Fatalf("expected hermes conversation.send to issue at least one tmux send-keys call (M3); got 0 — HTTP path likely still active")
+	}
+	literalSeen := false
+	for _, c := range captured {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "-l hello hermes") {
+			literalSeen = true
+			break
+		}
+	}
+	if !literalSeen {
+		t.Fatalf("expected a -l literal call carrying the user message, got captures=%v", captured)
 	}
 }
