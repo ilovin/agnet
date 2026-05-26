@@ -1,8 +1,10 @@
 package store_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/phone-talk/agentd/internal/store"
 )
@@ -105,6 +107,65 @@ func TestDeleteAgent(t *testing.T) {
 	}
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents after delete, got %d", len(agents))
+	}
+}
+
+// TestListConversationEventsLatest_DoesNotReturnStaleSeq verifies that after an
+// EventBuf.Reset() cycle — where new events are written with low seq numbers
+// (overwriting old rows via INSERT OR REPLACE) while higher seq numbers from the
+// previous run remain in the DB — ListConversationEventsLatest returns the
+// *recently written* events, not the stale high-seq rows.
+func TestListConversationEventsLatest_DoesNotReturnStaleSeq(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const agentID = "agent-stale-seq"
+
+	// Phase 1: write 10 "old" events with seq 1-10 (simulating the previous run).
+	// Use a fixed past timestamp so they are clearly older.
+	for i := 1; i <= 10; i++ {
+		data := map[string]any{
+			"role": "assistant",
+			"text": fmt.Sprintf("old-msg-%d", i),
+		}
+		if err := s.SaveConversationEvent(agentID, uint64(i), data); err != nil {
+			t.Fatalf("save old event seq=%d: %v", i, err)
+		}
+	}
+
+	// Small sleep so that nanosecond timestamps are strictly after the old batch.
+	time.Sleep(2 * time.Millisecond)
+
+	// Phase 2: simulate EventBuf.Reset() — new run starts seq from 1 again.
+	// We write 5 *new* events with seq 1-5. INSERT OR REPLACE overwrites old
+	// seq 1-5, but old seq 6-10 survive in the DB.
+	for i := 1; i <= 5; i++ {
+		data := map[string]any{
+			"role": "assistant",
+			"text": fmt.Sprintf("new-msg-%d", i),
+		}
+		if err := s.SaveConversationEvent(agentID, uint64(i), data); err != nil {
+			t.Fatalf("save new event seq=%d: %v", i, err)
+		}
+	}
+
+	// ListConversationEventsLatest with limit=5 should return the 5 newest rows
+	// (the freshly written ones, text="new-msg-*"), NOT the stale seq 6-10
+	// (text="old-msg-*").
+	events, err := s.ListConversationEventsLatest(agentID, 5)
+	if err != nil {
+		t.Fatalf("ListConversationEventsLatest: %v", err)
+	}
+	if len(events) != 5 {
+		t.Fatalf("expected 5 events, got %d", len(events))
+	}
+	for _, ev := range events {
+		if ev.Text[:4] != "new-" {
+			t.Errorf("got stale event text=%q (seq=%d); expected new-msg-*", ev.Text, ev.Seq)
+		}
 	}
 }
 
