@@ -17,7 +17,13 @@ func hermesTestDB(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "state.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Use _pragma=busy_timeout so concurrent readers (the watcher under
+	// test) and writers (test helpers) both wait on locks instead of
+	// failing immediately with SQLITE_BUSY. We deliberately do NOT enable
+	// WAL because WAL leaves -wal/-shm sidecar files that race t.TempDir
+	// cleanup. The plain rollback journal + busy_timeout is sufficient for
+	// the small, serialised access patterns used in these tests.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -33,7 +39,7 @@ func hermesTestDB(t *testing.T) string {
 
 func hermesInsertSession(t *testing.T, dbPath, sessionID, startedAt string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -45,7 +51,7 @@ func hermesInsertSession(t *testing.T, dbPath, sessionID, startedAt string) {
 
 func hermesInsertMessage(t *testing.T, dbPath, sessionID, role, content, ts string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
