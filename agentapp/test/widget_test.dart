@@ -570,7 +570,7 @@ void main() {
       notifier.messagesFor('n1', 'a1'),
     );
 
-    expect(lines, equals(['开始做界面', '已更新最新信息']));
+    expect(lines, equals(['已更新最新信息']));
   });
 
   test('buildCollapsedPreview returns concise single-line preview', () {
@@ -582,7 +582,9 @@ void main() {
     expect(preview, 'Line 1 Line 2…');
   });
 
-  test('sessionPreviewLinesFromMessages keeps the latest two non-empty lines', () {
+  test('sessionPreviewLinesFromMessages shows last N lines of last non-empty message only', () {
+    // New behaviour: preview is scoped to the last non-empty message only,
+    // so lines from earlier messages are never mixed in.
     final lines = sessionPreviewLinesFromMessages([
       const MessageModel(
         nodeId: 'n1',
@@ -600,6 +602,29 @@ void main() {
       ),
     ]);
 
+    // Only the last message ('第三行') contributes; it has 1 line so result is 1 line.
+    expect(lines, equals(['第三行']));
+  });
+
+  test('sessionPreviewLinesFromMessages takes last 2 lines of last message when it has multiple lines', () {
+    final lines = sessionPreviewLinesFromMessages([
+      const MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.user,
+        text: '前一条消息',
+        seq: 1,
+      ),
+      const MessageModel(
+        nodeId: 'n1',
+        agentId: 'a1',
+        role: MessageRole.assistant,
+        text: '第一行\n第二行\n第三行',
+        seq: 2,
+      ),
+    ]);
+
+    // Last message has 3 lines; with maxLines=2, we get the last 2 only.
     expect(lines, equals(['第二行', '第三行']));
   });
 
