@@ -729,6 +729,18 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		if len(imageFiles) > 0 {
 			return errResp(req.ID, -32000, "tmux-attached sessions do not support image attachments")
 		}
+		// Hermes-only: verify the pane's foreground process is not a shell
+		// before sending keys. After hermes CLI crashes, the pane falls back
+		// to its parent bash; subsequent send-keys would be executed as shell
+		// commands. Plan §M4 §2.2.
+		if isHermes {
+			tmuxTarget := ag.TmuxTarget()
+			if err := agent.ValidateNonShellPane(tmuxTarget); err != nil {
+				log.Printf("[conversationSend] hermes pane validation failed for agent %s: %v", agentID, err)
+				ag.SetStatus(agent.StatusStopped)
+				return errResp(req.ID, -32000, "hermes CLI not running in tmux pane: "+err.Error())
+			}
+		}
 		// Same as the generic PTY path below, but skip the opencode/fresh checks
 		eventData := map[string]any{
 			"role":       "user",
@@ -753,7 +765,17 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		if !raw {
 			input = message + "\n"
 		}
-		if err := ag.WriteInput(input); err != nil {
+		// Hermes-only: tightly scope BeginSend to the actual write call so the
+		// HermesDBWatcher's session-switch suppression window is millisecond-
+		// scale instead of HTTP-round-trip-scale. Plan §M4 §2.1.
+		if isHermes {
+			ag.BeginSend()
+		}
+		err := ag.WriteInput(input)
+		if isHermes {
+			ag.EndSend()
+		}
+		if err != nil {
 			return errResp(req.ID, -32000, "write to tmux agent: "+err.Error())
 		}
 		// OpenCode responses are read by the OpenCodeDBWatcher polling the SQLite DB.

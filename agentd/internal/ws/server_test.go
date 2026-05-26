@@ -1733,6 +1733,14 @@ func TestConversationSendHermesTmuxRoutesThroughSendKeys(t *testing.T) {
 	})
 	defer restoreSendKeys()
 
+	// validateNonShellPane (M4 §2.2) runs before send-keys; stub the
+	// display-message call so it returns a non-shell command and the guard
+	// passes for this test.
+	restoreDM := agent.SetTmuxDisplayMessageFuncForTest(func(target, format string) (string, error) {
+		return "python3", nil
+	})
+	defer restoreDM()
+
 	srv := ws.New(mgr, "testtoken", "testnode")
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() {
@@ -1764,5 +1772,71 @@ func TestConversationSendHermesTmuxRoutesThroughSendKeys(t *testing.T) {
 	}
 	if !literalSeen {
 		t.Fatalf("expected a -l literal call carrying the user message, got captures=%v", captured)
+	}
+}
+
+// TestConversationSendHermesRejectsShellPane verifies M4 §2.2: when the tmux
+// pane has fallen back to a shell (e.g. hermes CLI crashed and bash regained
+// control), conversation.send must refuse to issue send-keys and return
+// -32000. Without this guard, the user's prompt would be executed as a shell
+// command in the pane (security/safety risk).
+func TestConversationSendHermesRejectsShellPane(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	mgr := agent.NewManager(s, t.TempDir())
+
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:       os.Getpid(),
+		Provider:  "hermes",
+		WorkDir:   t.TempDir(),
+		Cmd:       "hermes",
+		SessionID: "sess-shell-pane",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	// Stub the tmux send-keys exec to detect erroneous calls (we expect ZERO).
+	var sendKeysCalls int
+	restoreSendKeys := agent.SetTmuxSendKeysFuncForTest(func(args ...string) ([]byte, error) {
+		sendKeysCalls++
+		return nil, nil
+	})
+	defer restoreSendKeys()
+
+	// Make pane_current_command report "bash" — simulating a crashed CLI.
+	restoreDM := agent.SetTmuxDisplayMessageFuncForTest(func(target, format string) (string, error) {
+		return "bash", nil
+	})
+	defer restoreDM()
+
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "this should not reach the shell",
+	})
+	if resp["error"] == nil {
+		t.Fatalf("expected error when pane is a shell, got success: %v", resp)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if got := int(errObj["code"].(float64)); got != -32000 {
+		t.Fatalf("expected -32000, got %d", got)
+	}
+	if sendKeysCalls != 0 {
+		t.Fatalf("expected ZERO send-keys calls when pane is a shell; got %d (shell pollution risk)", sendKeysCalls)
+	}
+	// Agent should be marked stopped so the UI reflects the dead CLI.
+	if status := ag.Status(); status != agent.StatusStopped {
+		t.Fatalf("expected agent status StatusStopped after shell-pane rejection, got %q", status)
 	}
 }
