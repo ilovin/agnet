@@ -660,6 +660,25 @@ restart_agentgw() {
     fi
 }
 
+# Handle --with-web flag for `deploy.sh local`: rebuild Flutter Web and copy to ~/.agentgw/static/.
+# Default (no flag): skip web rebuild to keep the fast local iteration cycle.
+# Usage: deploy_local_with_web_flag [--with-web] [other-args...]
+deploy_local_with_web_flag() {
+    local with_web=false
+    for arg in "$@"; do
+        [[ "$arg" == "--with-web" ]] && with_web=true
+    done
+    if [[ "$with_web" == true ]]; then
+        echo "[deploy] --with-web: building Flutter Web (no CDN)..."
+        bash "$REPO_ROOT/agentapp/build_web.sh"
+        echo "[deploy] Copying agentapp/build/web -> ~/.agentgw/static/ ..."
+        rm -rf "$HOME/.agentgw/static"
+        mkdir -p "$HOME/.agentgw/static"
+        cp -r "$REPO_ROOT/agentapp/build/web/." "$HOME/.agentgw/static/"
+        echo "[deploy] Web static updated in ~/.agentgw/static/"
+    fi
+}
+
 # ── Help ──────────────────────────────────────────────────────────────
 
 show_deploy_help() {
@@ -671,6 +690,8 @@ binaries have not changed (compared against last manifest.json).
 
 TARGETS:
   local       Build + deploy local runtime + remote servers + auto-install mobile
+              Options: --with-web  (rebuild Flutter Web + refresh ~/.agentgw/static/;
+                                    default OFF to keep fast iteration cycle)
   web         Build + package + OSS publish + portal deploy + API deploy
               Options: --oss-only, --portal-only, --api-only
   npm         Build + package + npm publish
@@ -804,6 +825,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         local)
             echo "[deploy] Running local deployment..."
+            deploy_local_with_web_flag "${@:2}"
             build_agentd_mac
             build_agentgw_mac
             build_agentd_linux

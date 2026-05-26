@@ -546,6 +546,13 @@ sync_web_static() {
     cp -R "$static_src/." "$INSTALL_DIR/static/"
     return
   fi
+  # If ~/.agentgw/static/ already has content and INSTALL_USE_CACHED_WEB is not
+  # explicitly set to "1", skip any cache/download step to avoid overwriting a
+  # freshly deployed web build (e.g. one written by `deploy.sh local --with-web`).
+  if [[ "${INSTALL_USE_CACHED_WEB:-0}" != "1" && -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
+    info "Web 控制台已存在，跳过缓存覆盖 (INSTALL_USE_CACHED_WEB=1 可强制更新)"
+    return
+  fi
   # Check cache — skip download if already extracted
   local cache_key="static-tarball"
   local cached_tar="$CACHE_DIR/$cache_key"
