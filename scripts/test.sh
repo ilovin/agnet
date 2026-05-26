@@ -1259,6 +1259,40 @@ except:
   fi
   echo ""
 
+  # ── Test 21: deploy.sh local fans out to all agentgw nodes ──────────
+  # Bug: `local` previously called single-host deploy_remote (ws only),
+  # ignoring oracle and any other node listed in ~/.agentgw/config.json.
+  # Fix: use deploy_remote_targets_parallel which iterates resolve_remote_targets.
+  test_name="deploy.sh local fans out to all agentgw nodes (parallel)"
+  total=$((total + 1))
+  echo "[scripts] TEST $total: $test_name"
+
+  local fanout_ok=1
+  local local_section_full
+  # The `local` case is enclosed by `local)` ... `;;`. Capture lines between.
+  local_section_full=$(awk '/^[[:space:]]*local\)/,/^[[:space:]]*;;/' scripts/deploy.sh)
+
+  if ! echo "$local_section_full" | grep -q 'deploy_remote_targets_parallel'; then
+    echo -e "${RED}[scripts]   deploy.sh 'local' does not call deploy_remote_targets_parallel${NC}"
+    fanout_ok=0
+  fi
+
+  # Guard against regression: 'local' must NOT call the bare single-host helper.
+  # `deploy_remote` (no _host, no _targets_) deploys only to $REMOTE_HOST.
+  if echo "$local_section_full" | grep -qE '\bdeploy_remote\b[^_]'; then
+    echo -e "${RED}[scripts]   deploy.sh 'local' still calls bare deploy_remote (single-host)${NC}"
+    fanout_ok=0
+  fi
+
+  if [[ $fanout_ok -eq 1 ]]; then
+    passed=$((passed + 1))
+    echo -e "${GREEN}[scripts] PASS: $test_name${NC}"
+  else
+    failed=$((failed + 1))
+    echo -e "${RED}[scripts] FAIL: $test_name${NC}"
+  fi
+  echo ""
+
   # ── Summary ──────────────────────────────────────────────────────────
   echo "========================================"
   echo "       SCRIPTS TEST SUMMARY"

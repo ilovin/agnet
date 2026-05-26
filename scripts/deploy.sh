@@ -834,7 +834,9 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             # package.sh recreates them, so a missing artifact is caught immediately.
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] && restart_agentgw
             ./scripts/package.sh
-            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_remote
+            # Fan out to every node listed in ~/.agentgw/config.json (e.g. ws + oracle),
+            # not just $REMOTE_HOST. resolve_remote_targets() filters out localhost.
+            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_remote_targets_parallel
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || restart_agentgw
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
             ;;
