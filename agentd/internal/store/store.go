@@ -327,7 +327,7 @@ func (s *Store) ListConversationEventsLatest(agentID string, limit int) ([]Conve
 		`SELECT agent_id, seq, data_json, created_at
 		 FROM conversation_events
 		 WHERE agent_id=?
-		 ORDER BY seq DESC
+		 ORDER BY created_at DESC
 		 LIMIT ?`,
 		agentID,
 		limit,
@@ -380,7 +380,7 @@ func (s *Store) LastConversationSeq(agentID string) (uint64, error) {
 func (s *Store) LastConversationEventTime(agentID string) (time.Time, error) {
 	var createdAt string
 	err := s.db.QueryRow(
-		`SELECT created_at FROM conversation_events WHERE agent_id=? ORDER BY seq DESC LIMIT 1`,
+		`SELECT created_at FROM conversation_events WHERE agent_id=? ORDER BY created_at DESC LIMIT 1`,
 		agentID,
 	).Scan(&createdAt)
 	if err != nil {
