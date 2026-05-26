@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -75,6 +76,63 @@ List<String> sessionPreviewLinesFromMessages(
 
 /// Renders simple inline markdown (bold, italic, code, strikethrough, links)
 /// using Text.rich.  Safe inside ListTile subtitles and tight layouts.
+/// Builds inline [TextSpan] list from a markdown-lite [data] string.
+///
+/// Supports: `**bold**`, `*italic*`, `_italic_`, `` `code` ``,
+/// `~~strikethrough~~`, `[link](url)`.
+///
+/// Exposed for testing via [visibleForTesting].
+@visibleForTesting
+List<InlineSpan> buildMarkdownSpans(
+    String data, TextStyle style, BuildContext context) {
+  final spans = <InlineSpan>[];
+  var lastEnd = 0;
+  for (final match in _MarkdownText._pattern.allMatches(data)) {
+    if (match.start > lastEnd) {
+      spans.add(
+          TextSpan(text: data.substring(lastEnd, match.start), style: style));
+    }
+    final raw = match.group(0)!;
+    String content;
+    TextStyle spanStyle;
+    if (raw.startsWith('**') && raw.endsWith('**')) {
+      content = raw.substring(2, raw.length - 2);
+      spanStyle = style.copyWith(fontWeight: FontWeight.bold);
+    } else if (raw.startsWith('~~') && raw.endsWith('~~')) {
+      content = raw.substring(2, raw.length - 2);
+      spanStyle = style.copyWith(decoration: TextDecoration.lineThrough);
+    } else if ((raw.startsWith('*') && raw.endsWith('*')) ||
+        (raw.startsWith('_') && raw.endsWith('_'))) {
+      content = raw.substring(1, raw.length - 1);
+      spanStyle = style.copyWith(fontStyle: FontStyle.italic);
+    } else if (raw.startsWith('`') && raw.endsWith('`')) {
+      content = raw.substring(1, raw.length - 1);
+      spanStyle = style.copyWith(
+        fontFamily: 'monospace',
+        fontFamilyFallback: const ['Noto Sans SC', 'Roboto', 'sans-serif'],
+        color: style.color ?? Theme.of(context).colorScheme.onSurface,
+      );
+    } else if (raw.startsWith('[')) {
+      // link: [text](url)
+      final textEnd = raw.indexOf(']');
+      content = raw.substring(1, textEnd);
+      spanStyle = style.copyWith(
+        color: Theme.of(context).colorScheme.primary,
+        decoration: TextDecoration.underline,
+      );
+    } else {
+      content = raw;
+      spanStyle = style;
+    }
+    spans.add(TextSpan(text: content, style: spanStyle));
+    lastEnd = match.end;
+  }
+  if (lastEnd < data.length) {
+    spans.add(TextSpan(text: data.substring(lastEnd), style: style));
+  }
+  return spans;
+}
+
 class _MarkdownText extends StatelessWidget {
   final String data;
   final TextStyle style;
@@ -94,50 +152,7 @@ class _MarkdownText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final spans = <InlineSpan>[];
-    var lastEnd = 0;
-    for (final match in _pattern.allMatches(data)) {
-      if (match.start > lastEnd) {
-        spans.add(TextSpan(text: data.substring(lastEnd, match.start), style: style));
-      }
-      final raw = match.group(0)!;
-      String content;
-      TextStyle spanStyle;
-      if (raw.startsWith('**') && raw.endsWith('**')) {
-        content = raw.substring(2, raw.length - 2);
-        spanStyle = style.copyWith(fontWeight: FontWeight.bold);
-      } else if (raw.startsWith('~~') && raw.endsWith('~~')) {
-        content = raw.substring(2, raw.length - 2);
-        spanStyle = style.copyWith(decoration: TextDecoration.lineThrough);
-      } else if ((raw.startsWith('*') && raw.endsWith('*')) ||
-          (raw.startsWith('_') && raw.endsWith('_'))) {
-        content = raw.substring(1, raw.length - 1);
-        spanStyle = style.copyWith(fontStyle: FontStyle.italic);
-      } else if (raw.startsWith('`') && raw.endsWith('`')) {
-        content = raw.substring(1, raw.length - 1);
-        spanStyle = style.copyWith(
-          fontFamily: 'monospace',
-          backgroundColor:
-              Theme.of(context).colorScheme.surfaceContainerHighest,
-        );
-      } else if (raw.startsWith('[')) {
-        // link: [text](url)
-        final textEnd = raw.indexOf(']');
-        content = raw.substring(1, textEnd);
-        spanStyle = style.copyWith(
-          color: Theme.of(context).colorScheme.primary,
-          decoration: TextDecoration.underline,
-        );
-      } else {
-        content = raw;
-        spanStyle = style;
-      }
-      spans.add(TextSpan(text: content, style: spanStyle));
-      lastEnd = match.end;
-    }
-    if (lastEnd < data.length) {
-      spans.add(TextSpan(text: data.substring(lastEnd), style: style));
-    }
+    final spans = buildMarkdownSpans(data, style, context);
     return Text.rich(
       TextSpan(children: spans),
       maxLines: maxLines,
@@ -146,6 +161,7 @@ class _MarkdownText extends StatelessWidget {
     );
   }
 }
+
 
 /// Minimal markdown renderer for preview snippets.
 class _MarkdownPreview extends StatelessWidget {
