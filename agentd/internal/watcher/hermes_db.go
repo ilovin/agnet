@@ -378,9 +378,21 @@ func (w *HermesDBWatcher) poll() {
 	isSending := w.isSending
 
 	if currentSession == "" {
-		// Watcher was constructed without an initial session id; nothing to
-		// do until SetSessionID is called.
+		// Watcher was constructed without an initial session id (e.g. agentd
+		// LoadFromStore where ResumeSessionID was empty, or attach paths
+		// where Hermes hasn't surfaced its session yet). Without a current
+		// session, the latestSessionID!=currentSession branch below would
+		// fire OnSessionSwitch on every single poll — wrong, because there
+		// is no "previous" session to switch *from*. Instead, silently seed
+		// to the latest session id observed in state.db and let the normal
+		// in-session new-message branch take over from the next tick.
+		// Production regression: without this seed, hermes replies after
+		// agentd restart never reach EventBuf and the app sees no response.
+		w.sessionID = latestSessionID
+		w.lastTS = latestTS
+		w.seeded = true
 		w.mu.Unlock()
+		_ = skipExisting
 		return
 	}
 

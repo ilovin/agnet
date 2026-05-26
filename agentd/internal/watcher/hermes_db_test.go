@@ -459,6 +459,68 @@ func TestHermesDBWatcher_SendingCheckerSuppressesSessionSwitch(t *testing.T) {
 	t.Fatalf("OnSessionSwitch was not called with B after sending cleared")
 }
 
+// TestHermesDBWatcher_EmptyInitialSessionAutoSeeds verifies the regression for
+// the production bug where Hermes agents loaded from store.db (or attached
+// without a server-issued resume id) had ResumeSessionID="", and the watcher's
+// poll() short-circuited on currentSession=="" forever — so live Hermes replies
+// never reached the EventBuf and the app showed no responses.
+//
+// Expected behaviour: if the watcher is constructed with an empty sessionID, on
+// the first poll it auto-seeds currentSession to whichever session is the most
+// recent in state.db (without firing OnSessionSwitch — there is nothing to
+// switch from). Subsequent live messages in that session are emitted normally.
+func TestHermesDBWatcher_EmptyInitialSessionAutoSeeds(t *testing.T) {
+	dbPath := hermesTestDB(t)
+	withFindHermesStateDBFunc(t, func() string { return dbPath })
+	withHermesDBWatcherInterval(t, 50*time.Millisecond)
+
+	hermesInsertSession(t, dbPath, "A", "2026-05-25T10:00:00Z")
+	hermesInsertMessage(t, dbPath, "A", "user", "u1", "2026-05-25T10:00:01Z")
+
+	col := &eventCollector{}
+	// Construct with empty initial session — mirrors the LoadFromStore path
+	// where r.ResumeSessionID is "".
+	w := NewHermesDBWatcher("agent-empty", "", col.callback)
+	w.SetSkipExisting(true)
+
+	var switchedTo string
+	var switchMu sync.Mutex
+	w.OnSessionSwitch(func(newID string) {
+		switchMu.Lock()
+		defer switchMu.Unlock()
+		switchedTo = newID
+	})
+
+	if err := w.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer w.Stop()
+
+	// Allow at least 2 ticks: first poll auto-seeds to A and lastTS=u1.ts;
+	// subsequent inserts must be emitted.
+	time.Sleep(150 * time.Millisecond)
+
+	hermesInsertMessage(t, dbPath, "A", "assistant", "a1", "2026-05-25T10:00:05Z")
+	hermesInsertMessage(t, dbPath, "A", "user", "u2", "2026-05-25T10:00:06Z")
+
+	events := col.waitFor(t, 2, 2*time.Second)
+	if len(events) < 2 {
+		t.Fatalf("expected >=2 events emitted after auto-seed, got %d: %+v", len(events), events)
+	}
+	if events[0].Text != "a1" || events[1].Text != "u2" {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+
+	// Auto-seed must NOT be reported as a session switch (there was no
+	// previous session to switch from).
+	switchMu.Lock()
+	got := switchedTo
+	switchMu.Unlock()
+	if got != "" {
+		t.Fatalf("OnSessionSwitch must not fire on auto-seed, got %q", got)
+	}
+}
+
 // TestHermesDBWatcher_DetectsPIDDeath verifies M4 §2.3: when the hermes CLI
 // process dies, the watcher detects it via the injected probe, fires
 // onProcessDead exactly once (sync.Once guard), and exits its poll loop so it
