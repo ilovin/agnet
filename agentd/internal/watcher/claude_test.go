@@ -9,6 +9,7 @@ import (
 )
 
 func TestClaudeWatcherDetectsMessages(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sessionFile := filepath.Join(dir, "abc123.jsonl")
 
@@ -51,6 +52,7 @@ func TestClaudeWatcherDetectsMessages(t *testing.T) {
 }
 
 func TestClaudeWatcherDetectsWorking(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sessionFile := filepath.Join(dir, "xyz.jsonl")
 	os.WriteFile(sessionFile, []byte{}, 0644)
@@ -80,6 +82,7 @@ func TestClaudeWatcherDetectsWorking(t *testing.T) {
 }
 
 func TestClaudeWatcherStreamingTextIsWorking(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sessionFile := filepath.Join(dir, "stream.jsonl")
 	os.WriteFile(sessionFile, []byte{}, 0644)
@@ -495,6 +498,7 @@ func TestClaudeWatcherRefreshKeepsStaleSession(t *testing.T) {
 }
 
 func TestClaudeWatcherSkipExisting(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sessionFile := filepath.Join(dir, "existing.jsonl")
 
