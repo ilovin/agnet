@@ -104,3 +104,6 @@ flutter:
           weight: 500
         - asset: fonts/NotoSansSC-Bold.ttf
           weight: 700
+    - family: Noto Sans Symbols 2
+      fonts:
+        - asset: fonts/NotoSansSymbols2-Regular.ttf
