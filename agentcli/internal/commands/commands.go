@@ -210,80 +210,152 @@ func getLocalNodeID() (string, error) {
 	return "", fmt.Errorf("no connected node found")
 }
 
+// nodeRef identifies a node when iterating multi-node aggregations.
+type nodeRef struct {
+	ID   string
+	Name string
+}
+
+// getAllConnectedNodes returns every node currently reported as connected
+// by the gateway. Used by list-agents and dashboard to aggregate state
+// across local + remote nodes (e.g. local + oracle).
+func getAllConnectedNodes() ([]nodeRef, error) {
+	resp, err := cliClient.Call("node.list", nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("RPC error: %s", resp.Error.Message)
+	}
+
+	nodes, ok := resp.Result.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unexpected node.list response format")
+	}
+
+	out := make([]nodeRef, 0, len(nodes))
+	for _, raw := range nodes {
+		n, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if stringify(n["status"]) != "connected" {
+			continue
+		}
+		out = append(out, nodeRef{
+			ID:   stringify(n["id"]),
+			Name: stringify(n["name"]),
+		})
+	}
+	return out, nil
+}
+
 func newListAgentsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list-agents",
 		Short: "List all agents with status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			nodeID, err := getLocalNodeID()
+			nodes, err := getAllConnectedNodes()
 			if err != nil {
 				return err
+			}
+			if len(nodes) == 0 {
+				return fmt.Errorf("no connected node found")
 			}
 
-			resp, err := cliClient.Call("agent.list", map[string]any{"nodeId": nodeID})
-			if err != nil {
-				return err
+			type agentWithNode struct {
+				agent  map[string]any
+				nodeID string
 			}
-			if resp.Error != nil {
-				return fmt.Errorf("RPC error: %s", resp.Error.Message)
+
+			var collected []agentWithNode
+			var allAgents []map[string]any
+			var rpcErrs []string
+			for _, n := range nodes {
+				resp, err := cliClient.Call("agent.list", map[string]any{"nodeId": n.ID})
+				if err != nil {
+					rpcErrs = append(rpcErrs, fmt.Sprintf("%s: %v", n.Name, err))
+					continue
+				}
+				if resp.Error != nil {
+					rpcErrs = append(rpcErrs, fmt.Sprintf("%s: %s", n.Name, resp.Error.Message))
+					continue
+				}
+				agents, ok := resp.Result.([]any)
+				if !ok {
+					continue
+				}
+				for _, raw := range agents {
+					ag, ok := raw.(map[string]any)
+					if !ok {
+						continue
+					}
+					// Annotate each agent with its source node so JSON
+					// consumers (and the table renderer) can distinguish.
+					ag["nodeId"] = n.ID
+					ag["nodeName"] = n.Name
+					collected = append(collected, agentWithNode{agent: ag, nodeID: n.ID})
+					allAgents = append(allAgents, ag)
+				}
 			}
 
 			if outputJSON {
-				output(resp.Result)
+				output(allAgents)
 				return nil
 			}
 
-			agents, ok := resp.Result.([]any)
-			if !ok {
-				return fmt.Errorf("unexpected response format")
-			}
-
-			if len(agents) == 0 {
+			if len(allAgents) == 0 {
+				if len(rpcErrs) > 0 {
+					fmt.Fprintf(os.Stderr, "warning: agent.list errors: %s\n", strings.Join(rpcErrs, "; "))
+				}
 				fmt.Println("No agents.")
 				return nil
 			}
 
-			fmt.Printf("%-3s %-12s %-20s %-10s %-8s %-15s %-10s %-12s  %s\n",
-				"", "STATUS", "NAME", "PROVIDER", "PID", "PROJECT", "RUNTIME", "S-STATE", "MESSAGE")
-			for _, raw := range agents {
-				if ag, ok := raw.(map[string]any); ok {
-					status := stringify(ag["status"])
-					name := stringify(ag["name"])
-					provider := stringify(ag["provider"])
-					pid := 0
-					if p, ok := ag["pid"].(float64); ok {
-						pid = int(p)
-					}
-					project := stringify(ag["projectName"])
-					if project == "" {
-						project = stringify(ag["workDir"])
-					}
-					runtimeState := stringify(ag["runtimeState"])
-					sessionState := stringify(ag["sessionState"])
-					agentID := stringify(ag["id"])
-
-					statusIcon := "●"
-					if status == "working" {
-						statusIcon = "🟢"
-					} else if status == "idle" {
-						statusIcon = "🟡"
-					} else if status == "stopped" || status == "crashed" {
-						statusIcon = "🔴"
-					}
-
-					runtimeIcon := ""
-					if runtimeState == "live" {
-						runtimeIcon = "🟢"
-					} else if runtimeState == "exited" {
-						runtimeIcon = "⚫"
-					}
-
-					lastMsg := fetchLastMessage(nodeID, agentID)
-
-					fmt.Printf("%-3s %-12s %-20s %-10s %-8d %-15s %-10s %-12s  %s\n",
-						statusIcon, status, truncate(name, 20), provider, pid, truncate(project, 15),
-						runtimeIcon+runtimeState, sessionState, lastMsg)
+			fmt.Printf("%-3s %-10s %-12s %-20s %-10s %-8s %-15s %-10s %-12s  %s\n",
+				"", "NODE", "STATUS", "NAME", "PROVIDER", "PID", "PROJECT", "RUNTIME", "S-STATE", "MESSAGE")
+			for _, item := range collected {
+				ag := item.agent
+				status := stringify(ag["status"])
+				name := stringify(ag["name"])
+				provider := stringify(ag["provider"])
+				pid := 0
+				if p, ok := ag["pid"].(float64); ok {
+					pid = int(p)
 				}
+				project := stringify(ag["projectName"])
+				if project == "" {
+					project = stringify(ag["workDir"])
+				}
+				runtimeState := stringify(ag["runtimeState"])
+				sessionState := stringify(ag["sessionState"])
+				agentID := stringify(ag["id"])
+				nodeName := stringify(ag["nodeName"])
+
+				statusIcon := "●"
+				if status == "working" {
+					statusIcon = "🟢"
+				} else if status == "idle" {
+					statusIcon = "🟡"
+				} else if status == "stopped" || status == "crashed" {
+					statusIcon = "🔴"
+				}
+
+				runtimeIcon := ""
+				if runtimeState == "live" {
+					runtimeIcon = "🟢"
+				} else if runtimeState == "exited" {
+					runtimeIcon = "⚫"
+				}
+
+				lastMsg := fetchLastMessage(item.nodeID, agentID)
+
+				fmt.Printf("%-3s %-10s %-12s %-20s %-10s %-8d %-15s %-10s %-12s  %s\n",
+					statusIcon, truncate(nodeName, 10), status, truncate(name, 20), provider, pid, truncate(project, 15),
+					runtimeIcon+runtimeState, sessionState, lastMsg)
+			}
+			if len(rpcErrs) > 0 {
+				fmt.Fprintf(os.Stderr, "warning: agent.list errors: %s\n", strings.Join(rpcErrs, "; "))
 			}
 			return nil
 		},
@@ -517,102 +589,161 @@ func newDashboardCmd() *cobra.Command {
 		Use:   "dashboard",
 		Short: "Show dashboard with managed and attachable agents",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			nodeID, err := getLocalNodeID()
+			nodes, err := getAllConnectedNodes()
 			if err != nil {
 				return err
+			}
+			if len(nodes) == 0 {
+				return fmt.Errorf("no connected node found")
 			}
 
-			resp, err := cliClient.Call("session.catalog", map[string]any{"nodeId": nodeID})
-			if err != nil {
-				return err
+			type managedItem struct {
+				ag     map[string]any
+				nodeID string
+				node   string
 			}
-			if resp.Error != nil {
-				return fmt.Errorf("RPC error: %s", resp.Error.Message)
+			type attachableItem struct {
+				ag   map[string]any
+				node string
 			}
+
+			var managedAll []managedItem
+			var attachableAll []attachableItem
+			// Aggregate JSON view: items keyed by node, plus a flat list.
+			aggregated := map[string]any{
+				"items":      []any{},
+				"managed":    []any{},
+				"attachable": []any{},
+			}
+			itemsByNode := make([]any, 0, len(nodes))
+			flatManaged := make([]any, 0)
+			flatAttachable := make([]any, 0)
+
+			// Aggregate agent.list across all nodes for the summary line.
+			var allAgents []map[string]any
+
+			for _, n := range nodes {
+				// Pull catalog (managed/attachable) per node.
+				cResp, err := cliClient.Call("session.catalog", map[string]any{"nodeId": n.ID})
+				if err == nil && cResp.Error == nil {
+					if result, ok := cResp.Result.(map[string]any); ok {
+						managed := toAnySlice(result["managed"])
+						attachable := toAnySlice(result["attachable"])
+
+						nodeManaged := make([]any, 0, len(managed))
+						nodeAttachable := make([]any, 0, len(attachable))
+
+						for _, raw := range managed {
+							if ag, ok := raw.(map[string]any); ok {
+								ag["nodeId"] = n.ID
+								ag["nodeName"] = n.Name
+								managedAll = append(managedAll, managedItem{ag: ag, nodeID: n.ID, node: n.Name})
+								nodeManaged = append(nodeManaged, ag)
+								flatManaged = append(flatManaged, ag)
+							}
+						}
+						for _, raw := range attachable {
+							if ag, ok := raw.(map[string]any); ok {
+								ag["nodeId"] = n.ID
+								ag["nodeName"] = n.Name
+								attachableAll = append(attachableAll, attachableItem{ag: ag, node: n.Name})
+								nodeAttachable = append(nodeAttachable, ag)
+								flatAttachable = append(flatAttachable, ag)
+							}
+						}
+
+						itemsByNode = append(itemsByNode, map[string]any{
+							"nodeId":     n.ID,
+							"nodeName":   n.Name,
+							"managed":    nodeManaged,
+							"attachable": nodeAttachable,
+						})
+					}
+				}
+
+				// agent.list for the summary header (status/runtime counts).
+				aResp, err := cliClient.Call("agent.list", map[string]any{"nodeId": n.ID})
+				if err == nil && aResp.Error == nil {
+					if agents, ok := aResp.Result.([]any); ok {
+						for _, raw := range agents {
+							if ag, ok := raw.(map[string]any); ok {
+								allAgents = append(allAgents, ag)
+							}
+						}
+					}
+				}
+			}
+
+			aggregated["items"] = itemsByNode
+			aggregated["managed"] = flatManaged
+			aggregated["attachable"] = flatAttachable
 
 			if outputJSON {
-				output(resp.Result)
+				output(aggregated)
 				return nil
-			}
-
-			result, ok := resp.Result.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected response format")
 			}
 
 			fmt.Println("═══ Dashboard ═══")
 			fmt.Println()
 
-			// Summary from agent.list (has runtimeState, sessionState)
-			listResp, err := cliClient.Call("agent.list", map[string]any{"nodeId": nodeID})
-			if err == nil && listResp.Error == nil {
-				if allAgents, ok := listResp.Result.([]any); ok {
-					total := len(allAgents)
-					working := 0
-					idle := 0
-					stopped := 0
-					live := 0
-					exited := 0
-					for _, raw := range allAgents {
-						if ag, ok := raw.(map[string]any); ok {
-							switch stringify(ag["status"]) {
-							case "working":
-								working++
-							case "idle":
-								idle++
-							case "stopped", "crashed":
-								stopped++
-							}
-							switch stringify(ag["runtimeState"]) {
-							case "live":
-								live++
-							case "exited":
-								exited++
-							}
-						}
-					}
-					fmt.Printf("Total: %d  Working: %d  Idle: %d  Stopped: %d\n", total, working, idle, stopped)
-					fmt.Printf("Live: %d  Exited: %d\n", live, exited)
-					fmt.Println()
+			// Summary across all nodes.
+			total := len(allAgents)
+			working := 0
+			idle := 0
+			stopped := 0
+			live := 0
+			exited := 0
+			for _, ag := range allAgents {
+				switch stringify(ag["status"]) {
+				case "working":
+					working++
+				case "idle":
+					idle++
+				case "stopped", "crashed":
+					stopped++
+				}
+				switch stringify(ag["runtimeState"]) {
+				case "live":
+					live++
+				case "exited":
+					exited++
 				}
 			}
+			fmt.Printf("Nodes: %d  Total: %d  Working: %d  Idle: %d  Stopped: %d\n", len(nodes), total, working, idle, stopped)
+			fmt.Printf("Live: %d  Exited: %d\n", live, exited)
+			fmt.Println()
 
-			managed := toAnySlice(result["managed"])
-			attachable := toAnySlice(result["attachable"])
+			if len(managedAll) > 0 {
+				fmt.Printf("Managed Agents (%d):\n", len(managedAll))
+				for _, item := range managedAll {
+					ag := item.ag
+					status := stringify(ag["status"])
+					name := stringify(ag["name"])
+					provider := stringify(ag["provider"])
+					pid := 0
+					if p, ok := ag["pid"].(float64); ok {
+						pid = int(p)
+					}
+					project := stringify(ag["projectName"])
+					if project == "" {
+						project = stringify(ag["workDir"])
+					}
+					statusIcon := "●"
+					if status == "working" {
+						statusIcon = "🟢"
+					} else if status == "idle" {
+						statusIcon = "🟡"
+					} else if status == "stopped" || status == "crashed" {
+						statusIcon = "🔴"
+					}
 
-			if len(managed) > 0 {
-				fmt.Printf("Managed Agents (%d):\n", len(managed))
-				for _, raw := range managed {
-					if ag, ok := raw.(map[string]any); ok {
-						status := stringify(ag["status"])
-						name := stringify(ag["name"])
-						provider := stringify(ag["provider"])
-						pid := 0
-						if p, ok := ag["pid"].(float64); ok {
-							pid = int(p)
-						}
-						project := stringify(ag["projectName"])
-						if project == "" {
-							project = stringify(ag["workDir"])
-						}
-						statusIcon := "●"
-						if status == "working" {
-							statusIcon = "🟢"
-						} else if status == "idle" {
-							statusIcon = "🟡"
-						} else if status == "stopped" || status == "crashed" {
-							statusIcon = "🔴"
-						}
+					agentID := stringify(ag["id"])
+					lastMsg := fetchLastMessage(item.nodeID, agentID)
 
-						// Fetch latest message
-						agentID := stringify(ag["id"])
-						lastMsg := fetchLastMessage(nodeID, agentID)
-
-						fmt.Printf("  %s %-10s %-15s %-10s PID:%-6d %s\n",
-							statusIcon, status, name, provider, pid, project)
-						if lastMsg != "" {
-							fmt.Printf("    └─ %s\n", lastMsg)
-						}
+					fmt.Printf("  %s [%s] %-10s %-15s %-10s PID:%-6d %s\n",
+						statusIcon, item.node, status, name, provider, pid, project)
+					if lastMsg != "" {
+						fmt.Printf("    └─ %s\n", lastMsg)
 					}
 				}
 			} else {
@@ -620,20 +751,19 @@ func newDashboardCmd() *cobra.Command {
 			}
 			fmt.Println()
 
-			if len(attachable) > 0 {
-				fmt.Printf("Attachable Processes (%d):\n", len(attachable))
-				for _, raw := range attachable {
-					if ag, ok := raw.(map[string]any); ok {
-						provider := stringify(ag["provider"])
-						pid := 0
-						if p, ok := ag["pid"].(float64); ok {
-							pid = int(p)
-						}
-						sessionID := stringify(ag["sessionId"])
-						workDir := stringify(ag["workDir"])
-						fmt.Printf("  %-10s PID:%-6d Session:%-20s %s\n",
-							provider, pid, sessionID, workDir)
+			if len(attachableAll) > 0 {
+				fmt.Printf("Attachable Processes (%d):\n", len(attachableAll))
+				for _, item := range attachableAll {
+					ag := item.ag
+					provider := stringify(ag["provider"])
+					pid := 0
+					if p, ok := ag["pid"].(float64); ok {
+						pid = int(p)
 					}
+					sessionID := stringify(ag["sessionId"])
+					workDir := stringify(ag["workDir"])
+					fmt.Printf("  [%s] %-10s PID:%-6d Session:%-20s %s\n",
+						item.node, provider, pid, sessionID, workDir)
 				}
 			} else {
 				fmt.Println("Attachable Processes: none")

@@ -22,7 +22,12 @@ type mockServer struct {
 	nodes       []map[string]any
 	catalog     map[string]any
 	history     map[string]any
-	t           *testing.T
+	// agentsByNode allows the test to return different agents per nodeId.
+	// When non-nil, agent.list dispatches by params["nodeId"]; otherwise it
+	// falls back to the legacy `agents` slice (single-node behaviour).
+	agentsByNode  map[string][]map[string]any
+	catalogByNode map[string]map[string]any
+	t             *testing.T
 }
 
 func newMockServer(t *testing.T) *mockServer {
@@ -101,6 +106,99 @@ func newMockServer(t *testing.T) *mockServer {
 	}
 }
 
+// newMultiNodeMockServer mimics two connected nodes (local + oracle) so we
+// can exercise the agentcli multi-node aggregation paths used by
+// list-agents and dashboard.
+func newMultiNodeMockServer(t *testing.T) *mockServer {
+	return &mockServer{
+		nodes: []map[string]any{
+			{
+				"id":     "node-local",
+				"name":   "local",
+				"host":   "localhost",
+				"status": "connected",
+			},
+			{
+				"id":     "node-oracle",
+				"name":   "oracle",
+				"host":   "oracle.example.com",
+				"status": "connected",
+			},
+		},
+		agentsByNode: map[string][]map[string]any{
+			"node-local": {
+				{
+					"id":             "agent-local-1",
+					"name":           "Local Claude",
+					"provider":       "claude",
+					"status":         "idle",
+					"pid":            float64(11111),
+					"workDir":        "/tmp/local",
+					"projectName":    "local-proj",
+					"runtimeState":   "live",
+					"sessionState":   "active",
+				},
+			},
+			"node-oracle": {
+				{
+					"id":             "agent-oracle-hermes",
+					"name":           "hermes",
+					"provider":       "opencode",
+					"status":         "working",
+					"pid":            float64(22222),
+					"workDir":        "/srv/hermes",
+					"projectName":    "hermes",
+					"runtimeState":   "live",
+					"sessionState":   "active",
+				},
+			},
+		},
+		catalogByNode: map[string]map[string]any{
+			"node-local": {
+				"managed": []any{
+					map[string]any{
+						"id":          "agent-local-1",
+						"name":        "Local Claude",
+						"provider":    "claude",
+						"status":      "idle",
+						"pid":         float64(11111),
+						"workDir":     "/tmp/local",
+						"projectName": "local-proj",
+					},
+				},
+				"attachable": []any{},
+			},
+			"node-oracle": {
+				"managed": []any{
+					map[string]any{
+						"id":          "agent-oracle-hermes",
+						"name":        "hermes",
+						"provider":    "opencode",
+						"status":      "working",
+						"pid":         float64(22222),
+						"workDir":     "/srv/hermes",
+						"projectName": "hermes",
+					},
+				},
+				"attachable": []any{
+					map[string]any{
+						"provider":  "claude",
+						"pid":       float64(33333),
+						"sessionId": "sess-oracle-attach",
+						"workDir":   "/srv/other",
+					},
+				},
+			},
+		},
+		history: map[string]any{
+			"events":   []any{},
+			"lastSeq":  float64(0),
+			"firstSeq": float64(0),
+		},
+		t: t,
+	}
+}
+
 func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -134,14 +232,30 @@ func (m *mockServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "node.list":
 			result = m.nodes
 		case "agent.list":
-			if stringify(params["nodeId"]) == "" {
+			nodeID := stringify(params["nodeId"])
+			if nodeID == "" {
 				respErr = &client.RPCError{Code: -32000, Message: "nodeId required"}
+			} else if m.agentsByNode != nil {
+				agents, ok := m.agentsByNode[nodeID]
+				if !ok {
+					respErr = &client.RPCError{Code: -32000, Message: "node not found: " + nodeID}
+				} else {
+					result = agents
+				}
 			} else {
 				result = m.agents
 			}
 		case "session.catalog":
-			if stringify(params["nodeId"]) == "" {
+			nodeID := stringify(params["nodeId"])
+			if nodeID == "" {
 				respErr = &client.RPCError{Code: -32000, Message: "nodeId required"}
+			} else if m.catalogByNode != nil {
+				cat, ok := m.catalogByNode[nodeID]
+				if !ok {
+					respErr = &client.RPCError{Code: -32000, Message: "node not found: " + nodeID}
+				} else {
+					result = cat
+				}
 			} else {
 				result = m.catalog
 			}
@@ -397,5 +511,111 @@ func TestJSONOutput(t *testing.T) {
 	}
 	if len(agents) != 2 {
 		t.Errorf("expected 2 agents, got %d", len(agents))
+	}
+}
+
+// TestListAgentsAggregatesAllNodes verifies that list-agents queries every
+// connected node and surfaces both local and remote agents, annotating each
+// row with the source node name.
+func TestListAgentsAggregatesAllNodes(t *testing.T) {
+	server := newMultiNodeMockServer(t)
+	cmd, _, ts := setupTestCLI(t, server)
+	defer ts.Close()
+	defer func() {
+		if cliClient != nil {
+			cliClient.Close()
+		}
+	}()
+
+	cmd.SetArgs([]string{"list-agents"})
+	out := captureStdout(func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Local Claude") {
+		t.Errorf("expected local agent name in output, got: %s", out)
+	}
+	if !strings.Contains(out, "hermes") {
+		t.Errorf("expected oracle hermes agent in output, got: %s", out)
+	}
+	if !strings.Contains(out, "local") {
+		t.Errorf("expected local node label in output, got: %s", out)
+	}
+	if !strings.Contains(out, "oracle") {
+		t.Errorf("expected oracle node label in output, got: %s", out)
+	}
+	if !strings.Contains(out, "NODE") {
+		t.Errorf("expected NODE column header in output, got: %s", out)
+	}
+}
+
+// TestListAgentsJSONIncludesNodeName ensures the JSON output annotates each
+// agent with nodeName so downstream consumers can distinguish source nodes.
+func TestListAgentsJSONIncludesNodeName(t *testing.T) {
+	server := newMultiNodeMockServer(t)
+	cmd, _, ts := setupTestCLI(t, server)
+	defer ts.Close()
+	defer func() {
+		if cliClient != nil {
+			cliClient.Close()
+		}
+	}()
+
+	cmd.SetArgs([]string{"--json", "list-agents"})
+	out := captureStdout(func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+
+	var agents []map[string]any
+	if err := json.Unmarshal([]byte(out), &agents); err != nil {
+		t.Fatalf("unmarshal JSON: %v\noutput: %s", err, out)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 aggregated agents, got %d (%+v)", len(agents), agents)
+	}
+
+	gotNodes := map[string]bool{}
+	for _, a := range agents {
+		gotNodes[stringify(a["nodeName"])] = true
+	}
+	if !gotNodes["local"] {
+		t.Errorf("expected agent annotated with nodeName=local, got %+v", agents)
+	}
+	if !gotNodes["oracle"] {
+		t.Errorf("expected agent annotated with nodeName=oracle, got %+v", agents)
+	}
+}
+
+// TestDashboardAggregatesAllNodes verifies that dashboard pulls
+// session.catalog from every connected node.
+func TestDashboardAggregatesAllNodes(t *testing.T) {
+	server := newMultiNodeMockServer(t)
+	cmd, _, ts := setupTestCLI(t, server)
+	defer ts.Close()
+	defer func() {
+		if cliClient != nil {
+			cliClient.Close()
+		}
+	}()
+
+	cmd.SetArgs([]string{"dashboard"})
+	out := captureStdout(func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Local Claude") {
+		t.Errorf("expected local managed agent in dashboard, got: %s", out)
+	}
+	if !strings.Contains(out, "hermes") {
+		t.Errorf("expected oracle managed agent in dashboard, got: %s", out)
+	}
+	if !strings.Contains(out, "sess-oracle-attach") {
+		t.Errorf("expected oracle attachable session in dashboard, got: %s", out)
 	}
 }
