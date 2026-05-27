@@ -529,6 +529,11 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	}
 
 	mgr.OnEvent(func(nodeID string, ev map[string]any) {
+		// Strip TUI box-drawing / control glyphs that no agentapp font
+		// covers (would render as tofu □ on Chrome). Limited to
+		// `conversation.message[_update]` text fields; other events
+		// pass through unchanged. See ws.SanitizeEventInPlace.
+		ws.SanitizeEventInPlace(ev)
 		method, _ := ev["method"].(string)
 		params := ev["params"]
 		srv.Broadcast(ws.RPCEvent{JSONRPC: "2.0", Method: method, Params: params})
