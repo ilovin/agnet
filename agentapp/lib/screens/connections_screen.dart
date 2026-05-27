@@ -606,9 +606,17 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                                       ),
                                     )
                                   : const Icon(Icons.hub),
-                              title: Text(cfg.url),
+                              title: Text(
+                                cfg.url,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
+                              ),
                               subtitle: Text(
                                 '${cfg.token.substring(0, cfg.token.length > 8 ? 8 : cfg.token.length)}...',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                softWrap: false,
                               ),
                               trailing: Row(
                                 mainAxisSize: MainAxisSize.min,

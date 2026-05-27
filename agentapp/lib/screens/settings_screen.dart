@@ -273,6 +273,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                     : const Icon(Icons.hub_outlined),
                 title: Text(
                   cfg.url,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
                   style: isCurrent ? const TextStyle(fontWeight: FontWeight.bold) : null,
                 ),
                 subtitle: isCurrent ? const Text('当前连接') : null,
