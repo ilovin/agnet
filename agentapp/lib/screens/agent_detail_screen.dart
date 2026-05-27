@@ -4357,15 +4357,13 @@ class MessageBubble extends StatelessWidget {
     // Raw ANSI output: dark terminal-like background
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final bgColor = isUser
-        ? (isDark
-            ? const Color(0xFF2A3B4C) // dark: muted blue-grey (low saturation)
-            : const Color(0xFFE3EDF5)) // light: cool grey-blue (readable)
+        ? (isDark ? const Color(0xFF2D2D2D) : const Color(0xFFF0F0F0))
         : isRaw
         ? (isDark ? const Color(0xFF1A1A2E) : const Color(0xFF1E1E2E))
         : scheme.surfaceContainerHighest;
 
     final textColor = isUser
-        ? (isDark ? const Color(0xFFDCE8F2) : const Color(0xFF1A2B3C))
+        ? (isDark ? Colors.white70 : Colors.black87)
         : isRaw
         ? const Color(0xFFE5E5E5)
         : scheme.onSurface;
@@ -5897,6 +5895,28 @@ class _InputBarState extends State<_InputBar> {
                       vertical: 8,
                     ),
                     isDense: true,
+                    suffixIcon: effectiveLoading
+                        ? const SizedBox(
+                            width: 32,
+                            height: 32,
+                            child: Padding(
+                              padding: EdgeInsets.all(4),
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : IconButton(
+                            onPressed: isReadOnly ? null : widget.onSend,
+                            icon: const Icon(Icons.send, size: 20),
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(
+                              minWidth: 32,
+                              minHeight: 32,
+                            ),
+                            padding: EdgeInsets.zero,
+                            color: isReadOnly
+                                ? null
+                                : Theme.of(context).colorScheme.primary,
+                          ),
                   ),
                   textInputAction: TextInputAction.send,
                   onSubmitted: isReadOnly ? null : (_) => widget.onSend(),
@@ -5910,28 +5930,122 @@ class _InputBarState extends State<_InputBar> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  effectiveLoading
-                      ? const SizedBox(
-                          width: 32,
-                          height: 32,
-                          child: Padding(
-                            padding: EdgeInsets.all(4),
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                      : IconButton(
-                          onPressed: isReadOnly ? null : widget.onSend,
-                          icon: const Icon(Icons.send, size: 20),
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 32,
-                            minHeight: 32,
-                          ),
-                          padding: EdgeInsets.zero,
-                          color: isReadOnly
-                              ? null
-                              : Theme.of(context).colorScheme.primary,
-                        ),
+                  IconButton(
+                    onPressed: isReadOnly
+                        ? null
+                        : () {
+                            // Show special keys bottom sheet
+                            showModalBottomSheet(
+                              context: context,
+                              builder: (ctx) => Container(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '特殊按键',
+                                      style: AppTextStyles.bodyLarge.copyWith(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: AppSpacing.lg),
+                                    Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: [
+                                        ActionChip(
+                                          label: const Text('ESC'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('esc');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+C'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_c');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+D'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_d');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+Z'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_z');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+A'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_a');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Ctrl+E'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('ctrl_e');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('Tab'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('tab');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('↑'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('up');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('↓'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('down');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('←'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('left');
+                                          },
+                                        ),
+                                        ActionChip(
+                                          label: const Text('→'),
+                                          onPressed: () {
+                                            Navigator.pop(ctx);
+                                            widget.onKey?.call('right');
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.keyboard_hide, size: 20),
+                    tooltip: '特殊按键',
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 32,
+                    ),
+                    padding: EdgeInsets.zero,
+                  ),
                 ],
               ),
             ],
