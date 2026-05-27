@@ -1749,7 +1749,7 @@ class _CanvasSessionPanel extends StatelessWidget {
                       ),
                       Text(
                         subtitleParts.join(' · '),
-                        maxLines: 1,
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.labelMedium?.copyWith(
                               color: Theme.of(context).colorScheme.onSurfaceVariant,
