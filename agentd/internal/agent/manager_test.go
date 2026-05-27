@@ -2080,3 +2080,92 @@ func TestLoadFromStorePrunesStaleSessionEvents(t *testing.T) {
 		t.Fatalf("agent ResumeSessionID: got %q want current-session", got)
 	}
 }
+
+// TestLoadFromStoreReattachesClaudeTmuxRoute verifies that after agentd
+// restart, LoadFromStore re-derives attach metadata (mode, readOnly, reason,
+// tmuxTarget) for restored Claude agents from a fresh scanner.ProcessInfo.
+//
+// Without this rescan, Claude agents loaded from store have empty
+// TmuxTarget/AttachMode, conversationSend's isTmuxAttached=false branch
+// silently drops user messages instead of invoking tmux send-keys, and the
+// web client appears to send messages into the void. Mirrors the existing
+// Hermes rescan path in LoadFromStore.
+func TestLoadFromStoreReattachesClaudeTmuxRoute(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	pid := os.Getpid()
+	restore := scanner.SetIsClaudeProcessFn(func(p int) bool { return p == pid })
+	t.Cleanup(restore)
+
+	sessionID := "sess-tmux-reattach"
+	dirName := agent.NewManager(nil, "").FindSessionFileProjectDirName(workDir)
+	projectDir := filepath.Join(homeDir, ".claude", "projects", dirName)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	jsonlPath := filepath.Join(projectDir, sessionID+".jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	agentID := "claude-tmux-reattach"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:              agentID,
+		Name:            "claude-tmux",
+		Provider:        "claude",
+		WorkDir:         workDir,
+		ResumeSessionID: sessionID,
+		PID:             pid,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(p int, provider string) bool {
+		return p == pid && provider == "claude"
+	})
+	// Mock the scanner so it returns a Claude process bound to a tmux pane.
+	// This is the path that gives the Agent its AttachMode + TmuxTarget on
+	// reattach. Without LoadFromStore calling ScanExisting in the Claude
+	// branch, this mock is never consulted and the assertions below fail.
+	wantTmuxTarget := "0:1.1"
+	m.SetScanExisting(func() ([]scanner.ProcessInfo, error) {
+		return []scanner.ProcessInfo{{
+			PID:        pid,
+			Provider:   "claude",
+			WorkDir:    workDir,
+			TmuxTarget: wantTmuxTarget,
+		}}, nil
+	})
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore failed: %v", err)
+	}
+
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("expected Claude agent %s to be restored", agentID)
+	}
+	t.Cleanup(func() {
+		if w := ag.Watcher(); w != nil {
+			w.Stop()
+		}
+	})
+
+	if got := ag.AttachMode(); got != scanner.AttachModeTmux {
+		t.Fatalf("AttachMode after LoadFromStore: got %q, want %q (Claude tmux rescan missing)", got, scanner.AttachModeTmux)
+	}
+	if got := ag.TmuxTarget(); got != wantTmuxTarget {
+		t.Fatalf("TmuxTarget after LoadFromStore: got %q, want %q (Claude tmux rescan missing)", got, wantTmuxTarget)
+	}
+}

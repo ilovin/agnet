@@ -378,6 +378,31 @@ func (m *Manager) LoadFromStore() error {
 		}
 	}
 
+	// Rescan attach metadata for restored Claude agents (mirrors the Hermes
+	// path above). Without this, a Claude agent loaded from store has empty
+	// TmuxTarget/AttachMode, isTmuxAttached=false in conversationSend, and
+	// user messages from the web client are silently dropped instead of
+	// being routed via tmux send-keys. Regression fix for #62.
+	if len(claudeTodos) > 0 {
+		procs, err := m.ScanExisting()
+		if err != nil {
+			log.Printf("[LoadFromStore] Claude attach rescan: ScanExisting failed: %v", err)
+		} else {
+			for _, t := range claudeTodos {
+				var info *scanner.ProcessInfo
+				for i := range procs {
+					if procs[i].PID == t.pid && procs[i].Provider == "claude" {
+						info = &procs[i]
+						break
+					}
+				}
+				if info != nil && info.TmuxTarget != "" {
+					t.ag.SetAttachInputRoute(info.AttachMode(), info.AttachReadOnly(), info.AttachReadOnlyReason(), info.TmuxTarget)
+				}
+			}
+		}
+	}
+
 	// Spawn DB watchers for restored OpenCode agents now that the lock is
 	// released; newSessionWatcher() acquires m.mu.RLock internally.
 	for _, t := range opencodeTodos {
