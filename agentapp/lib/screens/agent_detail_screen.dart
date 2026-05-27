@@ -20,6 +20,8 @@ import '../providers/unread_provider.dart';
 import '../providers/draft_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
+import '../theme/app_spacing.dart';
+import '../theme/app_text_styles.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
@@ -1815,11 +1817,11 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
+            Text(
               '特殊按键',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              style: AppTextStyles.bodyLarge.copyWith(fontWeight: FontWeight.bold),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -2168,7 +2170,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           children: [
             Text(
               _agentName ?? agent?.name ?? widget.agentId,
-              style: const TextStyle(fontSize: 16),
+              style: AppTextStyles.bodyMedium,
             ),
             if (agent != null)
               Text(
@@ -4178,11 +4180,10 @@ class MessageBubble extends StatelessWidget {
                 Row(
                   children: [
                     Icon(Icons.security, size: 20, color: scheme.secondary),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: AppSpacing.sm),
                     Text(
                       '权限确认',
-                      style: TextStyle(
-                        fontSize: 14,
+                      style: AppTextStyles.bodySmall.copyWith(
                         fontWeight: FontWeight.w600,
                         color: scheme.onSecondaryContainer,
                       ),
@@ -4878,8 +4879,7 @@ class _KeyButton extends StatelessWidget {
             ),
             child: Text(
               display,
-              style: TextStyle(
-                fontSize: 16,
+              style: AppTextStyles.bodyMedium.copyWith(
                 fontWeight: FontWeight.w500,
                 color: isArrow
                     ? (isDark ? Colors.blue.shade300 : Colors.blue.shade700)
@@ -5105,8 +5105,7 @@ class _PermissionPromptOverlay extends StatelessWidget {
               children: [
                 Text(
                   '权限确认',
-                  style: TextStyle(
-                    fontSize: 14,
+                  style: AppTextStyles.bodySmall.copyWith(
                     fontWeight: FontWeight.w600,
                     color: scheme.onSecondaryContainer,
                   ),
@@ -5592,9 +5591,8 @@ class _InputBarState extends State<_InputBar> {
                         dense: true,
                         title: Text(
                           cmd.command,
-                          style: const TextStyle(
+                          style: AppTextStyles.bodySmall.copyWith(
                             fontWeight: FontWeight.w500,
-                            fontSize: 14,
                           ),
                         ),
                         subtitle: Text(
@@ -5781,14 +5779,13 @@ class _InputBarState extends State<_InputBar> {
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Text(
+                                    Text(
                                       '特殊按键',
-                                      style: TextStyle(
-                                        fontSize: 18,
+                                      style: AppTextStyles.bodyLarge.copyWith(
                                         fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                    const SizedBox(height: 16),
+                                    const SizedBox(height: AppSpacing.lg),
                                     Wrap(
                                       spacing: 8,
                                       runSpacing: 8,

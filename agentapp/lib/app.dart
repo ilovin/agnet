@@ -7,7 +7,9 @@ import 'screens/dashboard_screen.dart';
 import 'screens/agent_detail_screen.dart';
 import 'screens/settings_screen.dart';
 import 'providers/connection_provider.dart';
+import 'providers/density_mode_provider.dart';
 import 'providers/theme_provider.dart';
+import 'theme/app_theme.dart';
 
 final _router = GoRouter(
   initialLocation: '/connections',
@@ -55,35 +57,14 @@ class AgentApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final colorScheme = ColorScheme.fromSeed(seedColor: Colors.indigo);
-    final darkColorScheme = ColorScheme.fromSeed(
-      seedColor: Colors.indigo,
-      brightness: Brightness.dark,
-    );
+    final density = ref.watch(densityModeProvider);
     final themeMode = themeModeFromSetting(ref.watch(themeModeProvider));
     return MaterialApp.router(
       title: 'Agnet',
-      theme: ThemeData(
-        colorScheme: colorScheme,
-        useMaterial3: true,
-        fontFamily: 'Noto Sans SC',
-        fontFamilyFallback: const ['Noto Sans Symbols 2', 'Noto Color Emoji', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-        textSelectionTheme: TextSelectionThemeData(
-          selectionColor: colorScheme.primary.withValues(alpha: 0.50),
-          cursorColor: colorScheme.primary,
-          selectionHandleColor: colorScheme.primary,
-        ),
-      ),
-      darkTheme: ThemeData(
-        colorScheme: darkColorScheme,
-        useMaterial3: true,
-        fontFamily: 'Noto Sans SC',
-        fontFamilyFallback: const ['Noto Sans Symbols 2', 'Noto Color Emoji', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
-        textSelectionTheme: TextSelectionThemeData(
-          selectionColor: darkColorScheme.primary.withValues(alpha: 0.50),
-          cursorColor: darkColorScheme.primary,
-          selectionHandleColor: darkColorScheme.primary,
-        ),
+      theme: AppTheme.build(densityMode: density),
+      darkTheme: AppTheme.build(
+        densityMode: density,
+        brightness: Brightness.dark,
       ),
       themeMode: themeMode,
       routerConfig: _router,

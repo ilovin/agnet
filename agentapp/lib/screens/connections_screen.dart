@@ -14,6 +14,7 @@ import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
+import '../theme/app_spacing.dart';
 
 class ConnectionProbeResult {
   final int? statusCode;
@@ -558,12 +559,14 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         const Icon(Icons.cable, size: 64, color: Colors.grey),
-                        const SizedBox(height: 16),
-                        const Text(
+                        const SizedBox(height: AppSpacing.lg),
+                        Text(
                           '无连接',
-                          style: TextStyle(fontSize: 18, color: Colors.grey),
+                          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                                color: Colors.grey,
+                              ),
                         ),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: AppSpacing.lg),
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
@@ -572,7 +575,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                               icon: const Icon(Icons.add),
                               label: const Text('手动添加'),
                             ),
-                            const SizedBox(width: 12),
+                            const SizedBox(width: AppSpacing.md),
                             ElevatedButton.icon(
                               onPressed: _connecting ? null : _scanQrCode,
                               icon: const Icon(Icons.qr_code_scanner),
@@ -637,7 +640,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                       ),
                       const Divider(height: 1),
                       Padding(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.all(AppSpacing.md),
                         child: Row(
                           children: [
                             Expanded(
@@ -650,7 +653,7 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
                                 ),
                               ),
                             ),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: AppSpacing.sm),
                             ElevatedButton.icon(
                               onPressed: _connecting ? null : _scanQrCode,
                               icon: const Icon(Icons.qr_code_scanner),
@@ -732,20 +735,22 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 24,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+        left: AppSpacing.lg,
+        right: AppSpacing.lg,
+        top: AppSpacing.xl,
+        bottom: MediaQuery.of(context).viewInsets.bottom + AppSpacing.xl,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
+          Text(
             '添加连接',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           TextField(
             controller: _urlCtrl,
             decoration: const InputDecoration(
@@ -755,7 +760,7 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
             ),
             keyboardType: TextInputType.url,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: AppSpacing.md),
           TextField(
             controller: _tokenCtrl,
             decoration: const InputDecoration(
@@ -765,10 +770,10 @@ class _AddConnectionSheetState extends State<_AddConnectionSheet> {
             obscureText: true,
           ),
           if (_error != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
             Text(_error!, style: const TextStyle(color: Colors.red)),
           ],
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           FilledButton(
             onPressed: _loading ? null : _submit,
             child: _loading
@@ -836,20 +841,22 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 24,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+        left: AppSpacing.lg,
+        right: AppSpacing.lg,
+        top: AppSpacing.xl,
+        bottom: MediaQuery.of(context).viewInsets.bottom + AppSpacing.xl,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
+          Text(
             '编辑连接',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           TextField(
             controller: _urlCtrl,
             decoration: const InputDecoration(
@@ -859,7 +866,7 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
             ),
             keyboardType: TextInputType.url,
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: AppSpacing.md),
           TextField(
             controller: _tokenCtrl,
             decoration: const InputDecoration(
@@ -869,10 +876,10 @@ class _EditConnectionSheetState extends State<_EditConnectionSheet> {
             obscureText: true,
           ),
           if (_error != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
             Text(_error!, style: const TextStyle(color: Colors.red)),
           ],
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           FilledButton(
             onPressed: _loading ? null : _submit,
             child: _loading
@@ -945,9 +952,8 @@ class _QrScannerPageState extends State<_QrScannerPage> {
             child: Text(
               '将二维码对准框内',
               textAlign: TextAlign.center,
-              style: TextStyle(
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: Colors.white,
-                fontSize: 16,
                 shadows: [Shadow(blurRadius: 4, color: Colors.black.withOpacity(0.8))],
               ),
             ),

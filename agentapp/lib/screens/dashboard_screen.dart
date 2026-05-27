@@ -10,11 +10,14 @@ import '../models/message_model.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/conversation_provider.dart';
+import '../providers/dashboard_detail_panel_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
 import '../providers/session_logo_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
+import '../theme/app_spacing.dart';
+import '../theme/app_text_styles.dart';
 import 'agent_detail_screen.dart'
     show
         buildCollapsedPreview,
@@ -174,7 +177,7 @@ class _MarkdownPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     return _MarkdownText(
       data,
-      style: TextStyle(fontSize: 12, color: color),
+      style: AppTextStyles.caption.copyWith(color: color),
       maxLines: 3,
       overflow: TextOverflow.ellipsis,
     );
@@ -597,6 +600,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     super.initState();
     _subscribeEvents();
     _startAutoRefresh();
+    // Hydrate persisted detail-panel expansion preference (lazy load avoids
+    // a race with widget tests that don't await the constructor).
+    Future<void>.microtask(() {
+      if (!mounted) return;
+      ref.read(dashboardDetailPanelExpandedProvider.notifier).hydrate();
+    });
     // Listen for connection state changes
     final notifier = ref.read(connectionProvider.notifier);
     _connSub = notifier.onStateChanged.listen((state) {
@@ -1216,19 +1225,18 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                 ),
               ),
               if (_canvasSelectionMode) ...[
-                const SizedBox(width: 12),
+                const SizedBox(width: AppSpacing.md),
                 Expanded(
                   child: Text(
                     '点击左侧 + 添加会话，- 移除会话',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                   ),
                 ),
               ] else
                 const Spacer(),
-              const SizedBox(width: 8),
+              const SizedBox(width: AppSpacing.sm),
               FilledButton.icon(
                 onPressed: () {
                   setState(() {
@@ -1322,6 +1330,74 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// 48px collapsed rail with a chevron toggle (no canvas content).
+  Widget _buildDetailPaneRail(bool expanded) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      color: scheme.surface,
+      child: Column(
+        children: [
+          const SizedBox(height: 8),
+          IconButton(
+            key: const Key('dashboard_detail_panel_toggle'),
+            tooltip: expanded ? '折叠详情画布' : '展开详情画布',
+            icon: Icon(
+              expanded ? Icons.chevron_right : Icons.chevron_left,
+              color: scheme.onSurfaceVariant,
+            ),
+            onPressed: () => ref
+                .read(dashboardDetailPanelExpandedProvider.notifier)
+                .toggle(),
+          ),
+          const SizedBox(height: 4),
+          RotatedBox(
+            quarterTurns: 3,
+            child: Text(
+              '详情画布',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    letterSpacing: 1.2,
+                  ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Detail pane content for narrow-screen overlay mode: combines the rail
+  /// (with toggle) and the actual canvas in one container.
+  Widget _buildDetailPaneContent(
+    bool expanded,
+    List<DashboardSessionTarget> sessions,
+    Map<String, DashboardSessionTarget> sessionByKey,
+  ) {
+    if (!expanded) {
+      return _buildDetailPaneRail(expanded);
+    }
+    return Row(
+      children: [
+        SizedBox(
+          width: 48,
+          child: _buildDetailPaneRail(expanded),
+        ),
+        Expanded(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(
+                left: BorderSide(
+                  color: Theme.of(context).dividerColor,
+                  width: 1,
+                ),
+              ),
+            ),
+            child: _buildCanvasPane(sessions, sessionByKey),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1463,16 +1539,81 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
                 final canvasPanelKeys = Set<String>.from(_canvasPanelOrder);
 
+                final detailExpanded =
+                    ref.watch(dashboardDetailPanelExpandedProvider);
+                // Narrow split (<800) → use Drawer-style overlay so the rail
+                // doesn't crowd the list pane.
+                final overlayMode = constraints.maxWidth < 800;
+
+                if (overlayMode) {
+                  return Stack(
+                    children: [
+                      _buildDashboardListPane(
+                        nodes,
+                        canvasPanelKeys,
+                        sessionByKey,
+                      ),
+                      if (detailExpanded)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => ref
+                                .read(dashboardDetailPanelExpandedProvider
+                                    .notifier)
+                                .setExpanded(false),
+                            child: Container(
+                              color: Colors.black.withValues(alpha: 0.30),
+                            ),
+                          ),
+                        ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: AnimatedContainer(
+                          key: const Key('dashboard_detail_panel'),
+                          duration: const Duration(milliseconds: 220),
+                          curve: Curves.easeInOut,
+                          width: detailExpanded
+                              ? constraints.maxWidth.clamp(320.0, 520.0)
+                              : 48,
+                          child: Material(
+                            elevation: detailExpanded ? 4 : 0,
+                            color: Theme.of(context).colorScheme.surface,
+                            child: _buildDetailPaneContent(
+                              detailExpanded,
+                              sessions,
+                              sessionByKey,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+
+                // Wide layout: list pane on the left, detail panel on the
+                // right. The detail panel itself collapses to a 48px rail
+                // and grows wide enough to host the canvas inline — keeping
+                // its WIDTH the source of truth for the toggle (testable
+                // and intent-clear).
+                final expandedDetailWidth =
+                    (constraints.maxWidth * 0.55).clamp(320.0, 720.0);
                 return Row(
                   children: [
                     Expanded(
-                      flex: 5,
-                      child: _buildDashboardListPane(nodes, canvasPanelKeys, sessionByKey),
+                      child: _buildDashboardListPane(
+                          nodes, canvasPanelKeys, sessionByKey),
                     ),
                     const VerticalDivider(width: 1),
-                    Expanded(
-                      flex: 6,
-                      child: _buildCanvasPane(sessions, sessionByKey),
+                    AnimatedContainer(
+                      key: const Key('dashboard_detail_panel'),
+                      duration: const Duration(milliseconds: 220),
+                      curve: Curves.easeInOut,
+                      width: detailExpanded ? expandedDetailWidth : 48,
+                      child: _buildDetailPaneContent(
+                        detailExpanded,
+                        sessions,
+                        sessionByKey,
+                      ),
                     ),
                   ],
                 );
@@ -1558,10 +1699,9 @@ class _CanvasSessionPanel extends StatelessWidget {
                         subtitleParts.join(' · '),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
-                        ),
+                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
                       ),
                     ],
                   ),
@@ -1613,27 +1753,18 @@ class _CanvasSessionPanel extends StatelessWidget {
                             children: [
                               Text(
                                 isUser ? '你: ' : 'AI: ',
-                                style: TextStyle(
+                                style: Theme.of(context).textTheme.labelSmall?.copyWith(
                                   fontWeight: FontWeight.w600,
-                                  fontSize: 13,
                                   color: isUser
-                                      ? Theme.of(
-                                        context,
-                                      ).colorScheme.primary
-                                      : Theme.of(
-                                        context,
-                                      ).colorScheme.onSurface,
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Theme.of(context).colorScheme.onSurface,
                                 ),
                               ),
                               Expanded(
                                 child: _MarkdownText(
                                   msg.text,
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    color:
-                                        Theme.of(
-                                          context,
-                                        ).colorScheme.onSurface,
+                                  style: AppTextStyles.labelSmall.copyWith(
+                                    color: Theme.of(context).colorScheme.onSurface,
                                     height: 1.3,
                                   ),
                                 ),
@@ -1803,10 +1934,9 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                 ? Wrap(spacing: 6, runSpacing: 6, children: summaryChips)
                 : Text(
                     '${widget.node.location.displayLocation}  ·  $_statusLabel${visibleAgents.isNotEmpty ? ' · ${visibleAgents.length} 会话' : ''}',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
                   ),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
@@ -2599,8 +2729,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                   ),
                                   subtitle: Text(
                                     _agentSubtitleText(a),
-                                    style: TextStyle(
-                                      fontSize: 12,
+                                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
                                       fontWeight: FontWeight.w600,
                                       color: AgentStatusTheme.getColor(a.status),
                                     ),
@@ -2796,7 +2925,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         : null;
     return Text.rich(
       TextSpan(
-        style: const TextStyle(fontSize: 12),
+        style: Theme.of(context).textTheme.labelMedium,
         children: [
           TextSpan(
             text: statusText,
@@ -3006,14 +3135,13 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             size: 16,
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               text,
-              style: TextStyle(
-                fontSize: 12,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
             ),
           ),
         ],
