@@ -24,7 +24,8 @@ func (em *EventManager) AppendAndPersistEvent(agentID string, ag *Agent, data ma
 		data["timestamp"] = time.Now().UnixMilli()
 	}
 	seq := ag.AppendEvent(data)
-	if err := em.store.SaveConversationEvent(agentID, seq, data); err != nil {
+	sessionID := ag.ResumeSessionID()
+	if err := em.store.SaveConversationEventWithSession(agentID, sessionID, seq, data); err != nil {
 		log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
 	}
 	return seq
@@ -36,13 +37,14 @@ func (em *EventManager) AppendAndPersistEvent(agentID string, ag *Agent, data ma
 func (em *EventManager) UpdateOrAppendEvent(agentID string, ag *Agent, data map[string]any) (uint64, bool) {
 	msgID, _ := data["msg_id"].(string)
 	seq, updated := ag.EventBuf().UpdateOrAppend(msgID, data)
+	sessionID := ag.ResumeSessionID()
 	if updated {
 		data["seq"] = seq
-		if err := em.store.SaveConversationEvent(agentID, seq, data); err != nil {
+		if err := em.store.SaveConversationEventWithSession(agentID, sessionID, seq, data); err != nil {
 			log.Printf("update conversation event agent=%s seq=%d: %v", agentID, seq, err)
 		}
 	} else {
-		if err := em.store.SaveConversationEvent(agentID, seq, data); err != nil {
+		if err := em.store.SaveConversationEventWithSession(agentID, sessionID, seq, data); err != nil {
 			log.Printf("save conversation event agent=%s seq=%d: %v", agentID, seq, err)
 		}
 	}

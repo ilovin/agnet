@@ -96,13 +96,17 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 			return
 		}
 		if data["type"] == "conversation.cleared" {
+			params := map[string]any{
+				"agentId": agentID,
+				"nodeId":  nodeID,
+			}
+			if sid, ok := data["sessionId"].(string); ok && sid != "" {
+				params["sessionId"] = sid
+			}
 			srv.broadcast(RPCEvent{
 				JSONRPC: "2.0",
 				Method:  "conversation.cleared",
-				Params: map[string]any{
-					"agentId": agentID,
-					"nodeId":  nodeID,
-				},
+				Params:  params,
 			}, nil)
 			return
 		}
