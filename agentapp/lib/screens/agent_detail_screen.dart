@@ -32,7 +32,6 @@ import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
 import '../models/claude_interaction_models.dart';
 import '../widgets/ask_user_question_card.dart';
-import '../widgets/browser_screenshot_widget.dart';
 import '../widgets/exit_plan_mode_card.dart';
 import '../widgets/permission_request_card.dart';
 
@@ -5345,17 +5344,6 @@ class _InputBarState extends State<_InputBar> {
     }
   }
 
-  Widget _buildModeButton(BuildContext context) {
-    // Deprecated: mode chip moved to MissionControlAppBar actions slot via
-    // [BypassIndicator]. Kept as a no-op so any external references compile
-    // until the next cleanup pass.
-    return const SizedBox.shrink();
-  }
-
-  void _showConfigSheet() {
-    // Deprecated: see [BypassIndicator] in the AppBar.
-  }
-
   void _showImagePreview(BuildContext context, Uint8List bytes) {
     showDialog(
       context: context,
@@ -5608,25 +5596,6 @@ class _InputBarState extends State<_InputBar> {
       updated.add({'data': b64, 'mimeType': mime});
     }
     widget.onImagesChanged(updated);
-  }
-
-  // ignore: unused_element
-  Future<void> _takeBrowserScreenshot() async {
-    try {
-      final result = await showBrowserScreenshot(context);
-      if (result != null) {
-        final updated = List<Map<String, String>>.from(widget.pendingImages);
-        updated.add(result);
-        widget.onImagesChanged(updated);
-      }
-    } catch (e, st) {
-      debugPrint('browserScreenshot error: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('浏览器截图失败: $e')));
-      }
-    }
   }
 
   String _detectMimeType(List<int> bytes) {
@@ -5916,11 +5885,24 @@ class _InputBarState extends State<_InputBar> {
                   decoration: InputDecoration(
                     hintText: readOnlyHint,
                     border: const OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(24)),
+                      borderRadius: BorderRadius.all(Radius.circular(10)),
+                    ),
+                    prefixIcon: Padding(
+                      padding: const EdgeInsets.only(left: 12, right: 8),
+                      child: Text(
+                        '▸',
+                        style: AppTextStyles.monoLarge.copyWith(
+                          color: AppColors.accent,
+                        ),
+                      ),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 0,
                     ),
                     contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
+                      horizontal: 12,
+                      vertical: 8,
                     ),
                     isDense: true,
                   ),
