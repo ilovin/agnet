@@ -47,6 +47,12 @@ type Agent struct {
 	permissionResolvedAt     time.Time // when the prompt was resolved
 	permissionManager       *PermissionManager // manages permission requests
 
+	// resumeSessionID mirrors AgentRecord.ResumeSessionID so writers (event
+	// persistence) can tag events with the current session without hitting
+	// the store on every append. Updated by Manager.UpdateResumeSessionID
+	// and seeded by LoadFromStore.
+	resumeSessionID string
+
 	// Attached-session input routing metadata.
 	attachMode           string
 	attachReadOnly       bool
@@ -75,6 +81,23 @@ func (a *Agent) SetOnStatusChange(cb StatusChangeCallback) {
 // InitSeq sets the buffer's sequence counter so subsequent appends continue from lastSeq+1.
 func (a *Agent) InitSeq(lastSeq uint64) {
 	a.buf.InitSeq(lastSeq)
+}
+
+// ResumeSessionID returns the agent's current resume session ID (mirrors
+// AgentRecord.ResumeSessionID).
+func (a *Agent) ResumeSessionID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.resumeSessionID
+}
+
+// SetResumeSessionID updates the in-memory mirror of the agent's resume session
+// ID. Called from Manager when the persisted ResumeSessionID changes so that
+// subsequent event writes carry the new session tag.
+func (a *Agent) SetResumeSessionID(sessionID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.resumeSessionID = sessionID
 }
 
 func newAgent(id, name, provider, workDir, cmd string, args []string) *Agent {

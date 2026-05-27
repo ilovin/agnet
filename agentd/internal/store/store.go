@@ -81,11 +81,18 @@ func (s *Store) migrate() error {
 		seq INTEGER NOT NULL,
 		data_json TEXT NOT NULL,
 		created_at TEXT NOT NULL,
+		session_id TEXT NOT NULL DEFAULT '',
 		PRIMARY KEY (agent_id, seq)
 	)`)
 	if err != nil {
 		return fmt.Errorf("migrate conversation_events: %w", err)
 	}
+
+	// Add session_id column to existing tables that were created before it
+	// existed. ALTER TABLE ADD COLUMN errors if the column already exists, so
+	// we ignore the error. Legacy rows default to an empty string and will be
+	// pruned by ClearConversationEventsBefore on the next LoadFromStore.
+	_, _ = s.db.Exec(`ALTER TABLE conversation_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`)
 	return nil
 }
 
@@ -169,6 +176,30 @@ func (s *Store) ClearConversationEvents(agentID string) error {
 	return nil
 }
 
+// ClearConversationEventsBefore deletes any persisted conversation events for
+// the given agent whose session_id does not match currentSessionID. This is
+// used at startup to prune stale events that accumulated under a previous
+// (mis-bound) session — see issue #50.
+//
+// Calling with an empty currentSessionID is a no-op: we never want to nuke
+// every row just because the session ID is not yet known.
+func (s *Store) ClearConversationEventsBefore(agentID, currentSessionID string) error {
+	if currentSessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`DELETE FROM conversation_events WHERE agent_id=? AND session_id != ?`,
+		agentID,
+		currentSessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("prune stale conversation events for agent %s: %w", agentID, err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateAgentProvider(id, provider string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,7 +228,18 @@ func (s *Store) DeleteAgent(id string) error {
 	return nil
 }
 
+// SaveConversationEvent persists a conversation event without an associated
+// session ID. Prefer SaveConversationEventWithSession when the agent's
+// resume session ID is known so that LoadFromStore can prune stale events
+// belonging to a different session.
 func (s *Store) SaveConversationEvent(agentID string, seq uint64, data map[string]any) error {
+	return s.SaveConversationEventWithSession(agentID, "", seq, data)
+}
+
+// SaveConversationEventWithSession persists a conversation event tagged with
+// the agent's current resume session ID. Events written with the wrong
+// (stale) session ID can be pruned later via ClearConversationEventsBefore.
+func (s *Store) SaveConversationEventWithSession(agentID, sessionID string, seq uint64, data map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if agentID == "" {
@@ -208,11 +250,12 @@ func (s *Store) SaveConversationEvent(agentID string, seq uint64, data map[strin
 		return fmt.Errorf("marshal event data: %w", err)
 	}
 	_, err = s.db.Exec(
-		`INSERT OR REPLACE INTO conversation_events (agent_id, seq, data_json, created_at) VALUES (?,?,?,?)`,
+		`INSERT OR REPLACE INTO conversation_events (agent_id, seq, data_json, created_at, session_id) VALUES (?,?,?,?,?)`,
 		agentID,
 		seq,
 		string(payload),
 		time.Now().UTC().Format(time.RFC3339Nano),
+		sessionID,
 	)
 	if err != nil {
 		return fmt.Errorf("save conversation event agent=%s seq=%d: %w", agentID, seq, err)

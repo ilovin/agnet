@@ -247,9 +247,20 @@ func (m *Manager) LoadFromStore() error {
 		}
 		ag := newAgent(r.ID, r.Name, r.Provider, r.WorkDir, cmd, args)
 		ag.PID = r.PID
+		ag.SetResumeSessionID(r.ResumeSessionID)
 		m.wireStatusCallback(ag)
 		ag.setStatus(StatusIdle)
 		log.Printf("[LoadFromStore] Agent %s (PID %d) is still running, setting status to idle", r.ID, r.PID)
+
+		// Prune any persisted conversation events that don't belong to the
+		// current resume session. This catches stale events accumulated under
+		// a previous (mis-bound) session — see issue #50. Safe no-op when
+		// ResumeSessionID is empty.
+		if r.ResumeSessionID != "" {
+			if err := m.store.ClearConversationEventsBefore(r.ID, r.ResumeSessionID); err != nil {
+				log.Printf("[LoadFromStore] Prune stale events failed for %s: %v", r.ID, err)
+			}
+		}
 
 		// Initialize buffer seq from persisted events so new appends continue after existing data
 		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
@@ -1683,11 +1694,15 @@ func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 	if err := m.store.UpdateResumeSessionID(id, sessionID); err != nil {
 		return err
 	}
+	// Mirror onto the live Agent so subsequent event writes tag with the new
+	// session ID without an extra DB lookup.
+	ag.SetResumeSessionID(sessionID)
 
 	// Also update the parent agent if this is a child agent (for session continuity)
 	m.mu.RLock()
 	parentID, hasParent := m.sessionParents[id]
 	parentCount := len(m.sessionParents)
+	parentAgent := m.agents[parentID]
 	m.mu.RUnlock()
 	log.Printf("[Session] Checking parent for agent %s: hasParent=%v, parentID=%s, mapSize=%d", id, hasParent, parentID, parentCount)
 	if hasParent && parentID != "" {
@@ -1695,6 +1710,9 @@ func (m *Manager) UpdateResumeSessionID(id, sessionID string) error {
 			log.Printf("[Session] Failed to update parent agent %s session ID: %v", parentID, err)
 		} else {
 			log.Printf("[Session] Also saved session ID %s to parent agent %s", sessionID, parentID)
+			if parentAgent != nil {
+				parentAgent.SetResumeSessionID(sessionID)
+			}
 		}
 	}
 

@@ -2003,3 +2003,80 @@ func TestPeriodicScan_RebuildsWatcherWhenMissing(t *testing.T) {
 		t.Fatalf("expected at least one claude agent (PID %d) with active watcher after PeriodicScan rescue, got %d agents total", ownPID, len(agents))
 	}
 }
+
+// TestLoadFromStorePrunesStaleSessionEvents verifies that LoadFromStore
+// deletes persisted conversation_events whose session_id does not match the
+// agent's current ResumeSessionID, while preserving events from the current
+// session. This is the issue #50 fix: contentMatch jitter previously bound
+// some events to a different session, and they survived agentd restarts.
+func TestLoadFromStorePrunesStaleSessionEvents(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "agents.db")
+	dataDir := t.TempDir()
+	workDir := t.TempDir()
+
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	const agentID = "claude-prune-1"
+	if err := s.SaveAgent(store.AgentRecord{
+		ID:              agentID,
+		Name:            "claude",
+		Provider:        "claude",
+		WorkDir:         workDir,
+		ResumeSessionID: "current-session",
+		PID:             4242,
+	}); err != nil {
+		t.Fatalf("save agent: %v", err)
+	}
+
+	// Persist a mix of stale and current session events.
+	if err := s.SaveConversationEventWithSession(agentID, "old-session", 1, map[string]any{"role": "user", "text": "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConversationEventWithSession(agentID, "", 2, map[string]any{"role": "assistant", "text": "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConversationEventWithSession(agentID, "current-session", 3, map[string]any{"role": "user", "text": "keep-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConversationEventWithSession(agentID, "current-session", 4, map[string]any{"role": "assistant", "text": "keep-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	m := agent.NewManager(s, dataDir)
+	m.SetProcessRunningChecker(func(pid int, provider string) bool {
+		return pid == 4242 && provider == "claude"
+	})
+	// Suppress the jsonl watcher: real session file lookup would fail in tests.
+	m.SetFindSessionFile(func(info scanner.ProcessInfo) string { return "" })
+
+	if err := m.LoadFromStore(); err != nil {
+		t.Fatalf("LoadFromStore: %v", err)
+	}
+
+	// Verify that only current-session events remain.
+	events, err := s.ListConversationEventsLatest(agentID, 100)
+	if err != nil {
+		t.Fatalf("ListConversationEventsLatest: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after prune, got %d (events=%+v)", len(events), events)
+	}
+	for _, ev := range events {
+		if ev.Text != "keep-1" && ev.Text != "keep-2" {
+			t.Errorf("unexpected surviving event text=%q seq=%d", ev.Text, ev.Seq)
+		}
+	}
+
+	// And the live agent's ResumeSessionID was seeded.
+	ag := m.Get(agentID)
+	if ag == nil {
+		t.Fatalf("agent %s not loaded", agentID)
+	}
+	if got := ag.ResumeSessionID(); got != "current-session" {
+		t.Fatalf("agent ResumeSessionID: got %q want current-session", got)
+	}
+}

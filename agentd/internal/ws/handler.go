@@ -1204,6 +1204,7 @@ func (h *handler) conversationHistory(req RPCRequest, p ConversationHistoryParam
 		"lastSeq":            lastSeq,
 		"firstSeq":           firstSeq,
 		"permissionRequests": permissionRequests,
+		"sessionId":          ag.ResumeSessionID(),
 	})
 }
 
@@ -1294,8 +1295,9 @@ func (h *handler) conversationClear(req RPCRequest, p ConversationClearParams) R
 	ag.SetStatus(agent.StatusIdle)
 	ag.ResetWatcherOffset()
 	h.server.broadcast(event("conversation.cleared", map[string]any{
-		"nodeId":  p.NodeID,
-		"agentId": agentID,
+		"nodeId":    p.NodeID,
+		"agentId":   agentID,
+		"sessionId": ag.ResumeSessionID(),
 	}), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
 }

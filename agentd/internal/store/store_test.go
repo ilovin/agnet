@@ -1,10 +1,13 @@
 package store_test
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/phone-talk/agentd/internal/store"
 )
@@ -250,5 +253,227 @@ func TestConversationEventPayloadRoundtrip(t *testing.T) {
 	}
 	if before[1].Payload == nil || before[1].Payload["exitPlanMode"] == nil {
 		t.Errorf("exitPlanMode missing from Before; Payload=%v", before[1].Payload)
+	}
+}
+
+// TestConversationEventsHasSessionIDColumn verifies that the conversation_events
+// table has a session_id column after migration.
+func TestConversationEventsHasSessionIDColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Open a separate connection to run a PRAGMA table_info query.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`PRAGMA table_info(conversation_events)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info: %v", err)
+	}
+	defer rows.Close()
+
+	hasSessionID := false
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "session_id" {
+			hasSessionID = true
+		}
+	}
+	if !hasSessionID {
+		t.Fatalf("conversation_events missing session_id column")
+	}
+}
+
+// TestSaveConversationEventStoresSessionID writes an event with a sessionID and
+// verifies the underlying row carries that sessionID via a raw SQL probe.
+func TestSaveConversationEventStoresSessionID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const agentID = "agent-with-session"
+	const sessID = "session-abc"
+	if err := s.SaveConversationEventWithSession(agentID, sessID, 1, map[string]any{"role": "user", "text": "hi"}); err != nil {
+		t.Fatalf("SaveConversationEventWithSession: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var got string
+	if err := db.QueryRow(`SELECT session_id FROM conversation_events WHERE agent_id=? AND seq=?`, agentID, 1).Scan(&got); err != nil {
+		t.Fatalf("query session_id: %v", err)
+	}
+	if got != sessID {
+		t.Fatalf("session_id: got %q want %q", got, sessID)
+	}
+}
+
+// TestClearConversationEventsBeforePrunesOtherSessions verifies that events
+// belonging to other sessions (including legacy empty-string session) are
+// pruned, while current-session events are retained.
+func TestClearConversationEventsBeforePrunesOtherSessions(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const agentID = "agent-prune"
+
+	// Stale events from a previous session.
+	if err := s.SaveConversationEventWithSession(agentID, "old-session", 1, map[string]any{"role": "user", "text": "stale-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConversationEventWithSession(agentID, "old-session", 2, map[string]any{"role": "assistant", "text": "stale-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy event with empty session (e.g. pre-migration row).
+	if err := s.SaveConversationEventWithSession(agentID, "", 3, map[string]any{"role": "user", "text": "legacy"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Current session.
+	if err := s.SaveConversationEventWithSession(agentID, "current-session", 4, map[string]any{"role": "user", "text": "keep-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConversationEventWithSession(agentID, "current-session", 5, map[string]any{"role": "assistant", "text": "keep-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ClearConversationEventsBefore(agentID, "current-session"); err != nil {
+		t.Fatalf("ClearConversationEventsBefore: %v", err)
+	}
+
+	events, err := s.ListConversationEventsLatest(agentID, 100)
+	if err != nil {
+		t.Fatalf("ListConversationEventsLatest: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events after prune, got %d (events=%+v)", len(events), events)
+	}
+	for _, ev := range events {
+		if ev.Text != "keep-1" && ev.Text != "keep-2" {
+			t.Errorf("unexpected surviving event text=%q seq=%d", ev.Text, ev.Seq)
+		}
+	}
+}
+
+// TestClearConversationEventsBeforeRequiresSession ensures that calling with
+// an empty currentSessionID is a no-op — we never want to nuke all rows just
+// because a sessionID isn't known yet.
+func TestClearConversationEventsBeforeRequiresSession(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const agentID = "agent-empty-session-guard"
+	if err := s.SaveConversationEventWithSession(agentID, "sess-1", 1, map[string]any{"role": "user", "text": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	// Empty currentSessionID must not delete anything.
+	if err := s.ClearConversationEventsBefore(agentID, ""); err != nil {
+		t.Fatalf("ClearConversationEventsBefore with empty sessionID returned error: %v", err)
+	}
+	events, err := s.ListConversationEventsLatest(agentID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event preserved, got %d", len(events))
+	}
+}
+
+// TestMigrationAddsSessionIDColumnToLegacyDB simulates an old database that
+// pre-dates the session_id column and verifies the migration adds the column
+// (defaulting to '' for legacy rows) without dropping data.
+func TestMigrationAddsSessionIDColumnToLegacyDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+
+	// 1) Build a legacy schema by hand: conversation_events without session_id.
+	{
+		db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = db.Exec(`CREATE TABLE conversation_events (
+			agent_id TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			data_json TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY (agent_id, seq)
+		)`)
+		if err != nil {
+			t.Fatalf("create legacy table: %v", err)
+		}
+		_, err = db.Exec(
+			`INSERT INTO conversation_events (agent_id, seq, data_json, created_at) VALUES (?,?,?,?)`,
+			"legacy-agent", 1, `{"role":"user","text":"legacy"}`, time.Now().UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			t.Fatalf("insert legacy row: %v", err)
+		}
+		_ = db.Close()
+	}
+
+	// 2) Open via the production migration path; should ALTER and add session_id.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open after legacy schema: %v", err)
+	}
+	defer s.Close()
+
+	// Verify the legacy row survived and session_id defaulted to ''.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var sess string
+	if err := db.QueryRow(`SELECT session_id FROM conversation_events WHERE agent_id=? AND seq=?`, "legacy-agent", 1).Scan(&sess); err != nil {
+		t.Fatalf("query legacy row session_id: %v", err)
+	}
+	if sess != "" {
+		t.Fatalf("legacy row session_id: got %q, want empty", sess)
+	}
+
+	// 3) After ClearConversationEventsBefore("current"), the legacy row (sess='')
+	//    should be removed (it's not from the current session).
+	if err := s.ClearConversationEventsBefore("legacy-agent", "current"); err != nil {
+		t.Fatalf("ClearConversationEventsBefore: %v", err)
+	}
+	events, err := s.ListConversationEventsLatest("legacy-agent", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected legacy rows pruned, got %d remaining", len(events))
 	}
 }

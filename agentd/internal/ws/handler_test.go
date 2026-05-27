@@ -1,10 +1,15 @@
 package ws
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
@@ -330,5 +335,82 @@ func TestConversationClearResetsState(t *testing.T) {
 	}
 	if lastSeq != 0 {
 		t.Fatalf("LastPersistedSeq = %d, want 0", lastSeq)
+	}
+}
+
+// TestConversationClearedBroadcastIncludesSessionID verifies that the
+// conversation.cleared push event carries the agent's current resume
+// session ID. The Flutter app uses this to cross-check stale history (Task C).
+func TestConversationClearedBroadcastIncludesSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	const wantSession = "session-xyz"
+	if err := mgr.UpdateResumeSessionID(ag.ID, wantSession); err != nil {
+		t.Fatalf("UpdateResumeSessionID: %v", err)
+	}
+
+	// Stand up a real WS server + client so we can capture the broadcast.
+	srv := New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	header := http.Header{"Authorization": {"Bearer testtoken"}}
+	conn, _, err := websocket.DefaultDialer.Dial(u, header)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Trigger conversation.clear via JSON-RPC and capture the matching push event.
+	go func() {
+		req := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "conversation.clear",
+			"params":  map[string]any{"agentId": ag.ID, "nodeId": "testnode"},
+		}
+		_ = conn.WriteJSON(req)
+	}()
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if msg["method"] != "conversation.cleared" {
+			continue
+		}
+		params, _ := msg["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("conversation.cleared missing params: %v", msg)
+		}
+		gotSession, _ := params["sessionId"].(string)
+		if gotSession != wantSession {
+			t.Fatalf("conversation.cleared sessionId: got %q want %q", gotSession, wantSession)
+		}
+		return
 	}
 }
