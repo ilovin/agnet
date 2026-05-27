@@ -110,3 +110,12 @@ flutter:
     - family: Noto Color Emoji
       fonts:
         - asset: fonts/NotoColorEmoji.ttf
+    - family: Source Han Sans CN
+      fonts:
+        - asset: fonts/SourceHanSansCN-Heavy.otf
+          weight: 900
+    - family: JetBrainsMono
+      fonts:
+        - asset: fonts/JetBrainsMono-Regular.ttf
+        - asset: fonts/JetBrainsMono-Bold.ttf
+          weight: 700

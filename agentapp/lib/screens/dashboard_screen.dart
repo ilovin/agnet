@@ -18,6 +18,10 @@ import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
+import '../widgets/agent_status_indicator.dart';
+import '../widgets/app_bar/mission_control_app_bar.dart';
+import '../widgets/empty_states/empty_state.dart';
+import '../widgets/loaders/oscilloscope_loader.dart';
 import 'agent_detail_screen.dart'
     show
         buildCollapsedPreview,
@@ -739,7 +743,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                CircularProgressIndicator(),
+                OscilloscopeLoader(),
                 SizedBox(height: 16),
                 Text('正在扫描 SSH 配置...'),
               ],
@@ -1443,25 +1447,29 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final subtitle = subtitleParts.join(' · ');
 
     return Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 56,
-        leading: IconButton(
-          icon: const Icon(Icons.dashboard),
+      appBar: MissionControlAppBar(
+        toolbarHeight: 64,
+        leading: const IconButton(
+          icon: Icon(Icons.dashboard),
           tooltip: '仪表盘',
           onPressed: null,
         ),
-        title: Column(
+        titleWidget: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  '仪表盘',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
+                Flexible(
+                  child: Text(
+                    '仪表盘',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
                 ),
                 if (!_wsConnected) ...[
                   const SizedBox(width: 8),
@@ -1478,6 +1486,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             ),
             Text(
               subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -1529,7 +1539,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         ],
       ),
       body: nodes.isEmpty
-          ? const Center(child: Text('暂无节点', style: TextStyle(color: Colors.grey)))
+          ? const EmptyState(
+              message: '等待信号...',
+              subMessage: '尚无 Agent 节点',
+            )
           : LayoutBuilder(
               builder: (context, constraints) {
                 final largeScreen = _isLargeScreen(context);
@@ -2743,6 +2756,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                   subtitle: Text(
                                     _agentSubtitleText(a),
                                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                      fontFamily: AppTextStyles.monoFontFamily,
                                       fontWeight: FontWeight.w600,
                                       color: AgentStatusTheme.getColor(a.status),
                                     ),
@@ -2916,6 +2930,20 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
+  AgentIndicatorStatus get _indicatorStatus {
+    switch (widget.agent.status) {
+      case AgentStatus.working:
+        return AgentIndicatorStatus.running;
+      case AgentStatus.starting:
+        return AgentIndicatorStatus.thinking;
+      case AgentStatus.crashed:
+        return AgentIndicatorStatus.error;
+      case AgentStatus.idle:
+      case AgentStatus.stopped:
+        return AgentIndicatorStatus.idle;
+    }
+  }
+
   Widget _buildUnreadBadge() {
     final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, widget.agent.id)] ?? 0;
     if (unreadCount == 0) return const SizedBox.shrink();
@@ -2936,23 +2964,38 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final timeText = agent.lastMessageTime != null
         ? _formatRelativeTime(agent.lastMessageTime!)
         : null;
-    return Text.rich(
-      TextSpan(
-        style: Theme.of(context).textTheme.labelMedium,
-        children: [
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        AgentStatusIndicator(
+          status: _indicatorStatus,
+          size: 10,
+          color: _statusColor,
+        ),
+        const SizedBox(width: 6),
+        Text.rich(
           TextSpan(
-            text: statusText,
-            style: TextStyle(fontWeight: FontWeight.w600, color: _statusColor),
-          ),
-          if (timeText != null)
-            TextSpan(
-              text: '  $timeText',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+            style: Theme.of(context).textTheme.labelMedium,
+            children: [
+              TextSpan(
+                text: statusText,
+                style: TextStyle(
+                    fontWeight: FontWeight.w600, color: _statusColor),
               ),
-            ),
-        ],
-      ),
+              if (timeText != null)
+                TextSpan(
+                  text: '  $timeText',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
     );
   }
 
