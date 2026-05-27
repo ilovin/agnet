@@ -159,12 +159,34 @@ class _MarkdownText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final spans = buildMarkdownSpans(data, style, context);
-    return Text.rich(
-      TextSpan(children: spans),
-      maxLines: maxLines,
-      overflow: overflow,
-      softWrap: true,
+    final paragraphs = data.split('\n\n');
+    if (paragraphs.length <= 1) {
+      final spans = buildMarkdownSpans(data, style, context);
+      return Text.rich(
+        TextSpan(children: spans),
+        maxLines: maxLines,
+        overflow: overflow,
+        softWrap: true,
+      );
+    }
+
+    final children = <Widget>[];
+    for (var i = 0; i < paragraphs.length; i++) {
+      final spans = buildMarkdownSpans(paragraphs[i], style, context);
+      children.add(
+        Text.rich(
+          TextSpan(children: spans),
+          softWrap: true,
+        ),
+      );
+      if (i < paragraphs.length - 1) {
+        children.add(const SizedBox(height: 8));
+      }
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: children,
     );
   }
 }
@@ -806,7 +828,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     final id = node['id'] as String;
                     return CheckboxListTile(
                       title: Text(node['name'] as String),
-                      subtitle: Text(node['host'] as String),
+                      subtitle: Text(
+                        node['host'] as String,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                       value: selected.contains(id),
                       onChanged: (v) {
                         setState(() {
@@ -2738,6 +2764,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                   ),
                                   subtitle: Text(
                                     _agentSubtitleText(a),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
                                       fontFamily: AppTextStyles.monoFontFamily,
                                       fontWeight: FontWeight.w600,
@@ -2792,7 +2820,11 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                 title: Text(titleText),
                                 subtitle: secondary.isEmpty
                                     ? null
-                                    : Text(secondary),
+                                    : Text(
+                                        secondary,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
                                 trailing: TextButton(
                                   onPressed: () async {
                                     final ok = await confirmAction(
