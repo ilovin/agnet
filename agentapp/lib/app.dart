@@ -67,7 +67,7 @@ class AgentApp extends ConsumerWidget {
         colorScheme: colorScheme,
         useMaterial3: true,
         fontFamily: 'Noto Sans SC',
-        fontFamilyFallback: const ['PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+        fontFamilyFallback: const ['Noto Sans Symbols 2', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
         textSelectionTheme: TextSelectionThemeData(
           selectionColor: colorScheme.primary.withValues(alpha: 0.50),
           cursorColor: colorScheme.primary,
@@ -78,7 +78,7 @@ class AgentApp extends ConsumerWidget {
         colorScheme: darkColorScheme,
         useMaterial3: true,
         fontFamily: 'Noto Sans SC',
-        fontFamilyFallback: const ['PingFang SC', 'Microsoft YaHei', 'sans-serif'],
+        fontFamilyFallback: const ['Noto Sans Symbols 2', 'PingFang SC', 'Microsoft YaHei', 'sans-serif'],
         textSelectionTheme: TextSelectionThemeData(
           selectionColor: darkColorScheme.primary.withValues(alpha: 0.50),
           cursorColor: darkColorScheme.primary,
