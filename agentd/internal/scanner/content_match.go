@@ -21,15 +21,26 @@ var whitespaceRe = regexp.MustCompile(`\s+`)
 var markdownRe = regexp.MustCompile("[*`#\\[\\]]")
 var nonWordRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 
+// Fuzzy-match thresholds. Scores are float in [0, len(fingerprints)*1.0].
+//   - contentMatchMinScore: minimum aggregate score to accept any match
+//   - contentMatchMinMarginRatio: best/runner-up relative margin to accept
+//   - contentMatchStrongMarginRatio: above this margin we treat the match as
+//     strong and use the long cache TTL; otherwise weak TTL.
 const (
-	contentMatchMinScore  = 2
-	contentMatchMinMargin = 2
+	contentMatchMinScore           = 2.0
+	contentMatchMinMarginRatio     = 0.30
+	contentMatchStrongMarginRatio  = 0.50
 )
 
 // Cache TTLs are vars so tests can inject shorter values.
+//   - contentMatchCacheTTL is the long TTL used for STRONG matches (margin
+//     >= contentMatchStrongMarginRatio).
+//   - contentMatchWeakCacheTTL is the short TTL used for WEAK matches so
+//     ambiguous results re-evaluate quickly instead of being locked in for 30s.
 var (
-	contentMatchCacheTTL = 30 * time.Second
-	fingerprintsCacheTTL = 60 * time.Second
+	contentMatchCacheTTL     = 30 * time.Second
+	contentMatchWeakCacheTTL = 5 * time.Second
+	fingerprintsCacheTTL     = 60 * time.Second
 )
 
 // contentMatchCacheMaxEntries caps both caches to keep memory bounded.
@@ -71,6 +82,48 @@ func clearContentMatchCache() {
 	contentMatchCacheMu.Lock()
 	contentMatchCache = map[string]contentMatchCacheEntry{}
 	contentMatchCacheMu.Unlock()
+}
+
+// ClearContentMatchCacheFor invalidates all cached content-match results for a
+// specific tmux target. Watchers call this after detecting a session switch
+// (e.g. via task fd or the PID->session map) so the next scan recomputes the
+// match instead of returning a stale, pre-switch winner.
+//
+// The cache key is built as `tmuxTarget + "|" + ...`, so we delete every entry
+// whose key starts with the target prefix. Other targets are untouched.
+func ClearContentMatchCacheFor(tmuxTarget string) {
+	if tmuxTarget == "" {
+		return
+	}
+	prefix := tmuxTarget + "|"
+	contentMatchCacheMu.Lock()
+	for k := range contentMatchCache {
+		if strings.HasPrefix(k, prefix) {
+			delete(contentMatchCache, k)
+		}
+	}
+	contentMatchCacheMu.Unlock()
+}
+
+// PrimeContentMatchCacheForTest is exported only for cross-package tests in
+// the watcher package. It runs the normal cache-populating scoring path so
+// tests can verify that ClearContentMatchCacheFor evicts the resulting entry.
+func PrimeContentMatchCacheForTest(tmuxTarget, paneRaw string, candidates []SessionCandidate) {
+	_ = contentMatchSessionWithCache(tmuxTarget, paneRaw, candidates, nil)
+}
+
+// ContentMatchCacheHasTargetForTest reports whether any cache entry exists for
+// a tmux target. Exported only for cross-package tests.
+func ContentMatchCacheHasTargetForTest(tmuxTarget string) bool {
+	prefix := tmuxTarget + "|"
+	contentMatchCacheMu.Lock()
+	defer contentMatchCacheMu.Unlock()
+	for k := range contentMatchCache {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func clearFingerprintsCache() {
@@ -354,15 +407,127 @@ func extractFingerprintsUncached(jsonlPath string, maxFPs int) []string {
 	return fps
 }
 
-// matchScore counts how many fingerprints appear as substrings in paneText.
-func matchScore(paneText string, fingerprints []string) int {
-	hits := 0
-	for _, fp := range fingerprints {
-		if strings.Contains(paneText, fp) {
-			hits++
+// FuzzyMatchScore is the exported view of fuzzyMatchScore. The watcher package
+// uses it for its own contentMatch step (in claude.go) so both code paths
+// share the same scoring algorithm and avoid divergent oscillation behavior.
+func FuzzyMatchScore(haystack, needle string) float64 {
+	return fuzzyMatchScore(haystack, needle)
+}
+
+// fuzzyMatchScore computes how well `needle` appears in `haystack` using a
+// simplified fzf-style scoring algorithm. Returns a normalized score in [0, 1]:
+//
+//   - 1.0  perfect substring match (all needle runes appear consecutively
+//     somewhere inside haystack)
+//   - >0   partial fuzzy match: needle runes appear in order but with gaps;
+//     consecutive runs are rewarded, gaps penalized
+//   - 0    needle runes don't all appear in order
+//
+// Why fuzzy (instead of strings.Contains): tmux pane buffers contain CJK +
+// terminal redraw artifacts (re-rendered lines, escape sequences, partial
+// tokens). A pure substring match flips between hit and miss as the pane
+// redraws, causing oscillation between candidate sessions. Fuzzy matching
+// gives a stable, gradient signal that doesn't whip-saw between 0 and 1.
+//
+// Algorithm: walk haystack runes, advancing a pointer into needle when the
+// runes match (case-insensitive). Track the longest run of consecutive matches.
+// Score = (matched_runes / needle_runes) weighted by run-length bonus.
+func fuzzyMatchScore(haystack, needle string) float64 {
+	needleRunes := []rune(needle)
+	if len(needleRunes) == 0 {
+		return 0
+	}
+
+	// Fast path: exact (case-folded) substring match scores 1.0.
+	if strings.Contains(haystack, needle) {
+		return 1.0
+	}
+
+	hayRunes := []rune(haystack)
+	if len(hayRunes) < len(needleRunes) {
+		return 0
+	}
+
+	// Walk haystack matching needle runes in order. Track:
+	//   matched: number of needle runes matched so far
+	//   bestRun: longest contiguous run of matches in haystack
+	//   curRun:  current contiguous run length
+	matched := 0
+	bestRun := 0
+	curRun := 0
+	prevMatched := false
+	for _, hr := range hayRunes {
+		if matched < len(needleRunes) && foldEqual(hr, needleRunes[matched]) {
+			matched++
+			if prevMatched {
+				curRun++
+			} else {
+				curRun = 1
+			}
+			if curRun > bestRun {
+				bestRun = curRun
+			}
+			prevMatched = true
+		} else {
+			prevMatched = false
+			curRun = 0
 		}
 	}
-	return hits
+
+	if matched == 0 {
+		return 0
+	}
+	if matched < len(needleRunes) {
+		// Not all needle runes matched in order — partial credit only.
+		// Scale partial coverage so a half-match doesn't cross the threshold.
+		return 0.4 * float64(matched) / float64(len(needleRunes))
+	}
+
+	// All matched. Reward longer consecutive runs (closer to substring).
+	coverage := float64(bestRun) / float64(len(needleRunes))
+	// 0.6 base + up to 0.4 from run coverage. A perfect run gets ~1.0 (and the
+	// fast path above would have already returned 1.0); a fragmented match
+	// floor is 0.6.
+	return 0.6 + 0.4*coverage
+}
+
+// foldEqual is case-insensitive ASCII-fast equality. Falls back to lowercase
+// folding for non-ASCII runes.
+func foldEqual(a, b rune) bool {
+	if a == b {
+		return true
+	}
+	if a < utf8.RuneSelf && b < utf8.RuneSelf {
+		if 'A' <= a && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		return a == b
+	}
+	// Non-ASCII: rely on already-lowercased input (cleanTUIText lowercases).
+	return false
+}
+
+// matchScoreFuzzy aggregates fuzzy scores for each fingerprint against the
+// pane text. Returns the sum so the result is comparable across candidates
+// with different fingerprint counts (a candidate with more fingerprints can
+// accumulate more score, which is the desired behavior — more matched signals
+// = higher confidence). A perfect substring hit per fingerprint contributes
+// 1.0 to the sum.
+func matchScoreFuzzy(paneText string, fingerprints []string) float64 {
+	score := 0.0
+	for _, fp := range fingerprints {
+		score += fuzzyMatchScore(paneText, fp)
+	}
+	return score
+}
+
+// matchScore retains the old name as a thin float-returning wrapper so the
+// scoring pipeline is consistent. Callers should use matchScoreFuzzy directly.
+func matchScore(paneText string, fingerprints []string) float64 {
+	return matchScoreFuzzy(paneText, fingerprints)
 }
 
 // contentMatchSession finds the best matching session from candidates by comparing
@@ -389,6 +554,12 @@ func contentMatchSession(tmuxTarget string, candidates []SessionCandidate, force
 //
 // Cached negative results (nil) are also returned to skip recomputation when
 // no candidate matches the pane.
+//
+// Cache TTL is adaptive: a confidently-strong match (margin/best ratio above
+// contentMatchStrongMarginRatio) is kept for the long TTL; weaker matches use
+// a shorter TTL so the next scan re-evaluates promptly. Negative results
+// (nil) also use the short TTL — there's no point pinning "no match" for 30s
+// when a session might appear at any moment.
 func contentMatchSessionWithCache(tmuxTarget, paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
 	if len(candidates) == 0 {
 		return nil
@@ -405,7 +576,12 @@ func contentMatchSessionWithCache(tmuxTarget, paneRaw string, candidates []Sessi
 	}
 	contentMatchCacheMu.Unlock()
 
-	result := contentMatchSessionByPaneText(paneRaw, candidates, forcedSessionIDs)
+	result, strong := contentMatchSessionByPaneTextWithStrength(paneRaw, candidates, forcedSessionIDs)
+
+	ttl := contentMatchWeakCacheTTL
+	if strong {
+		ttl = contentMatchCacheTTL
+	}
 
 	contentMatchCacheMu.Lock()
 	if len(contentMatchCache) >= contentMatchCacheMaxEntries {
@@ -413,22 +589,32 @@ func contentMatchSessionWithCache(tmuxTarget, paneRaw string, candidates []Sessi
 	}
 	contentMatchCache[key] = contentMatchCacheEntry{
 		result: result,
-		expiry: now.Add(contentMatchCacheTTL),
+		expiry: now.Add(ttl),
 	}
 	contentMatchCacheMu.Unlock()
 
 	return result
 }
 
+// contentMatchSessionByPaneText is the original entrypoint kept for tests and
+// the existing call sites that don't care about strength.
 func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) *SessionCandidate {
+	result, _ := contentMatchSessionByPaneTextWithStrength(paneRaw, candidates, forcedSessionIDs)
+	return result
+}
+
+// contentMatchSessionByPaneTextWithStrength runs the fuzzy scoring pipeline
+// and reports both the chosen candidate and whether the match was strong
+// (margin >= contentMatchStrongMarginRatio relative to bestScore).
+func contentMatchSessionByPaneTextWithStrength(paneRaw string, candidates []SessionCandidate, forcedSessionIDs map[string]bool) (*SessionCandidate, bool) {
 	if len(candidates) == 0 {
-		return nil
+		return nil, false
 	}
 
 	paneText := cleanTUIText(paneRaw)
 	if utf8.RuneCountInString(paneText) < 20 {
 		log.Printf("[ContentMatch] reject: pane text too short (%d runes)", utf8.RuneCountInString(paneText))
-		return nil
+		return nil, false
 	}
 
 	isForced := func(sid string) bool {
@@ -445,10 +631,42 @@ func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate
 
 	log.Printf("[ContentMatch] candidate_total=%d staged_max=%v", len(candidates), maxByStage)
 
-	bestScore := 0
-	secondBestScore := 0
+	bestScore := 0.0
+	secondBestScore := 0.0
 	var bestCandidate *SessionCandidate
+	tiedWithBest := false // true when the current best was picked via activity tie-break against an equal-scoring rival
 	seen := make(map[string]bool, len(candidates))
+
+	// considerScore decides whether to replace the current best/second-best
+	// with `c` at `score`. When score == bestScore (tie), prefer the candidate
+	// with the more recent LastActivity to break the tie deterministically.
+	// Without this tie-break, slice ordering decides the winner and the result
+	// flips between scans causing oscillation.
+	considerScore := func(score float64, c SessionCandidate) {
+		if score > bestScore {
+			secondBestScore = bestScore
+			bestScore = score
+			cc := c
+			bestCandidate = &cc
+			tiedWithBest = false
+			return
+		}
+		if score == bestScore && bestCandidate != nil {
+			// Tie. Pick the more recent activity; the loser becomes runner-up.
+			tiedWithBest = true
+			if c.LastActivity.After(bestCandidate.LastActivity) {
+				secondBestScore = bestScore
+				cc := c
+				bestCandidate = &cc
+			} else if score > secondBestScore {
+				secondBestScore = score
+			}
+			return
+		}
+		if score > secondBestScore {
+			secondBestScore = score
+		}
+	}
 
 	for _, stageMax := range maxByStage {
 		if stageMax <= 0 {
@@ -489,39 +707,47 @@ func contentMatchSessionByPaneText(paneRaw string, candidates []SessionCandidate
 		for i := range stageCandidates {
 			seen[stageCandidates[i].SessionID] = true
 			fps := extractFingerprints(stageCandidates[i].JSONLPath, 20)
-			score := matchScore(paneText, fps)
-			log.Printf("[ContentMatch] candidate=%s fpCount=%d toolFpCount=%d score=%d forced=%t", stageCandidates[i].SessionID, len(fps), countToolFingerprints(fps), score, isForced(stageCandidates[i].SessionID))
-			if score > bestScore {
-				secondBestScore = bestScore
-				bestScore = score
-				candidate := stageCandidates[i]
-				bestCandidate = &candidate
-			} else if score > secondBestScore {
-				secondBestScore = score
-			}
+			score := matchScoreFuzzy(paneText, fps)
+			log.Printf("[ContentMatch] candidate=%s fpCount=%d toolFpCount=%d score=%.2f forced=%t", stageCandidates[i].SessionID, len(fps), countToolFingerprints(fps), score, isForced(stageCandidates[i].SessionID))
+			considerScore(score, stageCandidates[i])
 		}
-		if bestScore >= contentMatchMinScore && (bestScore-secondBestScore) >= contentMatchMinMargin {
+		if bestScore >= contentMatchMinScore && marginRatio(bestScore, secondBestScore) >= contentMatchMinMarginRatio {
 			break
 		}
 	}
 
 	if bestCandidate == nil {
 		log.Printf("[ContentMatch] reject: no candidate scored > 0 among %d candidates", len(candidates))
-		return nil
+		return nil, false
 	}
 
-	margin := bestScore - secondBestScore
+	mr := marginRatio(bestScore, secondBestScore)
 	if bestScore < contentMatchMinScore {
-		log.Printf("[ContentMatch] reject: low confidence bestScore=%d minScore=%d", bestScore, contentMatchMinScore)
-		return nil
+		log.Printf("[ContentMatch] reject: low confidence bestScore=%.2f minScore=%.2f", bestScore, contentMatchMinScore)
+		return nil, false
 	}
-	if margin < contentMatchMinMargin {
-		log.Printf("[ContentMatch] reject: ambiguous bestScore=%d secondBest=%d minMargin=%d", bestScore, secondBestScore, contentMatchMinMargin)
-		return nil
+	// If scores are tied, accept the activity-based tie-break (otherwise the
+	// system oscillates: rejecting at margin=0 means we never converge while
+	// two candidates have identical content/scores). Mark as weak so the
+	// cache TTL is short and we re-evaluate quickly when conditions change.
+	if mr < contentMatchMinMarginRatio && !tiedWithBest {
+		log.Printf("[ContentMatch] reject: ambiguous bestScore=%.2f secondBest=%.2f marginRatio=%.2f", bestScore, secondBestScore, mr)
+		return nil, false
 	}
 
-	log.Printf("[ContentMatch] pane match success session=%s bestScore=%d secondBest=%d margin=%d", bestCandidate.SessionID, bestScore, secondBestScore, margin)
-	return bestCandidate
+	strong := mr >= contentMatchStrongMarginRatio && !tiedWithBest
+	log.Printf("[ContentMatch] pane match success session=%s bestScore=%.2f secondBest=%.2f marginRatio=%.2f strong=%t tied=%t", bestCandidate.SessionID, bestScore, secondBestScore, mr, strong, tiedWithBest)
+	return bestCandidate, strong
+}
+
+// marginRatio is the relative margin of bestScore over secondBest, where
+// bestScore is the denominator. Returns 1.0 when secondBest == 0 (and
+// bestScore > 0); 0.0 when bestScore == 0.
+func marginRatio(bestScore, secondBest float64) float64 {
+	if bestScore <= 0 {
+		return 0
+	}
+	return (bestScore - secondBest) / bestScore
 }
 
 func countToolFingerprints(fps []string) int {
