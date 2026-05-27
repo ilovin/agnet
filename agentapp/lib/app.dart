@@ -59,15 +59,24 @@ class AgentApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final density = ref.watch(densityModeProvider);
     final themeMode = themeModeFromSetting(ref.watch(themeModeProvider));
-    return MaterialApp.router(
-      title: 'Agnet',
-      theme: AppTheme.build(densityMode: density),
-      darkTheme: AppTheme.build(
-        densityMode: density,
-        brightness: Brightness.dark,
+    final lightTheme = AppTheme.build(densityMode: density);
+    final darkTheme = AppTheme.build(
+      densityMode: density,
+      brightness: Brightness.dark,
+    );
+    final effectiveTheme =
+        themeMode == ThemeMode.dark ? darkTheme : lightTheme;
+    final accentColor = effectiveTheme.colorScheme.primary;
+    return DefaultSelectionStyle(
+      selectionColor: accentColor.withValues(alpha: 0.40),
+      cursorColor: accentColor,
+      child: MaterialApp.router(
+        title: 'Agnet',
+        theme: lightTheme,
+        darkTheme: darkTheme,
+        themeMode: themeMode,
+        routerConfig: _router,
       ),
-      themeMode: themeMode,
-      routerConfig: _router,
     );
   }
 }

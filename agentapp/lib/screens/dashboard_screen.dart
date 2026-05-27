@@ -62,8 +62,18 @@ List<String> buildSessionPreviewLines(
   final normalized = lastText.replaceAll('\r', '\n');
   for (final line in normalized.split('\n')) {
     final trimmed = line.trim();
-    if (trimmed.isEmpty) continue;
+    if (trimmed.isEmpty) {
+      // Preserve paragraph breaks so the UI can add visual spacing.
+      if (lines.isNotEmpty && lines.last.isNotEmpty) {
+        lines.add('');
+      }
+      continue;
+    }
     lines.add(buildCollapsedPreview(trimmed, maxChars: maxCharsPerLine));
+  }
+  // Trim trailing empty markers.
+  while (lines.isNotEmpty && lines.last.isEmpty) {
+    lines.removeLast();
   }
   if (lines.length <= maxLines) return lines;
   return lines.sublist(lines.length - maxLines);
@@ -184,6 +194,46 @@ class _MarkdownPreview extends StatelessWidget {
       style: AppTextStyles.caption.copyWith(color: color),
       maxLines: 3,
       overflow: TextOverflow.ellipsis,
+    );
+  }
+}
+
+/// Renders preview lines with visual paragraph spacing.
+/// Empty strings in [lines] are treated as paragraph breaks.
+class _PreviewParagraphs extends StatelessWidget {
+  final List<String> lines;
+  final Color color;
+
+  const _PreviewParagraphs(this.lines, {required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final paragraphs = <List<String>>[];
+    var current = <String>[];
+    for (final line in lines) {
+      if (line.isEmpty) {
+        if (current.isNotEmpty) {
+          paragraphs.add(current);
+          current = <String>[];
+        }
+      } else {
+        current.add(line);
+      }
+    }
+    if (current.isNotEmpty) paragraphs.add(current);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (var i = 0; i < paragraphs.length; i++) ...[
+          if (i > 0) const SizedBox(height: 4),
+          _MarkdownPreview(
+            paragraphs[i].join('\n'),
+            color: color,
+          ),
+        ],
+      ],
     );
   }
 }
@@ -3258,8 +3308,8 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       subtitle: previewLines.isNotEmpty
           ? Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: _MarkdownPreview(
-                previewLines.join('\n'),
+              child: _PreviewParagraphs(
+                previewLines,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             )

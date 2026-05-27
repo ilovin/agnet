@@ -166,10 +166,10 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 		to, _ := params["to"].(string)
 		summary, _ := params["summary"].(string)
 		if summary != "" && to != "" {
-			return fmt.Sprintf("→ %s: %s", to, summary)
+			return fmt.Sprintf("-> %s: %s", to, summary)
 		}
 		if to != "" {
-			return "→ " + to
+			return "-> " + to
 		}
 	case "TaskCreate":
 		if subject, ok := params["subject"].(string); ok && subject != "" {
@@ -179,7 +179,7 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 		taskId, _ := params["taskId"].(string)
 		status, _ := params["status"].(string)
 		if taskId != "" && status != "" {
-			return fmt.Sprintf("#%s → %s", taskId, status)
+			return fmt.Sprintf("#%s -> %s", taskId, status)
 		}
 		if status != "" {
 			return status
