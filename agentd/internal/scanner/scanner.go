@@ -323,6 +323,17 @@ func findClaudeSessionInfo(pid int, workDir string, tmuxTarget string) (string, 
 	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
 	tasksDir := filepath.Join(home, ".claude", "tasks")
 
+	// Step 0: Authoritative PID -> sessionId map.
+	// Claude maintains ~/.claude/sessions/<PID>.json with the live sessionId
+	// while the process runs and updates it after every status change. This is
+	// the only signal that follows `claude --resume` or interactive session
+	// switches without lag and is reliable on macOS where lsof cannot observe
+	// the open-write-close pattern claude uses for its task fds. When the file
+	// is present and points to an existing jsonl we trust it unconditionally.
+	if sid, file := claudeSessionFromPIDMap(home, pid, workDir); sid != "" && file != "" {
+		return sid, file
+	}
+
 	// Step 1: Task fd discovery
 	taskSessions := findClaudeSessionsFromTasks(pid, projectDir, tasksDir)
 
@@ -482,6 +493,60 @@ func findClaudeSessionInfoGlobalFallback(home string, taskSessions []string) []S
 	})
 
 	return candidates
+}
+
+// claudeSessionFromPIDMap reads ~/.claude/sessions/<PID>.json (which Claude
+// itself maintains while the process is alive) and returns the recorded
+// sessionId together with its jsonl file path inside ~/.claude/projects.
+//
+// Returns ("", "") when the file is absent, malformed, points at a different
+// pid, has no sessionId, or when no matching jsonl can be located. Callers
+// should fall back to the existing heuristic chain in those cases.
+//
+// Why this matters: on macOS claude opens, writes, then closes its task fds
+// per request, so lsof-based fd discovery returns nothing and downstream
+// resolution is forced into mtime + content matching, which is unstable when
+// multiple recent jsonls exist in the same project directory. The pid map is
+// the only signal that survives a `claude --resume` switch with zero lag.
+func claudeSessionFromPIDMap(home string, pid int, workDir string) (string, string) {
+	if home == "" || pid <= 0 {
+		return "", ""
+	}
+	pidFile := filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return "", ""
+	}
+	var info struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return "", ""
+	}
+	if info.SessionID == "" {
+		return "", ""
+	}
+	// Defence-in-depth: only honour entries that name our pid. Stale files for
+	// a recycled pid are unlikely (claude removes them on exit) but a guard is
+	// cheap.
+	if info.PID != 0 && info.PID != pid {
+		return "", ""
+	}
+
+	// Resolve the jsonl. Prefer the workDir-derived project directory; fall
+	// back to a global scan so hidden directory name handling stays consistent
+	// with the rest of the resolver chain.
+	if workDir != "" {
+		candidate := filepath.Join(home, ".claude", "projects", projectDirName(workDir), info.SessionID+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			return info.SessionID, candidate
+		}
+	}
+	if found := findClaudeSessionFile(home, info.SessionID, workDir); found != "" {
+		return info.SessionID, found
+	}
+	return "", ""
 }
 
 // findClaudeSessionsFromTasks returns all session IDs found via task fd discovery.
