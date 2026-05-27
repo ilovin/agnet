@@ -3662,7 +3662,7 @@ class _CollapsibleBubbleState extends State<_CollapsibleBubble> {
           ],
           if (_expanded) ...[
             const SizedBox(height: 6),
-            _MarkdownContent(
+            MarkdownContent(
               text: widget.content,
               fontSize: 12,
               textColor: scheme.onSurfaceVariant,
@@ -3734,7 +3734,7 @@ class _ActivityCard extends StatelessWidget {
 
     Widget? body;
     if (content.isNotEmpty) {
-      body = _MarkdownContent(
+      body = MarkdownContent(
         text: content,
         fontSize: 12,
         textColor: scheme.onSurfaceVariant,
@@ -4395,7 +4395,7 @@ class MessageBubble extends StatelessWidget {
                           ],
                         ),
                       ),
-                    _MarkdownContent(
+                    MarkdownContent(
                       text: message.text,
                       fontSize: isRaw ? 12 : 14,
                       textColor: textColor,
@@ -4631,13 +4631,18 @@ Widget _codeBlock(
 /// Markdown content widget that renders into a single SelectableText
 /// so that the entire response is selectable across paragraphs.
 /// Falls back to MarkdownBody only for complex content (code blocks, tables).
-class _MarkdownContent extends ConsumerWidget {
+///
+/// Public (no leading underscore) so widget tests can pump it directly —
+/// in particular `test/markdown_task_list_test.dart` exercises the GFM
+/// task-list checkbox rendering path here.
+class MarkdownContent extends ConsumerWidget {
   final String text;
   final double fontSize;
   final Color textColor;
   final bool isRaw;
 
-  const _MarkdownContent({
+  const MarkdownContent({
+    super.key,
     required this.text,
     required this.fontSize,
     required this.textColor,
@@ -4666,12 +4671,21 @@ class _MarkdownContent extends ConsumerWidget {
       );
     }
 
-    // Use MarkdownBody for complex markdown (code blocks, tables, headings).
-    // Simple text (most assistant responses) gets SelectableText for full selection.
+    // Use MarkdownBody for complex markdown (code blocks, tables, headings,
+    // GFM task lists). Simple text (most assistant responses) gets
+    // SelectableText for full selection.
+    //
+    // Task-list detection (`- [ ] foo` / `- [x] bar`) is critical: without
+    // it the message slips into the simple inline path which leaves the raw
+    // brackets visible. With it, MarkdownBody parses the GFM extension
+    // (enabled by default in flutter_markdown) and the checkboxBuilder
+    // below paints a real glyph instead of relying on the Material Icons
+    // font (which can be unavailable on Flutter Web CanvasKit).
     final hasComplexMarkdown =
         text.contains('```') ||
         text.contains(RegExp(r'^#{1,6}\s', multiLine: true)) ||
-        text.contains(RegExp(r'^\|', multiLine: true));
+        text.contains(RegExp(r'^\|', multiLine: true)) ||
+        text.contains(RegExp(r'^\s*[-*+]\s+\[[ xX]\]\s', multiLine: true));
 
     if (hasComplexMarkdown) {
       final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -4684,6 +4698,28 @@ class _MarkdownContent extends ConsumerWidget {
             isNaive: isNaive,
           ),
         },
+        // GFM task-list checkbox. The default flutter_markdown checkbox
+        // uses Material Icons (`Icons.check_box[_outline_blank]`), which
+        // can render as tofu under Flutter Web CanvasKit when the
+        // MaterialIcons font fails to register. Render Unicode ballot-box
+        // glyphs (U+2610 ☐ / U+2611 ☑) backed by `Noto Sans Symbols 2`,
+        // which is bundled in pubspec.yaml and verified to cover both
+        // code points (commit 759c87a). The fallback chain mirrors
+        // `AppTextStyles.fontFamilyFallback` so the glyph survives even
+        // if the primary family ever drops the code point.
+        checkboxBuilder: (checked) => Padding(
+          padding: const EdgeInsets.only(right: 6),
+          child: Text(
+            checked ? '☑' : '☐',
+            style: TextStyle(
+              fontFamily: AppTextStyles.fontFamily,
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+              fontSize: fontSize,
+              color: textColor,
+              height: 1.4,
+            ),
+          ),
+        ),
         styleSheet: MarkdownStyleSheet(
           p: TextStyle(
             fontSize: fontSize,
