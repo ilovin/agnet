@@ -5,6 +5,7 @@
 | 文件 | 主题 |
 |---|---|
 | `provider-session-state-machine.md` | Provider / Session 状态机实施计划 |
+| `multi-agent-tab-view-prd.md` | Multi-Agent Tab View — agentapp 多子 Agent 切换视图 PRD（i-018 + R-016） |
 
 ## 已完成计划（见 archive/）
 
