@@ -2,14 +2,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/ws_client.dart';
-import 'conversation_provider.dart';
 
-class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
+/// Unread badges are scoped per (nodeId, agentId) — the badge follows the
+/// agent across session switches, so we deliberately do NOT include
+/// sessionId here even though the conversation cache (in
+/// `conversation_provider.dart`) uses a three-key (nodeId, agentId,
+/// sessionId) tuple.
+typedef UnreadKey = (String, String);
+
+class UnreadNotifier extends StateNotifier<Map<UnreadKey, int>> {
   UnreadNotifier() : super(const {});
 
   // Track seen msg_ids per conversation to avoid duplicate counting
   // for streaming message_update events.
-  final Map<ConversationKey, Set<String>> _seenMsgIds = {};
+  final Map<UnreadKey, Set<String>> _seenMsgIds = {};
 
   void handleEvent(WsMessage event) {
     if (event.method == 'conversation.cleared') {
@@ -62,7 +68,7 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
   void markAsRead(String nodeId, String agentId) {
     final key = (nodeId, agentId);
     if (!state.containsKey(key)) return;
-    final next = Map<ConversationKey, int>.from(state);
+    final next = Map<UnreadKey, int>.from(state);
     next.remove(key);
     state = next;
   }
@@ -74,7 +80,7 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
 }
 
 final unreadProvider =
-    StateNotifierProvider<UnreadNotifier, Map<ConversationKey, int>>(
+    StateNotifierProvider<UnreadNotifier, Map<UnreadKey, int>>(
   (_) => UnreadNotifier(),
 );
 

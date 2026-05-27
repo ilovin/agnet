@@ -631,6 +631,42 @@ func (h *handler) agentRestart(req RPCRequest, p AgentRestartParams) (RPCRespons
 	}
 }
 
+// buildUserMessageBroadcast assembles the canonical broadcastData for the
+// `conversation.message` push event emitted on every conversation.send code
+// path (tmux, generic PTY, claude restart, fresh claude start).
+//
+// All three of `nodeId` (this agentd's ID), `sessionId` (the agent's current
+// resume session ID), and `seq` (the persistent event seq returned by
+// RecordConversationEvent) are required for the Flutter app to route the
+// event to the correct (nodeId, agentId, sessionId) cache bucket and
+// dedupe by seq. Earlier versions of the four send paths inlined this
+// map literal and silently dropped these fields, causing user messages
+// to render in the wrong conversation cache (or none at all) after a
+// Hermes /clear-style session switch. Centralizing the construction
+// here prevents that regression.
+//
+// `seq` is 0 when the caller could not obtain a persisted seq (e.g. record
+// failed); the field is only emitted when seq > 0 so the frontend's seq-based
+// dedup never sees a placeholder zero.
+func (h *handler) buildUserMessageBroadcast(ag *agent.Agent, message string, imagePaths []string, imageCount int, seq uint64) map[string]any {
+	data := map[string]any{
+		"agentId":    ag.ID,
+		"nodeId":     h.server.nodeID,
+		"sessionId":  ag.ResumeSessionID(),
+		"role":       "user",
+		"text":       message,
+		"imageCount": imageCount,
+		"timestamp":  time.Now().UnixMilli(),
+	}
+	if seq > 0 {
+		data["seq"] = seq
+	}
+	if len(imagePaths) > 0 {
+		data["images"] = imagePaths
+	}
+	return data
+}
+
 func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPCResponse {
 	agentID := p.AgentID
 	message := p.Message
@@ -751,16 +787,11 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		if len(imagePaths) > 0 {
 			eventData["images"] = imagePaths
 		}
-		if _, err := h.server.manager.RecordConversationEvent(agentID, eventData); err != nil {
+		seq, err := h.server.manager.RecordConversationEvent(agentID, eventData)
+		if err != nil {
 			return errResp(req.ID, -32000, "record user message: "+err.Error())
 		}
-		h.server.broadcast(event("conversation.message", map[string]any{
-			"agentId":    agentID,
-			"role":       "user",
-			"text":       message,
-			"imageCount": len(imageFiles),
-			"images":     imagePaths,
-		}), nil)
+		h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), seq)), nil)
 		input := message
 		if !raw {
 			input = message + "\n"
@@ -771,7 +802,7 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		if isHermes {
 			ag.BeginSend()
 		}
-		err := ag.WriteInput(input)
+		err = ag.WriteInput(input)
 		if isHermes {
 			ag.EndSend()
 		}
@@ -816,22 +847,13 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	if len(imagePaths) > 0 {
 		ptyEventData["images"] = imagePaths
 	}
-	if _, err := h.server.manager.RecordConversationEvent(agentID, ptyEventData); err != nil {
+	ptySeq, err := h.server.manager.RecordConversationEvent(agentID, ptyEventData)
+	if err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
 	// Broadcast user message to all clients
-	broadcastData := map[string]any{
-		"agentId":    agentID,
-		"role":       "user",
-		"text":       message,
-		"imageCount": len(imageFiles),
-		"timestamp":  time.Now().UnixMilli(),
-	}
-	if len(imagePaths) > 0 {
-		broadcastData["images"] = imagePaths
-	}
-	h.server.broadcast(event("conversation.message", broadcastData), nil)
+	h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), ptySeq)), nil)
 
 	input := message
 	if !raw {
@@ -934,21 +956,12 @@ func (h *handler) agentRestartWithMessage(req RPCRequest, ag *agent.Agent, messa
 	if len(imagePaths) > 0 {
 		historyData["images"] = imagePaths
 	}
-	if _, err := h.server.manager.RecordConversationEvent(ag.ID, historyData); err != nil {
+	restartSeq, err := h.server.manager.RecordConversationEvent(ag.ID, historyData)
+	if err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
-	broadcastData := map[string]any{
-		"agentId":    ag.ID,
-		"role":       "user",
-		"text":       message,
-		"imageCount": len(imageFiles),
-		"timestamp":  time.Now().UnixMilli(),
-	}
-	if len(imagePaths) > 0 {
-		broadcastData["images"] = imagePaths
-	}
-	h.server.broadcast(event("conversation.message", broadcastData), nil)
+	h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), restartSeq)), nil)
 
 	ag.SetStatus(agent.StatusWorking)
 	h.server.broadcast(event("agent.status_changed", h.statusChangedParams(ag.ID, "working")), nil)
@@ -991,20 +1004,12 @@ func (h *handler) agentStartWithMessage(req RPCRequest, ag *agent.Agent, message
 	if len(imagePaths) > 0 {
 		historyData["images"] = imagePaths
 	}
-	if _, err := h.server.manager.RecordConversationEvent(ag.ID, historyData); err != nil {
+	startSeq, err := h.server.manager.RecordConversationEvent(ag.ID, historyData)
+	if err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
-	broadcastData := map[string]any{
-		"agentId":    ag.ID,
-		"role":       "user",
-		"text":       message,
-		"imageCount": len(imageFiles),
-	}
-	if len(imagePaths) > 0 {
-		broadcastData["images"] = imagePaths
-	}
-	h.server.broadcast(event("conversation.message", broadcastData), nil)
+	h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), startSeq)), nil)
 
 	// Start the agent with the message
 	if err := h.server.manager.StartInPlaceWithMessage(ag.ID, provider, cmd, args, env, message); err != nil {
