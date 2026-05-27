@@ -4318,13 +4318,13 @@ class MessageBubble extends StatelessWidget {
     // Raw ANSI output: dark terminal-like background
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final bgColor = isUser
-        ? scheme.primaryContainer
+        ? (isDark ? const Color(0xFF2D2D2D) : const Color(0xFFF0F0F0))
         : isRaw
         ? (isDark ? const Color(0xFF1A1A2E) : const Color(0xFF1E1E2E))
         : scheme.surfaceContainerHighest;
 
     final textColor = isUser
-        ? scheme.onPrimaryContainer
+        ? (isDark ? Colors.white70 : Colors.black87)
         : isRaw
         ? const Color(0xFFE5E5E5)
         : scheme.onSurface;
@@ -5796,6 +5796,28 @@ class _InputBarState extends State<_InputBar> {
                       vertical: 10,
                     ),
                     isDense: true,
+                    suffixIcon: effectiveLoading
+                        ? const SizedBox(
+                            width: 32,
+                            height: 32,
+                            child: Padding(
+                              padding: EdgeInsets.all(4),
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : IconButton(
+                            onPressed: isReadOnly ? null : widget.onSend,
+                            icon: const Icon(Icons.send, size: 20),
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints(
+                              minWidth: 32,
+                              minHeight: 32,
+                            ),
+                            padding: EdgeInsets.zero,
+                            color: isReadOnly
+                                ? null
+                                : Theme.of(context).colorScheme.primary,
+                          ),
                   ),
                   textInputAction: TextInputAction.send,
                   onSubmitted: isReadOnly ? null : (_) => widget.onSend(),
@@ -5925,29 +5947,6 @@ class _InputBarState extends State<_InputBar> {
                     ),
                     padding: EdgeInsets.zero,
                   ),
-                  const SizedBox(width: 4),
-                  effectiveLoading
-                      ? const SizedBox(
-                          width: 32,
-                          height: 32,
-                          child: Padding(
-                            padding: EdgeInsets.all(4),
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        )
-                      : IconButton(
-                          onPressed: isReadOnly ? null : widget.onSend,
-                          icon: const Icon(Icons.send, size: 20),
-                          visualDensity: VisualDensity.compact,
-                          constraints: const BoxConstraints(
-                            minWidth: 32,
-                            minHeight: 32,
-                          ),
-                          padding: EdgeInsets.zero,
-                          color: isReadOnly
-                              ? null
-                              : Theme.of(context).colorScheme.primary,
-                        ),
                 ],
               ),
             ],
