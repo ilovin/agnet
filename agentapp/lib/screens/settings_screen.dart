@@ -12,11 +12,14 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../providers/connection_provider.dart';
 import '../providers/theme_provider.dart';
 import '../providers/color_mode_provider.dart';
+import '../providers/density_mode_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../models/connection_config.dart';
 import '../services/apk_downloader.dart';
+import '../theme/app_spacing.dart';
+import '../theme/density_mode.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -138,6 +141,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  String _densityHint(DensityMode mode) {
+    switch (mode) {
+      case DensityMode.compact:
+        return '更小的字号与间距，单屏信息更密';
+      case DensityMode.standard:
+        return '默认大小';
+      case DensityMode.comfortable:
+        return '更大的字号与间距，更易读';
+    }
+  }
+
+  IconData _densityIcon(DensityMode mode) {
+    switch (mode) {
+      case DensityMode.compact:
+        return Icons.density_small;
+      case DensityMode.standard:
+        return Icons.density_medium;
+      case DensityMode.comfortable:
+        return Icons.density_large;
+    }
+  }
+
   Future<void> _switchConnection(ConnectionConfig cfg) async {
     setState(() => _connecting = true);
     try {
@@ -185,8 +210,42 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
-      body: ListView(
-        children: [
+      body: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.md,
+              AppSpacing.lg,
+              AppSpacing.xs,
+            ),
+            child: Text(
+              '显示',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+          Consumer(builder: (context, ref, _) {
+            final density = ref.watch(densityModeProvider);
+            return Column(
+              children: [
+                for (final mode in DensityMode.values)
+                  RadioListTile<DensityMode>(
+                    title: Text(mode.label),
+                    subtitle: Text(_densityHint(mode)),
+                    secondary: Icon(_densityIcon(mode)),
+                    value: mode,
+                    groupValue: density,
+                    onChanged: (v) =>
+                        ref.read(densityModeProvider.notifier).set(v!),
+                  ),
+              ],
+            );
+          }),
+          const Divider(),
           ListTile(
             leading: Icon(
               client != null ? Icons.wifi : Icons.wifi_off,
@@ -330,7 +389,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             title: Text('Agnet'),
             subtitle: Text('v0.2.2 — Multi-AI-Agent Remote Manager'),
           ),
-        ],
+          ],
+        ),
       ),
     );
   }
