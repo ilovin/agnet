@@ -10,6 +10,9 @@
 /out/
 /dist/
 .buildhash
+
+# Sandbox runtime artifacts (R-012; per-worktree HOME-redirected agentd/agentgw)
+.sandbox/
 /release/**/*.tar.gz
 /release/**/bin/
 /release/**/static/

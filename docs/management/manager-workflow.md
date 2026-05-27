@@ -58,6 +58,31 @@ originSessionId: c4bab9a8-29f4-4593-b301-34fa487e5c93
 - **Independent test agent**: integration tests and Chrome validation (for UI work).
 - Manager reviews both reports before final acceptance.
 
+#### Sandbox mode for dev/test agents (R-012)
+
+When a dev or test agent needs to **spawn real agentd/agentgw processes** (e.g.
+end-to-end integration tests, Chrome validation against this worktree's
+binaries, or driving a Claude CLI from this branch), the Manager must instruct
+the agent to use the **sandbox** subcommand instead of `scripts/deploy.sh local`:
+
+```bash
+# Inside the worktree:
+scripts/deploy.sh sandbox <unique-id>          # spawns agentd+agentgw on random ports
+scripts/sandbox-claude.sh <unique-id> [args]   # claude CLI bound to sandbox HOME
+scripts/deploy.sh sandbox-stop <unique-id>     # cleanup
+```
+
+The sandbox runs entirely under `<worktree>/.sandbox/<id>/` with a redirected
+`HOME`, so it cannot collide with:
+- the main runtime (PID/port/data)
+- other parallel worktrees' sandboxes (each picks its own random port)
+- the user's `~/.claude/projects/` (claude writes only into sandbox HOME)
+
+`scripts/deploy.sh local|web|npm|tunnelhub|all` will **fail-fast** if invoked
+from a worktree subdirectory — sandbox is the only sanctioned way to launch
+worktree binaries. See `docs/operations/sandbox-development.md` for full
+usage.
+
 ### Phase 7 — Acceptance & Tracking (Manager)
 - Update `docs/management/progress.md`.
 - Update requirement status.
