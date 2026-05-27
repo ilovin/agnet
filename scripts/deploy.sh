@@ -303,6 +303,30 @@ install_ios_simulator() {
 }
 
 deploy_mobile() {
+    # Build APK if Android device connected
+    local android_devs
+    android_devs=$(detect_android_devices)
+    if [[ -n "$android_devs" ]]; then
+        echo "[deploy] Android device(s) detected, building APK..."
+        if build_apk; then
+            echo "[deploy] APK build OK"
+        else
+            echo "[deploy] WARNING: APK build failed, skipping Android install"
+        fi
+    fi
+
+    # Build IPA if iOS device connected
+    local ios_devs
+    ios_devs=$(detect_ios_devices)
+    if [[ -n "$ios_devs" ]]; then
+        echo "[deploy] iOS device(s) detected, building IPA..."
+        if build_ipa; then
+            echo "[deploy] IPA build OK"
+        else
+            echo "[deploy] WARNING: IPA build failed, skipping iOS install"
+        fi
+    fi
+
     install_android
     install_ios
 }
@@ -995,6 +1019,7 @@ TARGETS:
   local       Build + deploy local runtime + remote servers + auto-install mobile
               Options: --with-web  (rebuild Flutter Web + refresh ~/.agentgw/static/;
                                     default OFF to keep fast iteration cycle)
+  local-mobile  Build + install mobile apps only (no agentd/agentgw restart)
   web         Build + package + OSS publish + portal deploy + API deploy
               Options: --oss-only, --portal-only, --api-only
   npm         Build + package + npm publish
@@ -1028,6 +1053,9 @@ EXAMPLES:
 
   # Local development only
   ./scripts/deploy.sh local
+
+  # Mobile-only deployment (no agentd/agentgw)
+  ./scripts/deploy.sh local-mobile
 
   # Web release only
   ./scripts/deploy.sh web
@@ -1164,6 +1192,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_remote_targets_parallel
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || restart_agentgw
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
+            ;;
+        local-mobile)
+            guard_no_worktree_for_real_deploy "local-mobile"
+            echo "[deploy] Running local mobile-only deployment..."
+            deploy_mobile
             ;;
         web)
             guard_no_worktree_for_real_deploy web
