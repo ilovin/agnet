@@ -174,7 +174,12 @@ class _MarkdownText extends StatelessWidget {
     // the subtitle slot can never grow unbounded vertically when the inputs
     // are long. Without this, each Text.rich child renders unconstrained,
     // producing a tall column that visually "overflows" inside narrow
-    // ListTile subtitles.
+    // ListTile subtitles. Between paragraphs we additionally insert a
+    // low-contrast hairline divider plus vertical spacing so the段落层次
+    // reads as distinct visual blocks rather than walls of text. The
+    // divider colour follows the theme so dark mode stays legible.
+    final dividerColor =
+        Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.4);
     final children = <Widget>[];
     final totalCap = maxLines;
     int? remaining = totalCap;
@@ -202,7 +207,9 @@ class _MarkdownText extends StatelessWidget {
       }
       if (i < paragraphs.length - 1 &&
           (remaining == null || remaining > 0)) {
-        children.add(const SizedBox(height: 8));
+        children.add(const SizedBox(height: 6));
+        children.add(Container(height: 1, color: dividerColor));
+        children.add(const SizedBox(height: 6));
       }
     }
     return Column(
@@ -1988,7 +1995,14 @@ class _NodeCardState extends ConsumerState<NodeCard> {
             leading: Icon(nodeIcon, color: _statusColor, size: 20),
             title: Text(
               nodeDisplay,
-              style: const TextStyle(fontWeight: FontWeight.bold),
+              // Top of dashboard hierarchy: node header sits above multiple
+              // AgentRow titles (15/w700), so it must be visibly heavier.
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.2,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
             ),
             subtitle: widget.isLargeScreen && widget.showDetails && summaryChips.isNotEmpty
                 ? Wrap(spacing: 6, runSpacing: 6, children: summaryChips)
@@ -3011,6 +3025,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final timeText = agent.lastMessageTime != null
         ? _formatRelativeTime(agent.lastMessageTime!)
         : null;
+    final colors = Theme.of(context).colorScheme;
     return Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -3021,20 +3036,28 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           color: _statusColor,
         ),
         const SizedBox(width: 6),
+        // Status keeps its semantic colour; timestamp recedes one tier so the
+        // row reads as: title (primary) > status (semantic) > time (meta).
         Text.rich(
           TextSpan(
-            style: Theme.of(context).textTheme.labelMedium,
             children: [
               TextSpan(
                 text: statusText,
                 style: TextStyle(
-                    fontWeight: FontWeight.w600, color: _statusColor),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: _statusColor,
+                  letterSpacing: 0.1,
+                ),
               ),
               if (timeText != null)
                 TextSpan(
                   text: '  $timeText',
                   style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w400,
+                    color: colors.onSurfaceVariant.withValues(alpha: 0.75),
+                    letterSpacing: 0.3,
                   ),
                 ),
             ],
@@ -3047,6 +3070,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   }
 
   Widget _buildTitleRow(BuildContext context, String displayTitle) {
+    final colors = Theme.of(context).colorScheme;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -3055,7 +3079,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             displayTitle,
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontWeight: FontWeight.w600),
+            // Primary anchor in the row hierarchy: explicitly larger and
+            // heavier than the timestamp / preview / subtitle so users can
+            // scan-read the agent name without effort. Colour is themed so
+            // it adapts to dark mode.
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w700,
+              letterSpacing: -0.1,
+              color: colors.onSurface,
+            ),
           ),
         ),
         const SizedBox(width: 8),
