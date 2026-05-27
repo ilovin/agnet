@@ -2376,6 +2376,13 @@ func getString(m map[string]any, key string) string {
 	return ""
 }
 
+// MakeWatcherCallback exposes makeWatcherCallback for tests that need to drive
+// the watcher → DB → broadcast pipeline without spinning up a real session
+// watcher. Production code calls makeWatcherCallback (lowercase) directly.
+func (m *Manager) MakeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
+	return m.makeWatcherCallback(agentID, ag)
+}
+
 // makeWatcherCallback builds the standard callback used by all session watchers.
 func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
 	return func(e watcher.ConversationEvent) {
@@ -2390,6 +2397,50 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 				}
 			}
 		}
+
+		// Interactive tools (AskUserQuestion / ExitPlanMode): the JSONL line
+		// carries tool_use payload that the Flutter app needs as a structured
+		// event (kind + camelCase payload), not just a "[ToolName]" text
+		// bubble. This mirrors makeStreamJSONCallback so both ingest paths
+		// (jsonl watcher + stream-json) deliver identical events. R-010 T2-bis.
+		if e.ToolUseName != "" {
+			if kind, payload, ok := ParseInteractiveToolUse(e.ToolUseName, e.ToolUseID, e.ToolUseInput); ok {
+				payloadBytes, _ := json.Marshal(payload)
+				var payloadMap map[string]any
+				_ = json.Unmarshal(payloadBytes, &payloadMap)
+				data := map[string]any{
+					"role": "assistant",
+					"raw":  false,
+					"kind": kind,
+				}
+				if key := PayloadKeyForKind(kind); key != "" {
+					data[key] = payloadMap
+				}
+				if e.StatusChange != nil {
+					data["statusChange"] = string(*e.StatusChange)
+					if *e.StatusChange == watcher.StatusWorking {
+						ag.setStatus(StatusWorking)
+					} else {
+						ag.setStatus(StatusIdle)
+					}
+				} else {
+					// Interactive tool_use without an explicit status change
+					// still means the agent is working (waiting on user).
+					ag.setStatus(StatusWorking)
+				}
+				seq := m.appendAndPersistEvent(agentID, ag, data)
+				data["seq"] = seq
+
+				m.mu.RLock()
+				cb := m.onOutput
+				m.mu.RUnlock()
+				if cb != nil {
+					cb(agentID, data)
+				}
+				return
+			}
+		}
+
 		data := map[string]any{
 			"role": e.Role,
 			"text": e.Text,
