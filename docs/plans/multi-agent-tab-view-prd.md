@@ -92,12 +92,26 @@ i-018 §修复路径已枚举 5 方案：
 - **每个 tab 独立 provider，按 agent_id 分片**；tab 列表 provider 按 (node_id, agentIds[]) 计算
 - **滚动状态保留**：用 PageView 的 AutomaticKeepAliveClientMixin
 
-#### 切换交互决策
+#### 切换交互决策（用户已拍板）
 
-- tab 顺序：按 agent 创建时间升序固定
-- 未读徽标：非当前 tab 每收到一条新消息计数 +1，切到该 tab 立即清零
-- 关闭：仅 completed/error/stopped 的 tab 可关闭；working / idle 的不可关闭
-- 关闭后 agent 数据仍在 dashboard 和 store 中，仅从当前会话的 tab 列表移除
+- **tab 顺序**：按 agent 创建时间升序固定，避免抖动
+- **tab 标题**：使用 **agent name**（如 `T6 deploy.sh DEPLOY_DRY_RUN`），不使用 task ID
+  - 超长截断 + ellipsis（移动端约 12 字符，Web 宽屏约 24 字符）
+  - hover（Web）/ long-press（移动端）显示完整名 tooltip
+  - 截断位置建议：保留前缀 + 末尾几位（如 `T6 deploy.sh D…RUN`）
+- **未读徽标**：非当前 tab 每收到一条新消息计数 +1；切到该 tab **立即清零**（不要求滚到底部）
+  - 多 tab 同时等待交互卡片响应时用数字徽标传达数量
+- **tab 生命周期与 agent 绑定（关键）**：
+  - agent 还在跑（idle / working / waiting / error） → tab 在
+  - agent 退出（completed / stopped / 进程死） → tab **自动收掉**，不保留
+  - 不存在"completed agent tab 保留时长"概念，无"全部关闭"按钮
+- **关闭 tab = detach（不 kill agent）**：
+  - 用户可主动关闭任一 tab（无论 status 如何）
+  - 关闭只移除 UI，**不向 agent 发任何 kill / interrupt 信号**
+  - 下次刷新或重连若 agent 仍存活 → tab 重新出现
+  - agent 自然完成或被 Manager 显式 kill → tab 永久收掉
+- **跨设备同步 tab 选择**：**不同步**，每端独立切换当前 tab，避免协议开销
+- **多 tab 同时弹交互卡片**：仅徽标提示，不加全局 toast / 顶部横幅
 - 单 agent 场景 tab bar 隐藏（兼容现状）
 
 #### 暗色模式 / 移动端
@@ -150,7 +164,7 @@ i-018 §修复路径已枚举 5 方案：
 ### 集成 / E2E 验证
 
 - **5 agent 并发实战**：用 worktree sandbox 启动 5 个并行 dev agent，跑 30 分钟相似主题对话，对比每个 tab 显示内容与 `claude agents` attach 内容一致
-- **现有 Chrome 验证**：按 [[feedback_existing_chrome_only]]，所有 Web 端验证必须用现有 Chrome 标签页
+- **现有 Chrome 验证**：按 user memory 中的 "existing Chrome only" 反馈（未入库），所有 Web 端验证必须用现有 Chrome 标签页
 - **移动端验证**：Chrome DevTools 移动模拟器 + 真机各跑一遍
 
 ## Out of Scope
@@ -170,8 +184,8 @@ i-018 §修复路径已枚举 5 方案：
 
 ### 阶段间依赖时序
 
-- 阶段 1 必须**完整 close 并稳定运行至少 1 周**才能开工阶段 2
-- "稳定"标准：5 并发场景下连续 1 周无 i-018 错绑回归
+- 阶段 1 必须 **closed 并合入 main** 才能开工阶段 2；不强制额外观察期
+- 阶段 2 开工硬前置：i-018 已 closed（合入 main）
 - 阶段 1 期间可并行做阶段 2 的 Explore（widget 调研 / 数据通道调研），但不动代码
 
 ### 与 R-009 / d-009 的关系
@@ -199,22 +213,30 @@ i-018 §修复路径已枚举 5 方案：
 - tab 切换响应 < 300ms（Web Chrome）
 - 5 并发 WS 流移动数据网络下不应导致明显延迟（> 5s 算异常）
 
-### 已知未决问题（留给用户拍板）
+### 已拍板（用户决策，2026-05-27）
 
-- 阶段 1 修复方案选型（P1 / P2 / P3 / P4 / P5 组合）
-- tab 命名规则（task ID vs agent name）
-- completed tab 保留时长 / 是否需要"全部关闭"按钮
-- 多 tab 同时弹交互卡片是否需要全局 toast
+- **tab 命名规则**：使用 agent name（如 `T6 deploy.sh DEPLOY_DRY_RUN`），超长截断 + tooltip
+- **tab 生命周期**：与子 agent 生命周期 1:1 绑定；agent 退出 tab 自动收掉，无"completed 保留时长"，无"全部关闭"按钮
+- **关闭 tab = detach**：不 kill agent；agent 仍活则下次刷新/重连时 tab 重新出现
+- **跨设备 tab 选择不同步**：每端独立切换
+- **未读徽标重置时机**：切到该 tab 立即清零
+- **多 tab 弹卡片提示**：仅徽标，不加全局 toast / 横幅
+- **阶段 1 → 2 的观察期**：drop "1 周稳定" 门槛；i-018 closed 即可开工
+
+### 已知未决问题（仍留给用户拍板）
+
+- 阶段 1 修复方案选型（i-018 P1 / P2 / P3 / P4 / P5 组合）
+- tab 数量上限（5 / 10 / 不设上限）— 暂按"不设上限，用户负担过重再优化"推进
 - 阶段 3 优化项是否同期立项
 
 ## 引用
 
-- 需求：[[r-016-app-multi-agent-tab-view]]
-- 阻塞 bug：[[i-018-tmux-contentmatch-session-bleed]]
-- 相邻需求：[[r-009-claude-agent-view-adaptation]]、[[r-010-app-claude-interaction]]
-- 设计：[[d-009-agent-view-workflow]]
-- 相关 issue：[[i-016-periodic-scan-dead-process-cleanup]]、[[i-017-dashboard-stale-last-message-time]]、[[i-012-clear-tmux-interaction-followup]]
-- Sandbox 背景：[[r-012-sandboxed-worktree-isolation]]
+- 需求：[[r-016-app-multi-agent-tab-view]]（已入库）
+- 阻塞 bug：[[i-018-tmux-contentmatch-session-bleed]]（已入库）
+- 相邻需求：r-009（Claude Code Agent View 适配，未入库）、r-010（app 端 Claude 交互工具，未入库）
+- 设计：d-009（Manager Workflow 与 Agent View 集成，未入库）
+- 相关 issue：i-016（PeriodicScan + 死亡进程清理，未入库）、i-017（Dashboard stale lastMessageTime，未入库）、i-012-followup（tmux `/clear` watcher 不切换，未入库）
+- Sandbox 背景：[[r-012-sandboxed-worktree-isolation]]（已入库）
 - 关键代码：
   - `agentd/internal/scanner/content_match.go:533-741`（contentMatchSession 主流程）
   - `agentd/internal/watcher/claude.go:322-384`（watcher 调用 content match + pidMapSessionFile）

@@ -112,10 +112,10 @@ status: open
 
 ## 关联
 
-- 阻塞需求：[[r-016-app-multi-agent-tab-view]]
-- 相邻问题：[[i-016-periodic-scan-dead-process-cleanup]]（死 jsonl 残留导致 content match 候选池污染）、[[i-012-clear-tmux-interaction-followup]]（`currentBound()` 在切换时机上的相似 bug）
+- 阻塞需求：[[r-016-app-multi-agent-tab-view]]（已入库）
+- 相邻问题：i-016（PeriodicScan + 死亡进程清理，未入库 — 死 jsonl 残留导致 content match 候选池污染）、i-012-followup（tmux `/clear` 后 watcher 不切换，未入库 — `currentBound()` 在切换时机上的相似 bug）
 - 关键代码：
   - `agentd/internal/scanner/content_match.go:533-741`（contentMatchSession 主流程）
   - `agentd/internal/watcher/claude.go:322-330`（watcher 调用 content match 的入口）
   - `agentd/internal/watcher/claude.go:357-384`（pidMapSessionFile，已有的更可靠路径）
-- PRD：[[multi-agent-tab-view-prd]] §阶段 1
+- PRD：[[multi-agent-tab-view-prd]] §阶段 1（已入库）
