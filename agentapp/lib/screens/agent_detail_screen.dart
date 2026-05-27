@@ -5576,12 +5576,17 @@ class _InputBarState extends State<_InputBar> {
                         dense: true,
                         title: Text(
                           cmd.command,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          softWrap: false,
                           style: AppTextStyles.bodySmall.copyWith(
                             fontWeight: FontWeight.w500,
                           ),
                         ),
                         subtitle: Text(
                           cmd.description,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 12),
                         ),
                         onTap: () {

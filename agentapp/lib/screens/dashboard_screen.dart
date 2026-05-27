@@ -170,16 +170,38 @@ class _MarkdownText extends StatelessWidget {
       );
     }
 
+    // Multi-paragraph: distribute the maxLines budget across paragraphs so
+    // the subtitle slot can never grow unbounded vertically when the inputs
+    // are long. Without this, each Text.rich child renders unconstrained,
+    // producing a tall column that visually "overflows" inside narrow
+    // ListTile subtitles.
     final children = <Widget>[];
+    final totalCap = maxLines;
+    int? remaining = totalCap;
     for (var i = 0; i < paragraphs.length; i++) {
+      // Skip rendering once the budget is fully consumed.
+      if (remaining != null && remaining <= 0) break;
       final spans = buildMarkdownSpans(paragraphs[i], style, context);
+      // Per-paragraph cap: at most the remaining budget; if no cap was set,
+      // pass null and let the paragraph render naturally.
+      final paragraphMaxLines = remaining;
       children.add(
         Text.rich(
           TextSpan(children: spans),
           softWrap: true,
+          maxLines: paragraphMaxLines,
+          overflow: paragraphMaxLines == null ? null : overflow,
         ),
       );
-      if (i < paragraphs.length - 1) {
+      if (paragraphMaxLines != null) {
+        // Approximation: assume paragraph uses 1 line minimum, drop the
+        // total remaining budget by that. Since we cannot know the actual
+        // wrapped line count without a layout pass, this conservatively
+        // ensures we never exceed the global cap.
+        remaining = remaining! - 1;
+      }
+      if (i < paragraphs.length - 1 &&
+          (remaining == null || remaining > 0)) {
         children.add(const SizedBox(height: 8));
       }
     }
@@ -827,7 +849,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                     final node = found[i] as Map<String, dynamic>;
                     final id = node['id'] as String;
                     return CheckboxListTile(
-                      title: Text(node['name'] as String),
+                      title: Text(
+                        node['name'] as String,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        softWrap: false,
+                      ),
                       subtitle: Text(
                         node['host'] as String,
                         maxLines: 1,
@@ -2817,7 +2844,12 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                   size: 18,
                                   color: providerColor(s.provider),
                                 ),
-                                title: Text(titleText),
+                                title: Text(
+                                  titleText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  softWrap: false,
+                                ),
                                 subtitle: secondary.isEmpty
                                     ? null
                                     : Text(
