@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/phone-talk/agentd/internal/scanner"
 )
 
 type AgentStatus string
@@ -564,6 +566,13 @@ func filterCandidatesByPaneActivity(candidates []sessionCandidate, paneActivity 
 
 // contentMatchFromCandidates captures tmux pane content and matches against candidates.
 // Returns the jsonlPath of the best match, or "" if no match.
+//
+// Uses scanner.FuzzyMatchScore for scoring (consecutive-run-aware fuzzy
+// matching) instead of plain strings.Contains. The substring path was the
+// root cause of contentMatch oscillation: terminal redraws produced the same
+// text in multiple forms in the pane buffer, so per-fingerprint hit/miss
+// flipped between scans, swinging the integer score by +/-1 and reversing the
+// winner. Fuzzy scoring gives a smoother gradient.
 func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate, maxCandidates int) string {
 	paneRaw, err := capturePaneContentFunc(tmuxTarget)
 	if err != nil {
@@ -579,32 +588,43 @@ func contentMatchFromCandidates(tmuxTarget string, candidates []sessionCandidate
 		top = top[:maxCandidates]
 	}
 
-	bestScore := 0
-	secondBest := 0
+	bestScore := 0.0
+	secondBest := 0.0
 	bestPath := ""
+	var bestActivity time.Time
 	for _, c := range top {
 		fps := extractFingerprintsFunc(c.jsonlPath, 20)
-		score := 0
+		score := 0.0
 		for _, fp := range fps {
-			if strings.Contains(paneText, fp) {
-				score++
-			}
+			score += scanner.FuzzyMatchScore(paneText, fp)
 		}
 		if score > bestScore {
 			secondBest = bestScore
 			bestScore = score
 			bestPath = c.jsonlPath
+			bestActivity = c.lastActivity
+		} else if score == bestScore && c.lastActivity.After(bestActivity) {
+			// Tie-break: pick the more recently active session. Without this,
+			// slice ordering (and thus the winner) is non-deterministic on
+			// equal scores, causing oscillation between scans.
+			secondBest = bestScore
+			bestPath = c.jsonlPath
+			bestActivity = c.lastActivity
 		} else if score > secondBest {
 			secondBest = score
 		}
 	}
 
-	if bestScore >= minContentMatchScore && (bestScore-secondBest) >= minContentMatchMargin {
-		log.Printf("[ContentMatch] pane %s matched %s (score %d, runner-up %d)", tmuxTarget, filepath.Base(bestPath), bestScore, secondBest)
+	margin := 0.0
+	if bestScore > 0 {
+		margin = (bestScore - secondBest) / bestScore
+	}
+	if bestScore >= minContentMatchScore && margin >= minContentMatchMarginRatio {
+		log.Printf("[ContentMatch] pane %s matched %s (score %.2f, runner-up %.2f, margin %.2f)", tmuxTarget, filepath.Base(bestPath), bestScore, secondBest, margin)
 		return bestPath
 	}
 	if bestScore > 0 {
-		log.Printf("[ContentMatch] pane %s ambiguous (best %d, runner-up %d), skip switch", tmuxTarget, bestScore, secondBest)
+		log.Printf("[ContentMatch] pane %s ambiguous (best %.2f, runner-up %.2f, margin %.2f), skip switch", tmuxTarget, bestScore, secondBest, margin)
 	}
 	return ""
 }
@@ -631,8 +651,14 @@ var wsRe = regexp.MustCompile(`\s+`)
 var mdRe = regexp.MustCompile("[*`#\\[\\]]")
 
 const (
-	minContentMatchScore   = 3
-	minContentMatchMargin  = 2
+	minContentMatchScore = 2.0
+	// minContentMatchMarginRatio: best/second-best relative margin required
+	// to accept a match. The watcher path is conservative because a wrong
+	// switch can rebind to another process' session; the scanner path uses
+	// 0.30 (matches user spec) but watcher uses 0.40 to avoid 3-vs-2-style
+	// near-ties that the existing TestContentMatchFromCandidatesRequiresConfidence
+	// pins down as "too ambiguous to switch on".
+	minContentMatchMarginRatio = 0.40
 )
 
 var capturePaneContentFunc = capturePaneContent
@@ -740,10 +766,18 @@ func (w *ClaudeWatcher) switchToFile(newPath string) {
 		return
 	}
 	w.lastSwitchAt = time.Now()
+	tmuxTarget := w.tmuxTarget
 	w.mu.Unlock()
 	oldPath := w.path
 	w.path = newPath
 	w.offset = 0
+	// Invalidate any cached contentMatch result for this tmux target. Without
+	// this, the scanner cache (TTL up to 30s) can keep serving the pre-switch
+	// session ID for the next several scans, manifesting as "session jitter"
+	// on the dashboard until the cache naturally expires.
+	if tmuxTarget != "" {
+		scanner.ClearContentMatchCacheFor(tmuxTarget)
+	}
 	log.Printf("[Watcher] Switching session file: %s -> %s", oldPath, newPath)
 	if w.onSwitch != nil {
 		w.onSwitch(newPath)

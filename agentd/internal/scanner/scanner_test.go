@@ -1098,6 +1098,219 @@ func TestExtractFingerprintsCache_HitOnSameMtime(t *testing.T) {
 	}
 }
 
+// TestContentMatchFuzzyScores verifies that fuzzy scoring produces meaningfully
+// different scores between a fingerprint set that broadly matches the pane text
+// (CJK + noise) and one that does not. This guards against the old substring
+// approach where a single token could swing the integer hit count by 1 and flip
+// the winner.
+func TestContentMatchFuzzyScores(t *testing.T) {
+	// paneText simulates a Chinese+English+terminal-decorated tmux capture.
+	// It contains the deploy/部署 phrase plus noise like timestamps and
+	// truncated escape sequences.
+	pane := cleanTUIText("⏵⏵ 用户要求 deploy 到生产环境 的 staging 镜像 [12:34:56] hermes client 已就绪")
+
+	// signal: fingerprints that strongly correspond to pane content.
+	signal := []string{"deploy", "staging", "hermes client", "用户要求", "生产环境"}
+	// noise: fingerprints that don't correspond to pane content.
+	noise := []string{"completely unrelated", "alpha bravo", "qwerty xyzzy", "无关紧要", "另一个会话"}
+
+	signalScore := matchScoreFuzzy(pane, signal)
+	noiseScore := matchScoreFuzzy(pane, noise)
+
+	if signalScore <= noiseScore {
+		t.Fatalf("expected signal score (%v) > noise score (%v)", signalScore, noiseScore)
+	}
+	// Signal should be at least 30% above noise to be considered "confident"
+	// (matches contentMatchMinMarginRatio).
+	if (signalScore - noiseScore) < 0.30*signalScore {
+		t.Fatalf("expected confident margin: signal=%v noise=%v relMargin=%v",
+			signalScore, noiseScore, (signalScore-noiseScore)/signalScore)
+	}
+}
+
+// TestContentMatchTieBreaksByActivity verifies that when two candidates score
+// identically (e.g. similar jsonl content), the candidate with the more recent
+// LastActivity is chosen. Without this tie-break, slice ordering is undefined
+// and the chosen winner can flip between scans causing oscillation.
+func TestContentMatchTieBreaksByActivity(t *testing.T) {
+	dir := t.TempDir()
+	older := filepath.Join(dir, "sess-older.jsonl")
+	newer := filepath.Join(dir, "sess-newer.jsonl")
+
+	// Identical content -> identical fingerprint scores.
+	body := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	if err := os.WriteFile(older, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newer, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	// Pass `older` first in slice order; activity tie-break must still pick `newer`.
+	candidates := []SessionCandidate{
+		{SessionID: "sess-older", JSONLPath: older, LastActivity: now.Add(-10 * time.Minute)},
+		{SessionID: "sess-newer", JSONLPath: newer, LastActivity: now},
+	}
+
+	pane := "deploy alpha beta gamma epsilon"
+	matched := contentMatchSessionByPaneText(pane, candidates, nil)
+	if matched == nil {
+		t.Fatalf("expected a match for tied scores via tie-break, got nil")
+	}
+	if matched.SessionID != "sess-newer" {
+		t.Fatalf("expected newer session to win tie-break, got %s", matched.SessionID)
+	}
+}
+
+// TestContentMatchWeakResultShortTTL verifies that a weak (low-margin) match
+// is cached with a shorter TTL so the system can re-evaluate sooner. A strong
+// match keeps the standard TTL for performance.
+func TestContentMatchWeakResultShortTTL(t *testing.T) {
+	clearContentMatchCache()
+	clearFingerprintsCache()
+
+	prevStrong := contentMatchCacheTTL
+	prevWeak := contentMatchWeakCacheTTL
+	contentMatchCacheTTL = 30 * time.Second
+	contentMatchWeakCacheTTL = 5 * time.Second
+	defer func() {
+		contentMatchCacheTTL = prevStrong
+		contentMatchWeakCacheTTL = prevWeak
+	}()
+
+	dir := t.TempDir()
+
+	// Strong scenario: winner content uniquely matches pane; loser has totally
+	// disjoint content -> margin ~ 1.0 -> strong TTL.
+	strongWin := filepath.Join(dir, "sess-strong-win.jsonl")
+	strongLose := filepath.Join(dir, "sess-strong-lose.jsonl")
+	winner := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon zeta omega lambda\"}]}}\n"
+	totallyDisjoint := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"unrelated content xyzzy plugh frobnicate\"}]}}\n"
+	if err := os.WriteFile(strongWin, []byte(winner), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(strongLose, []byte(totallyDisjoint), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	strongCands := []SessionCandidate{
+		{SessionID: "sess-strong-win", JSONLPath: strongWin, LastActivity: time.Now()},
+		{SessionID: "sess-strong-lose", JSONLPath: strongLose, LastActivity: time.Now().Add(-time.Second)},
+	}
+	strongPane := "deploy alpha beta gamma epsilon zeta omega lambda"
+	matched := contentMatchSessionWithCache("tmux-target-strong", strongPane, strongCands, nil)
+	if matched == nil || matched.SessionID != "sess-strong-win" {
+		t.Fatalf("expected strong match to pick sess-strong-win, got %+v", matched)
+	}
+
+	// Inspect the cached entry's TTL: strong match should use the long TTL.
+	contentMatchCacheMu.Lock()
+	var strongExpiry time.Time
+	for k, v := range contentMatchCache {
+		if strings.HasPrefix(k, "tmux-target-strong|") {
+			strongExpiry = v.expiry
+			break
+		}
+	}
+	contentMatchCacheMu.Unlock()
+	if strongExpiry.IsZero() {
+		t.Fatalf("expected strong-match cache entry to be present")
+	}
+	strongTTL := time.Until(strongExpiry)
+	if strongTTL < 20*time.Second {
+		t.Fatalf("expected strong-match TTL ~30s, got %v", strongTTL)
+	}
+
+	// Weak scenario: two candidates whose fingerprints overlap heavily with
+	// the pane -> margin small but above the min threshold -> weak TTL.
+	clearContentMatchCache()
+	weakA := filepath.Join(dir, "sess-weak-a.jsonl")
+	weakB := filepath.Join(dir, "sess-weak-b.jsonl")
+	weakABody := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon zeta\"}]}}\n"
+	weakBBody := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma noise tail\"}]}}\n"
+	if err := os.WriteFile(weakA, []byte(weakABody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(weakB, []byte(weakBBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	weakCands := []SessionCandidate{
+		{SessionID: "sess-weak-a", JSONLPath: weakA, LastActivity: time.Now()},
+		{SessionID: "sess-weak-b", JSONLPath: weakB, LastActivity: time.Now().Add(-time.Second)},
+	}
+	weakPane := "deploy alpha beta gamma epsilon zeta omega lambda"
+	_ = contentMatchSessionWithCache("tmux-target-weak", weakPane, weakCands, nil)
+
+	contentMatchCacheMu.Lock()
+	var weakExpiry time.Time
+	for k, v := range contentMatchCache {
+		if strings.HasPrefix(k, "tmux-target-weak|") {
+			weakExpiry = v.expiry
+			break
+		}
+	}
+	contentMatchCacheMu.Unlock()
+	if weakExpiry.IsZero() {
+		t.Fatalf("expected weak-match cache entry to be present")
+	}
+	weakTTL := time.Until(weakExpiry)
+	if weakTTL > 10*time.Second {
+		t.Fatalf("expected weak-match TTL ~5s, got %v", weakTTL)
+	}
+}
+
+// TestClearContentMatchCacheForRemovesTarget verifies that
+// ClearContentMatchCacheFor only invalidates entries for the specified tmux
+// target so that stale matches are recomputed on the next scan, while other
+// targets remain cached.
+func TestClearContentMatchCacheForRemovesTarget(t *testing.T) {
+	clearContentMatchCache()
+	clearFingerprintsCache()
+
+	dir := t.TempDir()
+	jsonlPath := filepath.Join(dir, "sess.jsonl")
+	body := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	if err := os.WriteFile(jsonlPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []SessionCandidate{
+		{SessionID: "sess", JSONLPath: jsonlPath, LastActivity: time.Now()},
+	}
+	pane := "deploy alpha beta gamma epsilon"
+
+	// Populate cache for two different tmux targets.
+	_ = contentMatchSessionWithCache("tmux-target-A", pane, candidates, nil)
+	_ = contentMatchSessionWithCache("tmux-target-B", pane, candidates, nil)
+
+	contentMatchCacheMu.Lock()
+	beforeCount := len(contentMatchCache)
+	contentMatchCacheMu.Unlock()
+	if beforeCount < 2 {
+		t.Fatalf("expected 2 cache entries after populate, got %d", beforeCount)
+	}
+
+	ClearContentMatchCacheFor("tmux-target-A")
+
+	contentMatchCacheMu.Lock()
+	defer contentMatchCacheMu.Unlock()
+	for k := range contentMatchCache {
+		if strings.HasPrefix(k, "tmux-target-A|") {
+			t.Fatalf("expected target-A entries to be cleared, but found key=%s", k)
+		}
+	}
+	hasB := false
+	for k := range contentMatchCache {
+		if strings.HasPrefix(k, "tmux-target-B|") {
+			hasB = true
+			break
+		}
+	}
+	if !hasB {
+		t.Fatalf("expected target-B entries to remain after clearing target-A")
+	}
+}
+
 func TestExtractFingerprintsCache_InvalidatesOnMtime(t *testing.T) {
 	clearFingerprintsCache()
 

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/phone-talk/agentd/internal/scanner"
 )
 
 func TestClaudeWatcherDetectsMessages(t *testing.T) {
@@ -959,5 +961,48 @@ func TestClaudeWatcherRefreshIgnoresPIDSessionMapForOtherPID(t *testing.T) {
 
 	if w.path != bound {
 		t.Fatalf("expected watcher to stay on %s, got %s", bound, w.path)
+	}
+}
+
+// TestWatcherClearsContentMatchCacheOnSwitch verifies that when the watcher
+// switches to a different jsonl (e.g. detected via task fd or pidMap), it
+// invalidates any cached contentMatch result for the bound tmux target. This
+// prevents the next scan from returning a stale, pre-switch session.
+func TestWatcherClearsContentMatchCacheOnSwitch(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.jsonl")
+	newPath := filepath.Join(dir, "new.jsonl")
+	if err := os.WriteFile(oldPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewClaudeWatcher(oldPath, func(ConversationEvent) {})
+	w.SetTmuxTarget("watcher-cache-target")
+	// Force lastSwitchAt to zero so switchToFile's cooldown does not reject the call.
+	w.lastSwitchAt = time.Time{}
+
+	// Pre-populate scanner's contentMatch cache for this tmux target by calling
+	// the public scoring path with a candidate set.
+	body := "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"deploy alpha beta gamma epsilon\"}]}}\n"
+	if err := os.WriteFile(oldPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	candidates := []scanner.SessionCandidate{
+		{SessionID: "old", JSONLPath: oldPath, LastActivity: time.Now()},
+	}
+	scanner.PrimeContentMatchCacheForTest("watcher-cache-target", "deploy alpha beta gamma epsilon", candidates)
+
+	if !scanner.ContentMatchCacheHasTargetForTest("watcher-cache-target") {
+		t.Fatalf("expected cache to be populated before switch")
+	}
+
+	// Trigger a switch.
+	w.switchToFile(newPath)
+
+	if scanner.ContentMatchCacheHasTargetForTest("watcher-cache-target") {
+		t.Fatalf("expected switchToFile to clear contentMatch cache for tmux target")
 	}
 }
