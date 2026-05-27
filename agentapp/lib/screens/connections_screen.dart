@@ -15,6 +15,7 @@ import '../providers/conversation_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
 import '../theme/app_spacing.dart';
+import '../widgets/app_bar/mission_control_app_bar.dart';
 
 class ConnectionProbeResult {
   final int? statusCode;
@@ -470,8 +471,8 @@ class _ConnectionsScreenState extends ConsumerState<ConnectionsScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Agent Manager'),
+      appBar: MissionControlAppBar(
+        title: 'Agent Manager',
         actions: [
           Consumer(
             builder: (context, ref, _) {
@@ -917,7 +918,7 @@ class _QrScannerPageState extends State<_QrScannerPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('扫描二维码')),
+      appBar: const MissionControlAppBar(title: '扫描二维码'),
       body: Stack(
         children: [
           MobileScanner(

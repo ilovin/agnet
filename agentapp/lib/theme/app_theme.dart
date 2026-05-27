@@ -1,13 +1,21 @@
 import 'package:flutter/material.dart';
 
+import 'app_colors.dart';
 import 'app_text_styles.dart';
 import 'density_mode.dart';
 
 /// Builds a [ThemeData] from the design tokens defined in
-/// `app_text_styles.dart`, `app_spacing.dart`, and `density_mode.dart`.
+/// `app_colors.dart`, `app_text_styles.dart`, `app_spacing.dart`,
+/// and `density_mode.dart`.
 ///
-/// All text styles route through the locally bundled `Noto Sans SC`
-/// font (see `pubspec.yaml`); no remote font sources are referenced.
+/// All text styles route through locally bundled families
+/// (`Source Han Sans CN`, `Noto Sans SC`, `JetBrainsMono`); no remote /
+/// `google_fonts` source is referenced.
+///
+/// The "mission control" palette is applied to both [Brightness] modes:
+/// signal blue (`AppColors.accent`) is the [ColorScheme.primary] in
+/// either mode; only the surface family changes (warm off-white in
+/// light mode, ink near-black in dark mode).
 class AppTheme {
   AppTheme._();
 
@@ -21,17 +29,21 @@ class AppTheme {
   ];
 
   /// Build a complete [ThemeData] for the given density and brightness.
+  ///
+  /// The palette is fixed by the design tokens in [AppColors] — there is
+  /// no seed colour to override.
   static ThemeData build({
     required DensityMode densityMode,
     Brightness brightness = Brightness.light,
-    Color seedColor = Colors.indigo,
   }) {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: seedColor,
-      brightness: brightness,
-    );
-
+    final isDark = brightness == Brightness.dark;
+    final colorScheme = _buildColorScheme(brightness);
     final textTheme = _buildTextTheme(densityMode, colorScheme);
+
+    final scaffoldBackground = isDark ? AppColors.bgDark : AppColors.bgLight;
+    final cardBackground = isDark ? AppColors.elevDark : AppColors.elevLight;
+    final hairlineColor = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final accent = isDark ? AppColors.accentDark : AppColors.accentLight;
 
     return ThemeData(
       useMaterial3: true,
@@ -39,34 +51,37 @@ class AppTheme {
       brightness: brightness,
       fontFamily: _fontFamily,
       fontFamilyFallback: _fontFamilyFallback,
+      scaffoldBackgroundColor: scaffoldBackground,
       textTheme: textTheme,
       appBarTheme: AppBarTheme(
         elevation: 0,
-        scrolledUnderElevation: 1,
-        backgroundColor: colorScheme.surface,
+        scrolledUnderElevation: 0,
+        backgroundColor: scaffoldBackground,
         foregroundColor: colorScheme.onSurface,
-        surfaceTintColor: colorScheme.surfaceTint,
+        surfaceTintColor: Colors.transparent,
         titleTextStyle: textTheme.titleMedium?.copyWith(
           color: colorScheme.onSurface,
           fontWeight: FontWeight.w600,
         ),
         shape: Border(
           bottom: BorderSide(
-            color: colorScheme.outlineVariant,
+            color: hairlineColor,
             width: 1,
           ),
         ),
       ),
       cardTheme: CardThemeData(
-        elevation: 1,
+        elevation: isDark ? 0 : 1,
+        color: cardBackground,
+        surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
-          side: BorderSide(color: colorScheme.outlineVariant, width: 1),
+          side: BorderSide(color: hairlineColor, width: 1),
           borderRadius: BorderRadius.circular(12),
         ),
         clipBehavior: Clip.antiAlias,
       ),
       dividerTheme: DividerThemeData(
-        color: colorScheme.outlineVariant,
+        color: hairlineColor,
         thickness: 1,
         space: 1,
       ),
@@ -75,10 +90,65 @@ class AppTheme {
         textColor: colorScheme.onSurface,
       ),
       textSelectionTheme: TextSelectionThemeData(
-        selectionColor: colorScheme.primary.withValues(alpha: 0.50),
-        cursorColor: colorScheme.primary,
-        selectionHandleColor: colorScheme.primary,
+        selectionColor: accent.withValues(alpha: 0.50),
+        cursorColor: accent,
+        selectionHandleColor: accent,
       ),
+    );
+  }
+
+  static ColorScheme _buildColorScheme(Brightness brightness) {
+    if (brightness == Brightness.dark) {
+      return const ColorScheme(
+        brightness: Brightness.dark,
+        primary: AppColors.accentDark,
+        onPrimary: AppColors.onAccent,
+        primaryContainer: AppColors.accentContainerDark,
+        onPrimaryContainer: AppColors.onAccentContainerDark,
+        secondary: AppColors.data,
+        onSecondary: Color(0xFF003733),
+        secondaryContainer: Color(0xFF153B38),
+        onSecondaryContainer: Color(0xFFD7F2EF),
+        tertiary: AppColors.warn,
+        onTertiary: Color(0xFF2A1B00),
+        tertiaryContainer: Color(0xFF3A2A00),
+        onTertiaryContainer: Color(0xFFFFE6B5),
+        error: AppColors.error,
+        onError: Color(0xFFFFE6E8),
+        errorContainer: Color(0xFF4A1419),
+        onErrorContainer: Color(0xFFFFD9DD),
+        surface: AppColors.bgDark,
+        onSurface: AppColors.textDark,
+        surfaceContainerHighest: AppColors.elevDark,
+        onSurfaceVariant: AppColors.mutedDark,
+        outline: AppColors.borderDark,
+        outlineVariant: AppColors.borderDark,
+      );
+    }
+    return const ColorScheme(
+      brightness: Brightness.light,
+      primary: AppColors.accentLight,
+      onPrimary: AppColors.onAccent,
+      primaryContainer: AppColors.accentContainerLight,
+      onPrimaryContainer: AppColors.onAccentContainerLight,
+      secondary: AppColors.data,
+      onSecondary: Color(0xFF003733),
+      secondaryContainer: Color(0xFFCFEEEA),
+      onSecondaryContainer: Color(0xFF002824),
+      tertiary: AppColors.warn,
+      onTertiary: Color(0xFF2A1B00),
+      tertiaryContainer: Color(0xFFFFE7B0),
+      onTertiaryContainer: Color(0xFF2A1B00),
+      error: AppColors.error,
+      onError: Colors.white,
+      errorContainer: Color(0xFFFFD9DD),
+      onErrorContainer: Color(0xFF410006),
+      surface: AppColors.bgLight,
+      onSurface: AppColors.textLight,
+      surfaceContainerHighest: AppColors.elevLight,
+      onSurfaceVariant: AppColors.mutedLight,
+      outline: AppColors.borderLight,
+      outlineVariant: AppColors.borderLight,
     );
   }
 

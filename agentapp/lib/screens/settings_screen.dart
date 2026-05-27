@@ -13,6 +13,7 @@ import '../providers/connection_provider.dart';
 import '../providers/theme_provider.dart';
 import '../providers/color_mode_provider.dart';
 import '../providers/density_mode_provider.dart';
+import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../providers/unread_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
@@ -209,7 +210,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final client = ref.watch(connectionProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
+      appBar: const MissionControlAppBar(title: '设置'),
       body: SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

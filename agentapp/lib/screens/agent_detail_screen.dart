@@ -20,14 +20,18 @@ import '../providers/unread_provider.dart';
 import '../providers/draft_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
+import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
+import '../widgets/app_bar/mission_control_app_bar.dart';
+import '../widgets/app_bar/bypass_indicator.dart';
+import '../widgets/composer/composer_plus_button.dart';
+import '../widgets/loaders/oscilloscope_loader.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
 import '../models/claude_interaction_models.dart';
 import '../widgets/ask_user_question_card.dart';
-import '../widgets/browser_screenshot_widget.dart';
 import '../widgets/exit_plan_mode_card.dart';
 import '../widgets/permission_request_card.dart';
 
@@ -1896,17 +1900,17 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                   label: 'Tab',
                   onTap: () => _sendKeyAndClose(ctx, 'tab'),
                 ),
-                _KeyChip(label: '↑', onTap: () => _sendKeyAndClose(ctx, 'up')),
+                _KeyChip(icon: Icons.arrow_upward, onTap: () => _sendKeyAndClose(ctx, 'up')),
                 _KeyChip(
-                  label: '↓',
+                  icon: Icons.arrow_downward,
                   onTap: () => _sendKeyAndClose(ctx, 'down'),
                 ),
                 _KeyChip(
-                  label: '←',
+                  icon: Icons.arrow_back,
                   onTap: () => _sendKeyAndClose(ctx, 'left'),
                 ),
                 _KeyChip(
-                  label: '→',
+                  icon: Icons.arrow_forward,
                   onTap: () => _sendKeyAndClose(ctx, 'right'),
                 ),
               ],
@@ -2206,8 +2210,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         : effectiveModeForAgent(agent, pendingMode: _pendingMode);
 
     return Scaffold(
-      appBar: AppBar(
-        title: Column(
+      appBar: MissionControlAppBar(
+        showWordmark: false,
+        titleWidget: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
@@ -2227,6 +2232,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
               Text(
                 _buildMetaLine(agent),
                 style: TextStyle(
+                  fontFamily: AppTextStyles.monoFontFamily,
                   fontSize: 11,
                   color: Theme.of(context).colorScheme.onSurfaceVariant,
                 ),
@@ -2234,6 +2240,19 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           ],
         ),
         actions: [
+          // Permission-mode chip (replaces the in-composer mode button so
+          // the input row stays compact). Tapping it opens the same config
+          // sheet that the old composer button used.
+          if (agent != null && modesForProvider(agent.provider).isNotEmpty)
+            BypassIndicator(
+              modeLabel: modesForProvider(agent.provider)
+                  .firstWhere(
+                    (m) => m.id == activeMode,
+                    orElse: () => modesForProvider(agent.provider).first,
+                  )
+                  .label,
+              onTap: () => _showAgentConfigSheet(agent, activeMode),
+            ),
           if (!_wsConnected)
             Padding(
               padding: const EdgeInsets.only(right: 8),
@@ -2314,7 +2333,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
             child: Stack(
               children: [
                 _initialLoading
-                    ? const Center(child: CircularProgressIndicator())
+                    ? const Center(child: OscilloscopeLoader())
                     : (_rawEvents.isEmpty && _lastError != null)
                     ? Center(
                         child: GestureDetector(
@@ -2496,6 +2515,26 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   Color _statusColor(AgentStatus s) => AgentStatusTheme.getColor(s);
 
   String _statusLabel(AgentStatus s) => AgentStatusTheme.getLabel(s);
+
+  /// Opens the same provider/model/mode configuration sheet that used to be
+  /// triggered from the in-composer mode button. Now wired to the AppBar
+  /// [BypassIndicator] so the composer row stays minimal.
+  void _showAgentConfigSheet(AgentModel agent, String currentMode) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AgentConfigSheet(
+        agent: agent,
+        nodeId: widget.nodeId,
+        stopping: _stopping,
+        currentMode: currentMode,
+        onControl: _control,
+        onSwitchModel: _switchModel,
+        onSwitchProvider: _switchProvider,
+        onSwitchMode: _switchMode,
+      ),
+    );
+  }
 
   String _buildMetaLine(AgentModel agent) {
     final parts = <String>[
@@ -4609,13 +4648,18 @@ Widget _codeBlock(
   bool isDark, {
   bool isNaive = false,
 }) {
-  final codeColor = isDark ? Colors.grey.shade300 : const Color(0xFF1F2328);
+  // GitHub-style code block: elev surface + 1px border outline + JetBrains
+  // Mono. Body text uses a high-contrast on-surface colour rather than the
+  // legacy off-grey so dense code stays legible.
+  final codeColor = isDark ? AppColors.textDark : AppColors.textLight;
+  final blockBg = isDark ? AppColors.elevDark : AppColors.elevLight;
+  final blockBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
   final Widget textWidget;
   if (isNaive) {
     textWidget = Text(
       code,
       style: TextStyle(
-        fontFamily: 'Noto Sans SC',
+        fontFamily: AppTextStyles.monoFontFamily,
         fontFamilyFallback: const ['Noto Sans SC'],
         fontSize: fontSize,
         height: 1.4,
@@ -4628,18 +4672,20 @@ Widget _codeBlock(
       TextSpan(
         children: [highlightCode(code, isDark: isDark)],
         style: TextStyle(
-          fontFamily: 'Noto Sans SC',
+          fontFamily: AppTextStyles.monoFontFamily,
           fontFamilyFallback: const ['Noto Sans SC'],
           fontSize: fontSize,
           height: 1.4,
           fontWeight: FontWeight.w500,
+          color: codeColor,
         ),
       ),
     );
   }
   return Container(
     decoration: BoxDecoration(
-      color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
+      color: blockBg,
+      border: Border.all(color: blockBorder, width: 1),
       borderRadius: BorderRadius.circular(8),
     ),
     margin: const EdgeInsets.symmetric(vertical: 4),
@@ -4736,17 +4782,23 @@ class _MarkdownContent extends ConsumerWidget {
             height: 1.4,
           ),
           code: TextStyle(
-            fontFamily: 'Noto Sans SC',
+            fontFamily: AppTextStyles.monoFontFamily,
             fontFamilyFallback: const ['Noto Sans SC'],
             fontSize: fontSize,
             fontWeight: FontWeight.w500,
             color: isNaive
                 ? textColor
-                : (isDark ? const Color(0xFF98C379) : const Color(0xFF1A7F37)),
-            backgroundColor: null,
+                : (isDark
+                    ? AppColors.onAccentContainerDark
+                    : AppColors.onAccentContainerLight),
+            backgroundColor: isDark ? AppColors.elevDark : AppColors.elevLight,
           ),
           codeblockDecoration: BoxDecoration(
-            color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
+            color: isDark ? AppColors.elevDark : AppColors.elevLight,
+            border: Border.all(
+              color: isDark ? AppColors.borderDark : AppColors.borderLight,
+              width: 1,
+            ),
             borderRadius: BorderRadius.circular(8),
           ),
           codeblockPadding: const EdgeInsets.all(12),
@@ -4868,12 +4920,18 @@ class _MarkdownContent extends ConsumerWidget {
 }
 
 class _KeyChip extends StatelessWidget {
-  final String label;
+  final String? label;
+  final IconData? icon;
   final VoidCallback onTap;
-  const _KeyChip({required this.label, required this.onTap});
+  const _KeyChip({this.label, this.icon, required this.onTap})
+      : assert(label != null || icon != null,
+            '_KeyChip requires either a label or an icon');
   @override
   Widget build(BuildContext context) {
-    return ActionChip(label: Text(label), onPressed: onTap);
+    final Widget child = icon != null
+        ? Icon(icon, size: 18, key: Key('keychip-${icon!.codePoint.toRadixString(16)}'))
+        : Text(label!);
+    return ActionChip(label: child, onPressed: onTap);
   }
 }
 
@@ -5286,50 +5344,6 @@ class _InputBarState extends State<_InputBar> {
     }
   }
 
-  Widget _buildModeButton(BuildContext context) {
-    final modes = modesForProvider(widget.agent!.provider);
-    if (modes.isEmpty) return const SizedBox.shrink();
-    final scheme = Theme.of(context).colorScheme;
-    final current = modes.firstWhere(
-      (m) => m.id == widget.currentMode,
-      orElse: () => modes.first,
-    );
-    return TextButton(
-      onPressed: _showConfigSheet,
-      style: TextButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 6),
-        minimumSize: const Size(32, 32),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
-      child: Text(
-        current.label,
-        style: TextStyle(
-          fontSize: 12,
-          color: scheme.primary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-
-  void _showConfigSheet() {
-    if (widget.agent == null) return;
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => _AgentConfigSheet(
-        agent: widget.agent!,
-        nodeId: widget.nodeId,
-        stopping: widget.stopping,
-        currentMode: widget.currentMode,
-        onControl: widget.onControl,
-        onSwitchModel: widget.onSwitchModel,
-        onSwitchProvider: widget.onSwitchProvider,
-        onSwitchMode: widget.onSwitchMode,
-      ),
-    );
-  }
-
   void _showImagePreview(BuildContext context, Uint8List bytes) {
     showDialog(
       context: context,
@@ -5382,6 +5396,127 @@ class _InputBarState extends State<_InputBar> {
     return all
         .where((c) => c.command.substring(1).contains(_slashFilter))
         .toList();
+  }
+
+  /// Bottom sheet of "special keys" (ESC / Ctrl-C / arrow keys / …) that
+  /// previously lived behind the right-edge keyboard_hide button. Now
+  /// surfaced from the consolidated "+" button on the composer's left.
+  void _showSpecialKeysSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.inkElev,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          border: Border(
+            top: BorderSide(color: AppColors.accent, width: 1),
+          ),
+        ),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '特殊按键',
+              style: AppTextStyles.titleLarge.copyWith(
+                fontSize: 18,
+                color: AppColors.accent,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                ActionChip(
+                  label: const Text('ESC'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('esc');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Ctrl+C'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('ctrl_c');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Ctrl+D'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('ctrl_d');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Ctrl+Z'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('ctrl_z');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Ctrl+A'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('ctrl_a');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Ctrl+E'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('ctrl_e');
+                  },
+                ),
+                ActionChip(
+                  label: const Text('Tab'),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('tab');
+                  },
+                ),
+                ActionChip(
+                  label: const Icon(Icons.arrow_upward, size: 18,
+                      key: Key('keychip-arrow_upward')),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('up');
+                  },
+                ),
+                ActionChip(
+                  label: const Icon(Icons.arrow_downward, size: 18,
+                      key: Key('keychip-arrow_downward')),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('down');
+                  },
+                ),
+                ActionChip(
+                  label: const Icon(Icons.arrow_back, size: 18,
+                      key: Key('keychip-arrow_back')),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('left');
+                  },
+                ),
+                ActionChip(
+                  label: const Icon(Icons.arrow_forward, size: 18,
+                      key: Key('keychip-arrow_forward')),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    widget.onKey('right');
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _pickImage() async {
@@ -5461,24 +5596,6 @@ class _InputBarState extends State<_InputBar> {
       updated.add({'data': b64, 'mimeType': mime});
     }
     widget.onImagesChanged(updated);
-  }
-
-  Future<void> _takeBrowserScreenshot() async {
-    try {
-      final result = await showBrowserScreenshot(context);
-      if (result != null) {
-        final updated = List<Map<String, String>>.from(widget.pendingImages);
-        updated.add(result);
-        widget.onImagesChanged(updated);
-      }
-    } catch (e, st) {
-      debugPrint('browserScreenshot error: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('浏览器截图失败: $e')));
-      }
-    }
   }
 
   String _detectMimeType(List<int> bytes) {
@@ -5749,38 +5866,17 @@ class _InputBarState extends State<_InputBar> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Mode config button (leftmost)
-              if (widget.agent != null)
-                _buildModeButton(context),
-              // Image button (left of text field)
+              // Mode config button moved out of the composer row and into the
+              // screen's AppBar actions slot (see [BypassIndicator]); the
+              // composer now only carries the input + send affordances.
+              // Consolidated "+" button: opens modal sheet with image + special-keys.
               if (!isReadOnly &&
                   widget.agent?.provider != 'opencode' &&
                   widget.agent?.attachMode != 'tmux')
-                IconButton(
-                  onPressed: effectiveLoading ? null : _pickImage,
-                  icon: const Icon(Icons.image, size: 20),
-                  tooltip: '添加图片',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 32,
-                    minHeight: 32,
-                  ),
-                  padding: EdgeInsets.zero,
-                ),
-              // Browser screenshot button
-              if (!isReadOnly &&
-                  widget.agent?.provider != 'opencode' &&
-                  widget.agent?.attachMode != 'tmux')
-                IconButton(
-                  onPressed: effectiveLoading ? null : _takeBrowserScreenshot,
-                  icon: const Icon(Icons.web, size: 20),
-                  tooltip: '浏览器截图',
-                  visualDensity: VisualDensity.compact,
-                  constraints: const BoxConstraints(
-                    minWidth: 32,
-                    minHeight: 32,
-                  ),
-                  padding: EdgeInsets.zero,
+                ComposerPlusButton(
+                  onPickImage: effectiveLoading ? null : _pickImage,
+                  onShowSpecialKeys:
+                      isReadOnly ? null : () => _showSpecialKeysSheet(context),
                 ),
               Expanded(
                 child: TextField(
@@ -5789,11 +5885,24 @@ class _InputBarState extends State<_InputBar> {
                   decoration: InputDecoration(
                     hintText: readOnlyHint,
                     border: const OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(24)),
+                      borderRadius: BorderRadius.all(Radius.circular(10)),
+                    ),
+                    prefixIcon: Padding(
+                      padding: const EdgeInsets.only(left: 12, right: 8),
+                      child: Text(
+                        '▸',
+                        style: AppTextStyles.monoLarge.copyWith(
+                          color: AppColors.accent,
+                        ),
+                      ),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(
+                      minWidth: 28,
+                      minHeight: 0,
                     ),
                     contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
+                      horizontal: 12,
+                      vertical: 8,
                     ),
                     isDense: true,
                   ),
@@ -5809,123 +5918,6 @@ class _InputBarState extends State<_InputBar> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  IconButton(
-                    onPressed: isReadOnly
-                        ? null
-                        : () {
-                            // Show special keys bottom sheet
-                            showModalBottomSheet(
-                              context: context,
-                              builder: (ctx) => Container(
-                                padding: const EdgeInsets.all(16),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      '特殊按键',
-                                      style: AppTextStyles.bodyLarge.copyWith(
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                    const SizedBox(height: AppSpacing.lg),
-                                    Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        ActionChip(
-                                          label: const Text('ESC'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('esc');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Ctrl+C'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('ctrl_c');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Ctrl+D'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('ctrl_d');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Ctrl+Z'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('ctrl_z');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Ctrl+A'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('ctrl_a');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Ctrl+E'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('ctrl_e');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('Tab'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('tab');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('↑'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('up');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('↓'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('down');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('←'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('left');
-                                          },
-                                        ),
-                                        ActionChip(
-                                          label: const Text('→'),
-                                          onPressed: () {
-                                            Navigator.pop(ctx);
-                                            widget.onKey?.call('right');
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            );
-                          },
-                    icon: const Icon(Icons.keyboard_hide, size: 20),
-                    tooltip: '特殊按键',
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(
-                      minWidth: 32,
-                      minHeight: 32,
-                    ),
-                    padding: EdgeInsets.zero,
-                  ),
-                  const SizedBox(width: 4),
                   effectiveLoading
                       ? const SizedBox(
                           width: 32,
