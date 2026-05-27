@@ -3,15 +3,22 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/message_model.dart';
 import '../services/ws_client.dart';
 
-/// Key: (nodeId, agentId)
-typedef ConversationKey = (String, String);
+/// Key: (nodeId, agentId, sessionId)
+///
+/// The three-tuple cache key — adding `sessionId` is the frontend half of the
+/// hotfix for the "messages disappear after a Hermes /clear-style session
+/// switch" bug. Backend `conversation.message` broadcasts now carry
+/// `sessionId`; the frontend routes events into the matching bucket so old
+/// session caches stay isolated from the new session and don't bleed into the
+/// rendered transcript after the resume session id rotates.
+typedef ConversationKey = (String, String, String);
 
 class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<MessageModel>>> {
   ConversationNotifier() : super(const {});
 
   /// Load history from [conversation.history] response.
-  void loadHistory(String nodeId, String agentId, List<dynamic> rawMessages) {
-    final key = (nodeId, agentId);
+  void loadHistory(String nodeId, String agentId, String sessionId, List<dynamic> rawMessages) {
+    final key = (nodeId, agentId, sessionId);
     final messages = rawMessages
         .map((m) => MessageModel.fromJson(m as Map<String, dynamic>))
         .toList()
@@ -19,8 +26,8 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: messages};
   }
 
-  void mergeHistory(String nodeId, String agentId, List<dynamic> rawMessages) {
-    final key = (nodeId, agentId);
+  void mergeHistory(String nodeId, String agentId, String sessionId, List<dynamic> rawMessages) {
+    final key = (nodeId, agentId, sessionId);
     final merged = <int, MessageModel>{
       for (final message in state[key] ?? const <MessageModel>[]) message.seq: message,
     };
@@ -54,13 +61,18 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
   }
 
   /// Handle push events: [conversation.message], [conversation.message_update], and [conversation.cleared].
+  ///
+  /// Routes by `(nodeId, agentId, sessionId)` extracted from `event.params`.
+  /// The backend now stamps `sessionId` on every conversation.* broadcast,
+  /// so events targeted at an old session id never collide with the live one.
   void handleEvent(WsMessage event) {
     if (event.method == 'conversation.cleared') {
       final params = event.params as Map<String, dynamic>?;
       if (params != null) {
         final nodeId = params['nodeId'] as String? ?? '';
         final agentId = params['agentId'] as String? ?? '';
-        clear(nodeId, agentId);
+        final sessionId = params['sessionId'] as String? ?? '';
+        clear(nodeId, agentId, sessionId);
       }
       return;
     }
@@ -72,7 +84,8 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
-    final key = (nodeId, agentId);
+    final sessionId = params['sessionId'] as String? ?? '';
+    final key = (nodeId, agentId, sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
     final role = (params['role'] as String?) == 'user' ? MessageRole.user : MessageRole.assistant;
     final text = params['text'] as String? ?? '';
@@ -87,6 +100,7 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
         existing[existing.length - 1] = MessageModel(
           nodeId: nodeId,
           agentId: agentId,
+          sessionId: sessionId,
           role: role,
           text: last.text + text,
           seq: last.seq,
@@ -103,6 +117,7 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
         existing[existing.length - 1] = MessageModel(
           nodeId: nodeId,
           agentId: agentId,
+          sessionId: sessionId,
           role: role,
           text: text,
           seq: last.seq,
@@ -117,6 +132,7 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final msg = MessageModel(
       nodeId: nodeId,
       agentId: agentId,
+      sessionId: sessionId,
       role: role,
       text: text,
       seq: seq,
@@ -129,10 +145,11 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
+    final sessionId = params['sessionId'] as String? ?? '';
     final msgId = params['msg_id'] as String? ?? '';
     final newText = params['text'] as String? ?? '';
     final newSeq = (params['seq'] as num?)?.toInt() ?? 0;
-    final key = (nodeId, agentId);
+    final key = (nodeId, agentId, sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
 
     // Find message by msg_id and update its text
@@ -151,7 +168,7 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
   }
 
   void _appendMessage(MessageModel msg) {
-    final key = (msg.nodeId, msg.agentId);
+    final key = (msg.nodeId, msg.agentId, msg.sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
     // Deduplicate by seq
     if (existing.any((m) => m.seq == msg.seq)) return;
@@ -160,11 +177,11 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: existing};
   }
 
-  List<MessageModel> messagesFor(String nodeId, String agentId) =>
-      state[(nodeId, agentId)] ?? [];
+  List<MessageModel> messagesFor(String nodeId, String agentId, String sessionId) =>
+      state[(nodeId, agentId, sessionId)] ?? [];
 
-  void clear(String nodeId, String agentId) {
-    final key = (nodeId, agentId);
+  void clear(String nodeId, String agentId, String sessionId) {
+    final key = (nodeId, agentId, sessionId);
     if (!state.containsKey(key)) return;
     state = {...state}..remove(key);
   }

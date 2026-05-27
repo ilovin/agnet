@@ -569,6 +569,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         'limit': 12,
       }, timeout: const Duration(seconds: 3));
       final raw = result is Map ? result : <String, dynamic>{};
+      // Resolve sessionId for the three-key cache: prefer the response's
+      // sessionId (matches the events we just fetched), fall back to the
+      // agent's current resume session in the local store.
+      final responseSessionId = (raw['sessionId'] as String?) ?? '';
+      final agent = ref
+          .read(nodesProvider)
+          .agentsFor(nodeId)
+          .where((a) => a.id == agentId)
+          .firstOrNull;
+      final sessionId =
+          responseSessionId.isNotEmpty ? responseSessionId : (agent?.sessionId ?? '');
       final events = ((raw['events'] as List?) ?? const [])
           .map((e) => normalizeHistoryEvent(e as Map))
           .toList();
@@ -581,11 +592,13 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       notifier.mergeHistory(
         nodeId,
         agentId,
+        sessionId,
         messages.map((m) {
           final role = m.role == 'user' ? 'user' : 'assistant';
           return {
             'nodeId': nodeId,
             'agentId': agentId,
+            'sessionId': sessionId,
             'role': role,
             'text': m.text,
             'seq': m.seq,
@@ -1282,7 +1295,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                               target: target,
                               messages:
                                   ref.watch(conversationProvider)[
-                                      (target.nodeId, target.agent.id)] ??
+                                      (target.nodeId, target.agent.id, target.agent.sessionId ?? '')] ??
                                   const [],
                               controller: _canvasControllerFor(panelKey),
                               sending: _canvasSending[panelKey] ?? false,
@@ -3155,7 +3168,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final displayTitle = _agentDisplayTitle(agent);
     final previewLines = widget.showPreview
         ? sessionPreviewLinesFromMessages(
-            ref.watch(conversationProvider)[(widget.nodeId, agent.id)] ??
+            ref.watch(conversationProvider)[(widget.nodeId, agent.id, agent.sessionId ?? '')] ??
                 const [],
           )
         : const <String>[];

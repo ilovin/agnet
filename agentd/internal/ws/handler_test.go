@@ -414,3 +414,156 @@ func TestConversationClearedBroadcastIncludesSessionID(t *testing.T) {
 		return
 	}
 }
+
+// TestUserMessageBroadcastIncludesNodeIDAndSessionID verifies the canonical
+// broadcastData built for the four conversation.send code paths (tmux PTY /
+// generic PTY / claude restart / fresh claude start) carries both the
+// nodeId and the agent's current resume sessionId. This is the agentd half
+// of the hotfix for the "messages disappear after a Hermes /clear" bug:
+// the Flutter app keys its conversation cache on (nodeId, agentId, sessionId)
+// so omitting either field causes pushed messages to land in the wrong
+// cache bucket and never render.
+func TestUserMessageBroadcastIncludesNodeIDAndSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	const wantSession = "session-msg-123"
+	if err := mgr.UpdateResumeSessionID(ag.ID, wantSession); err != nil {
+		t.Fatalf("UpdateResumeSessionID: %v", err)
+	}
+
+	const wantNode = "testnode"
+	srv := New(mgr, "testtoken", wantNode)
+	h := &handler{server: srv, service: NewAgentService()}
+
+	// Single canonical builder must be used by every conversation.send path so
+	// no path can drift away from including (nodeId, sessionId, seq).
+	data := h.buildUserMessageBroadcast(ag, "hello", []string{"/tmp/a.png"}, 1, 42)
+
+	if got, _ := data["nodeId"].(string); got != wantNode {
+		t.Fatalf("broadcast nodeId = %q, want %q", got, wantNode)
+	}
+	if got, _ := data["sessionId"].(string); got != wantSession {
+		t.Fatalf("broadcast sessionId = %q, want %q", got, wantSession)
+	}
+	if got, _ := data["agentId"].(string); got != ag.ID {
+		t.Fatalf("broadcast agentId = %q, want %q", got, ag.ID)
+	}
+	if got, _ := data["role"].(string); got != "user" {
+		t.Fatalf("broadcast role = %q, want %q", got, "user")
+	}
+	if got, _ := data["text"].(string); got != "hello" {
+		t.Fatalf("broadcast text = %q, want %q", got, "hello")
+	}
+	if got, _ := data["imageCount"].(int); got != 1 {
+		t.Fatalf("broadcast imageCount = %v, want 1", data["imageCount"])
+	}
+	imgs, ok := data["images"].([]string)
+	if !ok || len(imgs) != 1 || imgs[0] != "/tmp/a.png" {
+		t.Fatalf("broadcast images = %v, want [/tmp/a.png]", data["images"])
+	}
+	if _, hasTs := data["timestamp"]; !hasTs {
+		t.Fatalf("broadcast missing timestamp: %v", data)
+	}
+	if got, _ := data["seq"].(uint64); got != 42 {
+		t.Fatalf("broadcast seq = %v, want 42", data["seq"])
+	}
+}
+
+// TestUserMessageBroadcastOmitsImagesWhenEmpty ensures the canonical
+// builder does not put a stale "images" entry on the broadcast when no
+// images were attached (the original 4 paths only set the key when
+// imagePaths was non-empty; we keep that contract).
+func TestUserMessageBroadcastOmitsImagesWhenEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	srv := New(mgr, "testtoken", "n1")
+	h := &handler{server: srv, service: NewAgentService()}
+
+	data := h.buildUserMessageBroadcast(ag, "ping", nil, 0, 7)
+
+	if _, has := data["images"]; has {
+		t.Fatalf("broadcast should omit images when none were attached, got %v", data["images"])
+	}
+	if got, _ := data["nodeId"].(string); got != "n1" {
+		t.Fatalf("nodeId = %q, want n1", got)
+	}
+	if got, _ := data["seq"].(uint64); got != 7 {
+		t.Fatalf("seq = %v, want 7", data["seq"])
+	}
+}
+
+// TestUserMessageBroadcastOmitsSeqWhenZero ensures the canonical builder does
+// not emit a placeholder zero seq — the frontend dedups by seq, and a stream
+// of 0-seq broadcasts would collide.
+func TestUserMessageBroadcastOmitsSeqWhenZero(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	srv := New(mgr, "testtoken", "n1")
+	h := &handler{server: srv, service: NewAgentService()}
+
+	data := h.buildUserMessageBroadcast(ag, "ping", nil, 0, 0)
+	if _, has := data["seq"]; has {
+		t.Fatalf("broadcast should omit seq when zero, got %v", data["seq"])
+	}
+}

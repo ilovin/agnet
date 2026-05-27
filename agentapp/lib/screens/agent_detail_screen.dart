@@ -1260,6 +1260,19 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   String get _cacheKey => '${widget.nodeId}:${widget.agentId}';
 
+  /// Looks up the current resume sessionId for this agent from nodesProvider.
+  /// Empty string when the agent isn't yet in the node store.
+  ///
+  /// Used as the third dimension of the conversationProvider cache key
+  /// (`(nodeId, agentId, sessionId)`), so messages from a stale session
+  /// never bleed into the live transcript after a /clear-style switch.
+  String _currentSessionId() {
+    final nodeState = ref.read(nodesProvider);
+    final agents = nodeState.agentsFor(widget.nodeId);
+    final agent = agents.where((a) => a.id == widget.agentId).firstOrNull;
+    return agent?.sessionId ?? '';
+  }
+
   /// Rebuilds cached message processing results from _rawEvents.
   /// Must be called after any mutation to _rawEvents (inside setState is fine).
   void _rebuildMessageCache() {
@@ -1285,6 +1298,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     if (params == null) return;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
+    final sessionId = params['sessionId'] as String? ?? '';
     if (nodeId != widget.nodeId || agentId != widget.agentId) return;
     setState(() {
       _rawEvents = [];
@@ -1295,7 +1309,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _rebuildMessageCache();
     });
     _touchMessageCache(cachedEvents: []);
-    ref.read(conversationProvider.notifier).clear(nodeId, agentId);
+    ref.read(conversationProvider.notifier).clear(nodeId, agentId, sessionId);
     ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId);
   }
 
@@ -1347,6 +1361,12 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _isLoadingFreshData = true;
     });
 
+    // Capture the resume sessionId at request time. If the agent's session
+    // rotates (e.g. Hermes /clear) before the RPC returns, we drop the stale
+    // response so it can't overwrite the live transcript with old-session
+    // messages. Mid-fetch race protection per #57+TaskC hotfix.
+    final expectedSessionId = _currentSessionId();
+
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -1354,6 +1374,22 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'limit': _pageSize,
       }, timeout: const Duration(seconds: 5));
       final raw = result is Map ? result : <String, dynamic>{};
+      // Drop stale responses where the agent's session has rotated underneath us.
+      final responseSessionId = (raw['sessionId'] as String?) ?? '';
+      final liveSessionId = _currentSessionId();
+      if (expectedSessionId.isNotEmpty &&
+          responseSessionId.isNotEmpty &&
+          responseSessionId != expectedSessionId &&
+          responseSessionId != liveSessionId) {
+        debugPrint(
+            'loadHistory: dropping stale response (response=$responseSessionId expected=$expectedSessionId live=$liveSessionId)');
+        if (mounted) {
+          setState(() {
+            _isLoadingFreshData = false;
+          });
+        }
+        return;
+      }
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final firstSeqFromResp = (raw['firstSeq'] as num?)?.toInt() ?? 0;
@@ -1393,14 +1429,20 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           convertEventsToMessages(previewEvents),
         ).where((m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall).toList();
         if (previewMessages.isNotEmpty) {
+          // Use the live session id (or the expected one if the live lookup
+          // hasn't refreshed yet) so the preview lands in the matching bucket.
+          final previewSessionId =
+              _currentSessionId().isNotEmpty ? _currentSessionId() : expectedSessionId;
           ref.read(conversationProvider.notifier).mergeHistory(
             widget.nodeId,
             widget.agentId,
+            previewSessionId,
             previewMessages.map((m) {
               final role = m.role == 'user' ? 'user' : 'assistant';
               return {
                 'nodeId': widget.nodeId,
                 'agentId': widget.agentId,
+                'sessionId': previewSessionId,
                 'role': role,
                 'text': m.text,
                 'seq': m.seq,
