@@ -2053,6 +2053,16 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 		// Reset the in-memory EventBuf so new-session events start from seq=0,
 		ag.EventBuf().Reset()
+		// Wipe the persisted store too: a same-PID session-id change means
+		// the previously recorded events came from a different conversation
+		// (typically the wrong jsonl that was attached to during a flaky
+		// scanner discovery). Keeping them would surface stale messages from
+		// the old session in the dashboard alongside the live ones. The
+		// history-load step in the caller repopulates from the new jsonl
+		// immediately after this function returns.
+		if err := m.ClearConversationEvents(ag.ID); err != nil {
+			log.Printf("[Attach] Warning: failed to clear persisted events for %s on session switch: %v", ag.ID, err)
+		}
 		currentName := ag.Name
 		currentPID := ag.PID
 		currentSessionID, _ := m.GetResumeSessionID(ag.ID)
