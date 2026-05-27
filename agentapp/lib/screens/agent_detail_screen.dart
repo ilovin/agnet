@@ -5002,21 +5002,21 @@ class _KeyButton extends StatelessWidget {
 String keyToDisplay(String key) {
   switch (key.toLowerCase()) {
     case 'up':
-      return '↑';
+      return 'Up';
     case 'down':
-      return '↓';
+      return 'Down';
     case 'left':
-      return '←';
+      return 'Left';
     case 'right':
-      return '→';
+      return 'Right';
     case 'enter':
-      return '⏎';
+      return 'Enter';
     case 'esc':
       return 'ESC';
     case 'tab':
       return 'TAB';
     case 'backspace':
-      return '⌫';
+      return 'Backspace';
     case 'ctrl_c':
       return 'Ctrl+C';
     case 'ctrl_d':
