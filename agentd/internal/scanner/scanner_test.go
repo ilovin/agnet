@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -172,6 +173,146 @@ func TestFinalizeProcessScanAddsLiveClaudeSessionInfo(t *testing.T) {
 	}
 	if got[0].SessionFile != sessionFile {
 		t.Fatalf("expected session file %q, got %q", sessionFile, got[0].SessionFile)
+	}
+}
+
+// TestFindClaudeSessionInfoPrefersClaudePIDSessionMap exercises the
+// `~/.claude/sessions/<PID>.json` ground truth that claude itself maintains.
+// This file is the only authoritative PID -> sessionId mapping on macOS where
+// task-fd discovery via lsof is unreliable (claude opens-writes-closes its
+// task files without keeping fds around). Without this hook the resolver falls
+// back to mtime + contentMatch, which can pick a stale jsonl with similar
+// content fingerprints and bounce between candidates between scans.
+func TestFindClaudeSessionInfoPrefersClaudePIDSessionMap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two candidate jsonls with similar mtimes. Without the pid map the resolver
+	// is forced to pick one heuristically; we want the truth file to win
+	// regardless of which heuristic would otherwise apply.
+	staleSession := "stale-content-match"
+	liveSession := "live-truth"
+	now := time.Now()
+	for i, sid := range []string{staleSession, liveSession} {
+		p := filepath.Join(projectDir, sid+".jsonl")
+		if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Make the stale file MORE RECENT so any mtime-based fallback would
+		// prefer it. The pid map must override this.
+		mt := now.Add(time.Duration(-i) * time.Second)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Write the authoritative pid -> sessionId map (mirrors what claude writes
+	// to ~/.claude/sessions/<PID>.json on every status update).
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownPID := os.Getpid()
+	pidMap := filepath.Join(sessionsDir, strconv.Itoa(ownPID)+".json")
+	pidMapBody := `{"pid":` + strconv.Itoa(ownPID) + `,"sessionId":"` + liveSession + `","cwd":"` + workDir + `","status":"busy"}`
+	if err := os.WriteFile(pidMap, []byte(pidMapBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, gotFile := findClaudeSessionInfo(ownPID, workDir, "")
+	if gotID != liveSession {
+		t.Fatalf("expected session id %q from pid map, got %q (resolver fell back to heuristic)", liveSession, gotID)
+	}
+	wantFile := filepath.Join(projectDir, liveSession+".jsonl")
+	if gotFile != wantFile {
+		t.Fatalf("expected session file %q, got %q", wantFile, gotFile)
+	}
+}
+
+// TestFindClaudeSessionInfoFallsBackWhenPIDMapAbsent ensures the new pid-map
+// step is purely additive: if the file is missing the resolver still works via
+// the existing task-fd / mtime / contentMatch chain.
+func TestFindClaudeSessionInfoFallsBackWhenPIDMapAbsent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sid := "only-session"
+	p := filepath.Join(projectDir, sid+".jsonl")
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, _ := findClaudeSessionInfo(os.Getpid(), workDir, "")
+	if gotID != sid {
+		t.Fatalf("expected fallback resolver to return %q, got %q", sid, gotID)
+	}
+}
+
+// TestFindClaudeSessionInfoIgnoresPIDMapForOtherPID guards against blindly
+// trusting any sessions/*.json file: the resolver must only honor the entry
+// keyed by the requested PID. Otherwise a stale entry from a long-dead process
+// could leak into another agent's lookup.
+func TestFindClaudeSessionInfoIgnoresPIDMapForOtherPID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	realSession := "real-session"
+	p := filepath.Join(projectDir, realSession+".jsonl")
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Map for an unrelated PID should be ignored.
+	otherPID := os.Getpid() + 1
+	otherFile := filepath.Join(sessionsDir, strconv.Itoa(otherPID)+".json")
+	body := `{"pid":` + strconv.Itoa(otherPID) + `,"sessionId":"some-other-session"}`
+	if err := os.WriteFile(otherFile, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gotID, _ := findClaudeSessionInfo(os.Getpid(), workDir, "")
+	if gotID != realSession {
+		t.Fatalf("expected fallback to %q (ignoring other-pid map), got %q", realSession, gotID)
 	}
 }
 
