@@ -135,8 +135,8 @@ void main() {
       expect(hairlineAlpha, greaterThan(0.0));
     });
 
-    test('accent is signal orange', () {
-      expect(AppColors.accent, const Color(0xFFFF6B35));
+    test('accent is signal blue', () {
+      expect(AppColors.accent, const Color(0xFF5B9DB8));
     });
 
     test('ink is near-black with cool tint', () {

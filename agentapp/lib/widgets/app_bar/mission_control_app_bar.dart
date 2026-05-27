@@ -27,6 +27,7 @@ class MissionControlAppBar extends StatelessWidget
     this.toolbarHeight = 56,
     this.showScanningLine = true,
     this.showWordmark = true,
+    this.markWidget,
   });
 
   /// Optional sub-title shown next to the brand wordmark.
@@ -54,6 +55,12 @@ class MissionControlAppBar extends StatelessWidget
   /// Whether to render the brand wordmark (phone-talk logo). Disable for
   /// nested or modal screens where the brand would be redundant.
   final bool showWordmark;
+
+  /// Custom widget to render in the wordmark "mark" slot, replacing the
+  /// default [MissionControlMark]. Set on the dashboard to host the
+  /// live connection-status indicator. When null, the geometric brand
+  /// mark is used.
+  final Widget? markWidget;
 
   @override
   Size get preferredSize {
@@ -90,7 +97,7 @@ class MissionControlAppBar extends StatelessWidget
                       const SizedBox(width: 4),
                     ],
                     if (showWordmark) ...[
-                      const MissionControlMark(size: 22),
+                      markWidget ?? const MissionControlMark(size: 22),
                       const SizedBox(width: 8),
                       Text('phone-talk', style: wordmarkStyle),
                       const SizedBox(width: 12),

@@ -13,7 +13,7 @@ import 'density_mode.dart';
 /// `google_fonts` source is referenced.
 ///
 /// The "mission control" palette is applied to both [Brightness] modes:
-/// signal orange (`AppColors.accent`) is the [ColorScheme.primary] in
+/// signal blue (`AppColors.accent`) is the [ColorScheme.primary] in
 /// either mode; only the surface family changes (warm off-white in
 /// light mode, ink near-black in dark mode).
 class AppTheme {
@@ -100,7 +100,7 @@ class AppTheme {
       return const ColorScheme(
         brightness: Brightness.dark,
         primary: AppColors.accent,
-        onPrimary: Color(0xFF1A0E07),
+        onPrimary: Color(0xFF06141B),
         secondary: AppColors.data,
         onSecondary: Color(0xFF003733),
         tertiary: AppColors.warn,

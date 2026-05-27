@@ -51,5 +51,36 @@ void main() {
         lessThan(0),
       );
     });
+
+    test('every TextStyle declares fontFamilyFallback covering symbol set', () {
+      // Glyphs like ←→↑↓↵⌫ are missing from JetBrainsMono and Source Han
+      // Sans CN. The shared fallback chain MUST include 'Noto Sans Symbols 2'
+      // so the special-keys panel does not render tofu.
+      const styles = <TextStyle>[
+        AppTextStyles.displayLarge,
+        AppTextStyles.titleLarge,
+        AppTextStyles.titleMedium,
+        AppTextStyles.bodyLarge,
+        AppTextStyles.bodyMedium,
+        AppTextStyles.bodySmall,
+        AppTextStyles.labelSmall,
+        AppTextStyles.caption,
+        AppTextStyles.mono,
+        AppTextStyles.monoLarge,
+      ];
+      for (final s in styles) {
+        expect(
+          s.fontFamilyFallback,
+          isNotNull,
+          reason: 'fontFamilyFallback missing on a TextStyle (${s.fontFamily})',
+        );
+        expect(
+          s.fontFamilyFallback!.contains('Noto Sans Symbols 2'),
+          isTrue,
+          reason:
+              'fallback for ${s.fontFamily} must include Noto Sans Symbols 2',
+        );
+      }
+    });
   });
 }

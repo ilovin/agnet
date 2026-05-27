@@ -88,3 +88,14 @@ class ConnectionNotifier extends StateNotifier<WsClient?> {
 final connectionProvider = StateNotifierProvider<ConnectionNotifier, WsClient?>(
   (ref) => ConnectionNotifier(ref.watch(connectionStoreProvider)),
 );
+
+/// Streams the current [WsConnectionState] from the active
+/// [ConnectionNotifier]. Initial value comes from the notifier's snapshot;
+/// subsequent changes are pushed via the broadcast stream so widgets can
+/// rebuild reactively (e.g. the AppBar connection-status indicator).
+final connectionStateProvider =
+    StreamProvider<WsConnectionState>((ref) async* {
+  final notifier = ref.watch(connectionProvider.notifier);
+  yield notifier.connectionState;
+  yield* notifier.onStateChanged;
+});

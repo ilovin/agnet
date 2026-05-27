@@ -10,7 +10,7 @@ import 'package:flutter/material.dart';
 /// - [ink]        — primary dark surface (a near-black with cool tint).
 /// - [inkElev]    — slightly elevated dark surface (cards, sheets).
 /// - [surface]    — light-mode background, warm off-white.
-/// - [accent]     — signal orange. Used for CTAs, running state, hairlines.
+/// - [accent]     — signal blue (station-radio tone). Used for CTAs, running state, hairlines.
 /// - [data]       — secondary data colour (cyan/teal).
 /// - [warn]       — non-fatal warning amber.
 /// - [error]      — fatal / error red.
@@ -27,8 +27,8 @@ class AppColors {
   /// Light-mode background, warm off-white (米白偏暖).
   static const Color surface = Color(0xFFFAFAF7);
 
-  /// Signal orange. Used for CTAs, running state, accent strokes.
-  static const Color accent = Color(0xFFFF6B35);
+  /// Signal blue (哨所电台). Used for CTAs, running state, accent strokes.
+  static const Color accent = Color(0xFF5B9DB8);
 
   /// Secondary data accent (teal/cyan). Pairs with [accent].
   static const Color data = Color(0xFF4ECDC4);
@@ -43,5 +43,5 @@ class AppColors {
   ///
   /// Use this for 1px borders / dividers that should read as part of the
   /// mission-control accent system rather than a neutral grey.
-  static const Color hairline = Color(0x1FFF6B35); // alpha 0x1F ~= 12%
+  static const Color hairline = Color(0x1F5B9DB8); // alpha 0x1F ~= 12%
 }

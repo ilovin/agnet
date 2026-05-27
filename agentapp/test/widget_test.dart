@@ -1032,9 +1032,9 @@ void main() {
     expect(find.text('活跃 1'), findsNothing);
   });
 
-  testWidgets('NodeCard shows summary chips when showDetails is true on large screen', (
-    WidgetTester tester,
-  ) async {
+  testWidgets(
+      'NodeCard never renders summary chips (legacy "会话 N" / "活跃 N" removed)',
+      (WidgetTester tester) async {
     await pumpNodeCard(
       tester,
       const NodeModel(
@@ -1063,8 +1063,8 @@ void main() {
       showDetails: true,
     );
 
-    expect(find.text('会话 1'), findsOneWidget);
-    expect(find.text('活跃 1'), findsOneWidget);
+    expect(find.text('会话 1'), findsNothing);
+    expect(find.text('活跃 1'), findsNothing);
   });
 
   testWidgets('AgentRow hides meta badges when showDetails is false on large screen', (
@@ -1218,7 +1218,9 @@ void main() {
       ],
     );
 
-    // Initially collapsed: no summary chips, no HealthIndicator
+    // Initially collapsed: no summary chips (legacy "会话 N" was removed
+    // entirely — see _buildSummaryChips in dashboard_screen.dart), no
+    // HealthIndicator.
     expect(find.text('会话 1'), findsNothing);
     expect(find.byKey(const Key('healthIndicator')), findsNothing);
     expect(find.byIcon(Icons.expand_more), findsOneWidget);
@@ -1229,8 +1231,8 @@ void main() {
 
     expect(find.byIcon(Icons.expand_less), findsOneWidget);
 
-    // Expanded: summary chips should appear
-    expect(find.text('会话 1'), findsOneWidget);
+    // Expanded: chips were removed for good — they should still NOT appear.
+    expect(find.text('会话 1'), findsNothing);
 
     // HealthIndicator renders when expanded
     expect(find.byKey(const Key('healthIndicator')), findsOneWidget);

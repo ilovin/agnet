@@ -25,9 +25,24 @@ class AppTextStyles {
   /// Monospace data-column typography.
   static const String monoFontFamily = 'JetBrainsMono';
 
+  /// Shared fallback chain applied to *every* explicit TextStyle here so that
+  /// glyphs missing from the primary family (e.g. ←→↵⌫ on JetBrainsMono, or
+  /// emoji on Source Han Sans CN) still resolve. When a TextStyle sets
+  /// `fontFamily` without `fontFamilyFallback`, Flutter does **not** inherit
+  /// `ThemeData.fontFamilyFallback`, so we must repeat the chain here.
+  static const List<String> fontFamilyFallback = <String>[
+    'Noto Sans SC',
+    'Noto Sans Symbols 2',
+    'Noto Color Emoji',
+    'PingFang SC',
+    'Microsoft YaHei',
+    'sans-serif',
+  ];
+
   // ── Display (Source Han Sans CN Heavy) ───────────────────────────────
   static const TextStyle displayLarge = TextStyle(
     fontFamily: displayFontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 28,
     fontWeight: FontWeight.w900,
     height: 1.2,
@@ -37,6 +52,7 @@ class AppTextStyles {
   // ── Titles ───────────────────────────────────────────────────────────
   static const TextStyle titleLarge = TextStyle(
     fontFamily: displayFontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 24,
     fontWeight: FontWeight.w900,
     height: 1.25,
@@ -45,6 +61,7 @@ class AppTextStyles {
 
   static const TextStyle titleMedium = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 20,
     fontWeight: FontWeight.w500,
     height: 1.3,
@@ -53,6 +70,7 @@ class AppTextStyles {
   // ── Body (Noto Sans SC) ──────────────────────────────────────────────
   static const TextStyle bodyLarge = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 18,
     fontWeight: FontWeight.w400,
     height: 1.4,
@@ -60,6 +78,7 @@ class AppTextStyles {
 
   static const TextStyle bodyMedium = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 16,
     fontWeight: FontWeight.w400,
     height: 1.4,
@@ -67,6 +86,7 @@ class AppTextStyles {
 
   static const TextStyle bodySmall = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 14,
     fontWeight: FontWeight.w400,
     height: 1.4,
@@ -75,6 +95,7 @@ class AppTextStyles {
   // ── Labels / captions ────────────────────────────────────────────────
   static const TextStyle labelSmall = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 13,
     fontWeight: FontWeight.w500,
     height: 1.3,
@@ -82,6 +103,7 @@ class AppTextStyles {
 
   static const TextStyle caption = TextStyle(
     fontFamily: fontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 12,
     fontWeight: FontWeight.w400,
     height: 1.3,
@@ -91,6 +113,7 @@ class AppTextStyles {
   /// Default mono style — for inline PIDs, sessionIds, timestamps, ports.
   static const TextStyle mono = TextStyle(
     fontFamily: monoFontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 13,
     fontWeight: FontWeight.w400,
     height: 1.35,
@@ -99,6 +122,7 @@ class AppTextStyles {
   /// Larger mono variant for prominent data displays (file paths, code).
   static const TextStyle monoLarge = TextStyle(
     fontFamily: monoFontFamily,
+    fontFamilyFallback: fontFamilyFallback,
     fontSize: 14,
     fontWeight: FontWeight.w400,
     height: 1.4,
