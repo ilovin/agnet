@@ -3,6 +3,7 @@ package watcher
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -836,5 +837,127 @@ func TestParseLineMixedContentWithToolResultAndText(t *testing.T) {
 	}
 	if ev.Text != "hello world" {
 		t.Fatalf("expected text 'hello world', got %q", ev.Text)
+	}
+}
+
+// TestClaudeWatcherRefreshHonoursPIDSessionMap pins down the worst observed
+// real-world failure: an attached watcher gets stuck on a stale jsonl after
+// agentd restart picks the wrong file (e.g. via a flaky content match), the
+// PID is alive, and the watcher's "stale file but PID alive → leave it alone"
+// guard prevents recovery. The pid map written by claude itself is the only
+// signal that breaks this deadlock, so refreshSessionFile must consult it
+// before that guard.
+func TestClaudeWatcherRefreshHonoursPIDSessionMap(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "tasks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale jsonl: the watcher's current binding. Several days old to ensure
+	// the "fresh enough to keep" branch in refreshSessionFile cannot save it.
+	stale := filepath.Join(projectDir, "stale.jsonl")
+	if err := os.WriteFile(stale, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleTime := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(stale, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live jsonl: where claude has actually been writing.
+	live := filepath.Join(projectDir, "live.jsonl")
+	if err := os.WriteFile(live, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Authoritative pid map written by claude.
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	pidMap := filepath.Join(sessionsDir, strconv.Itoa(pid)+".json")
+	body := `{"pid":` + strconv.Itoa(pid) + `,"sessionId":"live","cwd":"` + workDir + `","status":"busy"}`
+	if err := os.WriteFile(pidMap, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var switched string
+	w := NewClaudeWatcher(stale, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(pid)
+	w.OnSessionSwitch(func(newPath string) { switched = newPath })
+
+	// Force the rate limiter to allow this call.
+	w.lastRefreshAt = time.Time{}
+	w.refreshSessionFile()
+
+	if w.path != live {
+		t.Fatalf("expected watcher to follow pid map to %s, got %s", live, w.path)
+	}
+	if switched != live {
+		t.Fatalf("expected onSwitch callback fired with %s, got %q", live, switched)
+	}
+}
+
+// TestClaudeWatcherRefreshIgnoresPIDSessionMapForOtherPID guards against
+// trusting any pid map file we encounter — only the entry keyed by our pid
+// should be honoured.
+func TestClaudeWatcherRefreshIgnoresPIDSessionMapForOtherPID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(workDir))
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bound := filepath.Join(projectDir, "bound.jsonl")
+	if err := os.WriteFile(bound, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(bound, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	other := filepath.Join(projectDir, "other.jsonl")
+	if err := os.WriteFile(other, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionsDir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherPID := os.Getpid() + 1
+	pidMap := filepath.Join(sessionsDir, strconv.Itoa(otherPID)+".json")
+	body := `{"pid":` + strconv.Itoa(otherPID) + `,"sessionId":"other"}`
+	if err := os.WriteFile(pidMap, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w := NewClaudeWatcher(bound, func(ConversationEvent) {})
+	w.SetWorkDir(workDir)
+	w.SetPID(os.Getpid())
+	w.lastRefreshAt = time.Time{}
+	w.refreshSessionFile()
+
+	if w.path != bound {
+		t.Fatalf("expected watcher to stay on %s, got %s", bound, w.path)
 	}
 }

@@ -254,14 +254,21 @@ func TestAttachSamePIDSwitchesSessionAndClearsHistory(t *testing.T) {
 	if events := rebound.EventBuf().Since(0); len(events) != 0 {
 		t.Fatalf("expected cleared live history, got %d events", len(events))
 	}
-	// Persisted history should survive session rebind so the dashboard can
-	// reload previous conversation from SQLite.
+	// Persisted history must NOT survive a same-PID session switch: when the
+	// scanner finds the same PID bound to a new session id, the previously
+	// recorded events came from a different conversation (typically the wrong
+	// jsonl that was attached to during a flaky discovery). Keeping them
+	// causes the app to display stale messages from the old session along
+	// with the new one. The session-switch path is the right moment to wipe
+	// them — load_history below repopulates from the new jsonl.
 	persisted, err := m.LoadPersistedEventsLatest(ag.ID, 10)
 	if err != nil {
 		t.Fatalf("LoadPersistedEventsLatest failed: %v", err)
 	}
-	if len(persisted) == 0 {
-		t.Fatalf("expected persisted history to survive rebind, got 0 events")
+	for _, ev := range persisted {
+		if text, _ := ev.Data["text"].(string); text == "stale" {
+			t.Fatalf("expected persisted history from old session to be cleared, but found stale event with text=%q", text)
+		}
 	}
 }
 

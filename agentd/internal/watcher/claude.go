@@ -182,6 +182,19 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	tasksDir := filepath.Join(home, ".claude", "tasks")
 	projectDir := filepath.Join(home, ".claude", "projects", projectDirName(w.workDir))
 
+	// Step 0: Authoritative PID -> sessionId map.
+	// Claude maintains ~/.claude/sessions/<PID>.json with the live sessionId
+	// while the process runs. This is the only signal that survives the
+	// "stale file but PID alive → leave it alone" guard further down: if the
+	// watcher got bound to the wrong jsonl at attach time (e.g. ContentMatch
+	// picked a same-project but unrelated session), the current binding never
+	// receives writes, yet the PID is alive, so without this short-circuit we
+	// would early-return forever. The pid map breaks the deadlock.
+	if newPath := w.pidMapSessionFile(home, projectDir); newPath != "" && newPath != w.path {
+		w.switchToFile(newPath)
+		return
+	}
+
 	// Step 1: Task fd discovery
 	var taskSessions []string
 	if w.findSessionIDsFromTasksFunc != nil {
@@ -325,6 +338,47 @@ func (w *ClaudeWatcher) refreshSessionFile() {
 	if len(candidates) > 0 && candidates[0].jsonlPath != w.path {
 		w.switchToFile(candidates[0].jsonlPath)
 	}
+}
+
+// pidMapSessionFile reads ~/.claude/sessions/<PID>.json (which claude itself
+// maintains while the process runs) and resolves its sessionId to a jsonl path
+// in projectDir. Returns "" when the file is absent, malformed, names a
+// different pid, has no sessionId, or points at a missing jsonl. Callers should
+// fall back to the existing heuristic chain on empty.
+//
+// This is the only signal reliable enough to break the "stale file but PID
+// alive" deadlock in refreshSessionFile: when the watcher got attached to the
+// wrong jsonl, the current binding never receives writes, yet the PID is
+// alive, so mtime/contentMatch heuristics early-return. claude rewrites the
+// pid map synchronously after every status change, so it always reflects the
+// truth.
+func (w *ClaudeWatcher) pidMapSessionFile(home, projectDir string) string {
+	if home == "" || w.pid <= 0 {
+		return ""
+	}
+	pidFile := filepath.Join(home, ".claude", "sessions", strconv.Itoa(w.pid)+".json")
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return ""
+	}
+	if info.SessionID == "" {
+		return ""
+	}
+	if info.PID != 0 && info.PID != w.pid {
+		return ""
+	}
+	candidate := filepath.Join(projectDir, info.SessionID+".jsonl")
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return ""
 }
 
 // findSessionIDsFromTasks returns session IDs found via task fd discovery for this watcher's PID.
