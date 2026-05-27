@@ -99,7 +99,7 @@ class MissionControlAppBar extends StatelessWidget
                     if (showWordmark) ...[
                       markWidget ?? const MissionControlMark(size: 22),
                       const SizedBox(width: 8),
-                      Text('phone-talk', style: wordmarkStyle),
+                      Text('Agent', style: wordmarkStyle),
                       const SizedBox(width: 12),
                     ],
                     if (titleWidget != null) ...[

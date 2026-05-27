@@ -1901,17 +1901,17 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                   label: 'Tab',
                   onTap: () => _sendKeyAndClose(ctx, 'tab'),
                 ),
-                _KeyChip(label: '↑', onTap: () => _sendKeyAndClose(ctx, 'up')),
+                _KeyChip(icon: Icons.arrow_upward, onTap: () => _sendKeyAndClose(ctx, 'up')),
                 _KeyChip(
-                  label: '↓',
+                  icon: Icons.arrow_downward,
                   onTap: () => _sendKeyAndClose(ctx, 'down'),
                 ),
                 _KeyChip(
-                  label: '←',
+                  icon: Icons.arrow_back,
                   onTap: () => _sendKeyAndClose(ctx, 'left'),
                 ),
                 _KeyChip(
-                  label: '→',
+                  icon: Icons.arrow_forward,
                   onTap: () => _sendKeyAndClose(ctx, 'right'),
                 ),
               ],
@@ -4908,12 +4908,18 @@ class _MarkdownContent extends ConsumerWidget {
 }
 
 class _KeyChip extends StatelessWidget {
-  final String label;
+  final String? label;
+  final IconData? icon;
   final VoidCallback onTap;
-  const _KeyChip({required this.label, required this.onTap});
+  const _KeyChip({this.label, this.icon, required this.onTap})
+      : assert(label != null || icon != null,
+            '_KeyChip requires either a label or an icon');
   @override
   Widget build(BuildContext context) {
-    return ActionChip(label: Text(label), onPressed: onTap);
+    final Widget child = icon != null
+        ? Icon(icon, size: 18, key: Key('keychip-${icon!.codePoint.toRadixString(16)}'))
+        : Text(label!);
+    return ActionChip(label: child, onPressed: onTap);
   }
 }
 
@@ -5473,28 +5479,32 @@ class _InputBarState extends State<_InputBar> {
                   },
                 ),
                 ActionChip(
-                  label: const Text('↑'),
+                  label: const Icon(Icons.arrow_upward, size: 18,
+                      key: Key('keychip-arrow_upward')),
                   onPressed: () {
                     Navigator.pop(ctx);
                     widget.onKey('up');
                   },
                 ),
                 ActionChip(
-                  label: const Text('↓'),
+                  label: const Icon(Icons.arrow_downward, size: 18,
+                      key: Key('keychip-arrow_downward')),
                   onPressed: () {
                     Navigator.pop(ctx);
                     widget.onKey('down');
                   },
                 ),
                 ActionChip(
-                  label: const Text('←'),
+                  label: const Icon(Icons.arrow_back, size: 18,
+                      key: Key('keychip-arrow_back')),
                   onPressed: () {
                     Navigator.pop(ctx);
                     widget.onKey('left');
                   },
                 ),
                 ActionChip(
-                  label: const Text('→'),
+                  label: const Icon(Icons.arrow_forward, size: 18,
+                      key: Key('keychip-arrow_forward')),
                   onPressed: () {
                     Navigator.pop(ctx);
                     widget.onKey('right');

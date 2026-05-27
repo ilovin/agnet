@@ -20,11 +20,12 @@ Widget _wrap(Widget child, {Brightness brightness = Brightness.light}) {
 
 void main() {
   group('MissionControlAppBar', () {
-    testWidgets('renders phone-talk wordmark', (tester) async {
+    testWidgets('renders Agent wordmark', (tester) async {
       await tester.pumpWidget(
         _wrap(const MissionControlAppBar(showScanningLine: false)),
       );
-      expect(find.text('phone-talk'), findsOneWidget);
+      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('phone-talk'), findsNothing);
     });
 
     testWidgets('renders MissionControlMark', (tester) async {

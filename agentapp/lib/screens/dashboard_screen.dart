@@ -20,7 +20,6 @@ import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
 import '../widgets/agent_status_indicator.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
-import '../widgets/app_bar/connection_status_indicator.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
 import 'agent_detail_screen.dart'
@@ -1450,7 +1449,6 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
-        markWidget: const ConnectionStatusIndicator(size: 12),
         leading: const IconButton(
           icon: Icon(Icons.dashboard),
           tooltip: '仪表盘',
