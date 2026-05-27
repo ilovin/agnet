@@ -17,7 +17,8 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
       if (params != null) {
         final nodeId = params['nodeId'] as String? ?? '';
         final agentId = params['agentId'] as String? ?? '';
-        markAsRead(nodeId, agentId);
+        final sessionId = params['sessionId'] as String? ?? '';
+        markAsRead(nodeId, agentId, sessionId);
       }
       return;
     }
@@ -43,8 +44,9 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
     if (nodeId.isEmpty || agentId.isEmpty) return;
+    final sessionId = params['sessionId'] as String? ?? '';
 
-    final key = (nodeId, agentId);
+    final key = (nodeId, agentId, sessionId);
 
     // Deduplicate by msg_id for message_update events
     if (event.method == 'conversation.message_update') {
@@ -59,8 +61,8 @@ class UnreadNotifier extends StateNotifier<Map<ConversationKey, int>> {
     state = {...state, key: (state[key] ?? 0) + 1};
   }
 
-  void markAsRead(String nodeId, String agentId) {
-    final key = (nodeId, agentId);
+  void markAsRead(String nodeId, String agentId, String sessionId) {
+    final key = (nodeId, agentId, sessionId);
     if (!state.containsKey(key)) return;
     final next = Map<ConversationKey, int>.from(state);
     next.remove(key);

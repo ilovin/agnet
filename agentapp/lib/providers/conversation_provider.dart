@@ -3,15 +3,28 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/message_model.dart';
 import '../services/ws_client.dart';
 
-/// Key: (nodeId, agentId)
-typedef ConversationKey = (String, String);
+/// Key: (nodeId, agentId, sessionId).
+///
+/// `sessionId` is the third component so cached conversation state is
+/// scoped per session. When the underlying agent rotates its
+/// `sessionId` (e.g. resume to a new session), old entries become
+/// orphaned naturally and new entries land under a fresh key — no
+/// cross-session bleed-through. An empty string is allowed and used as
+/// a sentinel when the session id is not yet known (callers should
+/// avoid writing to an unknown-session key when a real id is available).
+typedef ConversationKey = (String, String, String);
 
 class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<MessageModel>>> {
   ConversationNotifier() : super(const {});
 
   /// Load history from [conversation.history] response.
-  void loadHistory(String nodeId, String agentId, List<dynamic> rawMessages) {
-    final key = (nodeId, agentId);
+  void loadHistory(
+    String nodeId,
+    String agentId,
+    String sessionId,
+    List<dynamic> rawMessages,
+  ) {
+    final key = (nodeId, agentId, sessionId);
     final messages = rawMessages
         .map((m) => MessageModel.fromJson(m as Map<String, dynamic>))
         .toList()
@@ -19,8 +32,13 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: messages};
   }
 
-  void mergeHistory(String nodeId, String agentId, List<dynamic> rawMessages) {
-    final key = (nodeId, agentId);
+  void mergeHistory(
+    String nodeId,
+    String agentId,
+    String sessionId,
+    List<dynamic> rawMessages,
+  ) {
+    final key = (nodeId, agentId, sessionId);
     final merged = <int, MessageModel>{
       for (final message in state[key] ?? const <MessageModel>[]) message.seq: message,
     };
@@ -54,13 +72,20 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
   }
 
   /// Handle push events: [conversation.message], [conversation.message_update], and [conversation.cleared].
+  ///
+  /// `sessionId` is read from `event.params['sessionId']` when present
+  /// (e.g. `conversation.cleared` carries it from the backend). For
+  /// other events that lack the field today, the empty-string sentinel
+  /// is used so messages are still bucketed but stay separated from
+  /// session-bound entries written by `loadHistory`/`mergeHistory`.
   void handleEvent(WsMessage event) {
     if (event.method == 'conversation.cleared') {
       final params = event.params as Map<String, dynamic>?;
       if (params != null) {
         final nodeId = params['nodeId'] as String? ?? '';
         final agentId = params['agentId'] as String? ?? '';
-        clear(nodeId, agentId);
+        final sessionId = params['sessionId'] as String? ?? '';
+        clear(nodeId, agentId, sessionId);
       }
       return;
     }
@@ -72,7 +97,8 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
-    final key = (nodeId, agentId);
+    final sessionId = params['sessionId'] as String? ?? '';
+    final key = (nodeId, agentId, sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
     final role = (params['role'] as String?) == 'user' ? MessageRole.user : MessageRole.assistant;
     final text = params['text'] as String? ?? '';
@@ -122,17 +148,18 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
       seq: seq,
       msgId: msgId,
     );
-    _appendMessage(msg);
+    _appendMessage(msg, sessionId);
   }
 
   void _handleMessageUpdate(WsMessage event) {
     final params = event.params as Map<String, dynamic>;
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
+    final sessionId = params['sessionId'] as String? ?? '';
     final msgId = params['msg_id'] as String? ?? '';
     final newText = params['text'] as String? ?? '';
     final newSeq = (params['seq'] as num?)?.toInt() ?? 0;
-    final key = (nodeId, agentId);
+    final key = (nodeId, agentId, sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
 
     // Find message by msg_id and update its text
@@ -150,8 +177,8 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     }
   }
 
-  void _appendMessage(MessageModel msg) {
-    final key = (msg.nodeId, msg.agentId);
+  void _appendMessage(MessageModel msg, String sessionId) {
+    final key = (msg.nodeId, msg.agentId, sessionId);
     final existing = List<MessageModel>.from(state[key] ?? []);
     // Deduplicate by seq
     if (existing.any((m) => m.seq == msg.seq)) return;
@@ -160,11 +187,15 @@ class ConversationNotifier extends StateNotifier<Map<ConversationKey, List<Messa
     state = {...state, key: existing};
   }
 
-  List<MessageModel> messagesFor(String nodeId, String agentId) =>
-      state[(nodeId, agentId)] ?? [];
+  List<MessageModel> messagesFor(
+    String nodeId,
+    String agentId,
+    String sessionId,
+  ) =>
+      state[(nodeId, agentId, sessionId)] ?? [];
 
-  void clear(String nodeId, String agentId) {
-    final key = (nodeId, agentId);
+  void clear(String nodeId, String agentId, String sessionId) {
+    final key = (nodeId, agentId, sessionId);
     if (!state.containsKey(key)) return;
     state = {...state}..remove(key);
   }

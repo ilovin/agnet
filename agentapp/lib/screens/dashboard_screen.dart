@@ -549,7 +549,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final futures = <Future<void>>[];
     for (final node in nodeState.nodeList) {
       for (final agent in nodeState.agentsFor(node.id)) {
-        futures.add(_loadAgentPreview(client, node.id, agent.id));
+        futures.add(_loadAgentPreview(
+          client,
+          node.id,
+          agent.id,
+          (agent.sessionId ?? '').trim(),
+        ));
       }
     }
     if (futures.isEmpty) return;
@@ -560,6 +565,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     WsClient client,
     String nodeId,
     String agentId,
+    String expectedSessionId,
   ) async {
     final notifier = ref.read(conversationProvider.notifier);
     try {
@@ -569,6 +575,17 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         'limit': 12,
       }, timeout: const Duration(seconds: 3));
       final raw = result is Map ? result : <String, dynamic>{};
+      // Mid-fetch race guard: drop preview that does not match the
+      // session we expected when the RPC was issued.
+      final respSessionId = (raw['sessionId'] as String? ?? '').trim();
+      if (expectedSessionId.isNotEmpty &&
+          respSessionId.isNotEmpty &&
+          respSessionId != expectedSessionId) {
+        return;
+      }
+      final cacheSessionId = respSessionId.isNotEmpty
+          ? respSessionId
+          : expectedSessionId;
       final events = ((raw['events'] as List?) ?? const [])
           .map((e) => normalizeHistoryEvent(e as Map))
           .toList();
@@ -581,6 +598,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
       notifier.mergeHistory(
         nodeId,
         agentId,
+        cacheSessionId,
         messages.map((m) {
           final role = m.role == 'user' ? 'user' : 'assistant';
           return {
@@ -1028,7 +1046,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
 
     final client = ref.read(connectionProvider);
     if (client != null) {
-      await _loadAgentPreview(client, target.nodeId, target.agent.id);
+      await _loadAgentPreview(
+        client,
+        target.nodeId,
+        target.agent.id,
+        (target.agent.sessionId ?? '').trim(),
+      );
     }
   }
 
@@ -1082,8 +1105,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         'message': text,
         'raw': false,
       }, timeout: const Duration(seconds: 30));
-      ref.read(unreadProvider.notifier).markAsRead(target.nodeId, target.agent.id);
-      await _loadAgentPreview(client, target.nodeId, target.agent.id);
+      final sid = (target.agent.sessionId ?? '').trim();
+      ref
+          .read(unreadProvider.notifier)
+          .markAsRead(target.nodeId, target.agent.id, sid);
+      await _loadAgentPreview(client, target.nodeId, target.agent.id, sid);
     } catch (e) {
       controller.text = text;
       if (mounted) {
@@ -1282,7 +1308,11 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                               target: target,
                               messages:
                                   ref.watch(conversationProvider)[
-                                      (target.nodeId, target.agent.id)] ??
+                                      (
+                                        target.nodeId,
+                                        target.agent.id,
+                                        (target.agent.sessionId ?? '').trim(),
+                                      )] ??
                                   const [],
                               controller: _canvasControllerFor(panelKey),
                               sending: _canvasSending[panelKey] ?? false,
@@ -2904,7 +2934,9 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
   Widget _buildUnreadBadge() {
-    final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, widget.agent.id)] ?? 0;
+    final sid = (widget.agent.sessionId ?? '').trim();
+    final unreadCount =
+        ref.watch(unreadProvider)[(widget.nodeId, widget.agent.id, sid)] ?? 0;
     if (unreadCount == 0) return const SizedBox.shrink();
     return Container(
       width: 10,
@@ -3155,7 +3187,11 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     final displayTitle = _agentDisplayTitle(agent);
     final previewLines = widget.showPreview
         ? sessionPreviewLinesFromMessages(
-            ref.watch(conversationProvider)[(widget.nodeId, agent.id)] ??
+            ref.watch(conversationProvider)[(
+                  widget.nodeId,
+                  agent.id,
+                  (agent.sessionId ?? '').trim(),
+                )] ??
                 const [],
           )
         : const <String>[];

@@ -53,7 +53,10 @@ Future<void> pumpNodeCard(
   if (showSessionPreview) {
     for (final agent in agents) {
       final agentId = agent['id'] as String;
-      container.read(conversationProvider.notifier).loadHistory(node.id, agentId, [
+      final sessionId = (agent['sessionId'] as String? ?? '').trim();
+      container
+          .read(conversationProvider.notifier)
+          .loadHistory(node.id, agentId, sessionId, [
         {
           'nodeId': node.id,
           'agentId': agentId,
@@ -540,7 +543,7 @@ void main() {
     addTearDown(container.dispose);
 
     final notifier = container.read(conversationProvider.notifier);
-    notifier.loadHistory('n1', 'a1', [
+    notifier.loadHistory('n1', 'a1', 's1', [
       {
         'nodeId': 'n1',
         'agentId': 'a1',
@@ -549,7 +552,7 @@ void main() {
         'seq': 2,
       },
     ]);
-    notifier.mergeHistory('n1', 'a1', [
+    notifier.mergeHistory('n1', 'a1', 's1', [
       {
         'nodeId': 'n1',
         'agentId': 'a1',
@@ -567,7 +570,7 @@ void main() {
     ]);
 
     final lines = sessionPreviewLinesFromMessages(
-      notifier.messagesFor('n1', 'a1'),
+      notifier.messagesFor('n1', 'a1', 's1'),
     );
 
     expect(lines, equals(['已更新最新信息']));

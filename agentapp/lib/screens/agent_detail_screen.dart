@@ -1153,7 +1153,9 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     // Persist draft on every keystroke (web: dispose may not fire on browser back)
     _inputCtrl.addListener(_persistDraft);
 
-    ref.read(unreadProvider.notifier).markAsRead(widget.nodeId, widget.agentId);
+    ref
+        .read(unreadProvider.notifier)
+        .markAsRead(widget.nodeId, widget.agentId, _currentSessionId());
 
     _pruneMessageCache();
 
@@ -1260,6 +1262,19 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   String get _cacheKey => '${widget.nodeId}:${widget.agentId}';
 
+  /// Returns the current agent's session id, or empty string when the
+  /// agent has not yet bound to one (or hasn't been loaded into
+  /// nodesProvider). Used to scope conversation/unread cache keys per
+  /// session so a session rotation doesn't bleed messages across.
+  String _currentSessionId() {
+    final nodeState = ref.read(nodesProvider);
+    final agent = nodeState
+        .agentsFor(widget.nodeId)
+        .where((a) => a.id == widget.agentId)
+        .firstOrNull;
+    return (agent?.sessionId ?? '').trim();
+  }
+
   /// Rebuilds cached message processing results from _rawEvents.
   /// Must be called after any mutation to _rawEvents (inside setState is fine).
   void _rebuildMessageCache() {
@@ -1286,6 +1301,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
     final nodeId = params['nodeId'] as String? ?? '';
     final agentId = params['agentId'] as String? ?? '';
     if (nodeId != widget.nodeId || agentId != widget.agentId) return;
+    final sessionId = params['sessionId'] as String? ?? '';
     setState(() {
       _rawEvents = [];
       _lastSeq = 0;
@@ -1295,8 +1311,8 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _rebuildMessageCache();
     });
     _touchMessageCache(cachedEvents: []);
-    ref.read(conversationProvider.notifier).clear(nodeId, agentId);
-    ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId);
+    ref.read(conversationProvider.notifier).clear(nodeId, agentId, sessionId);
+    ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId, sessionId);
   }
 
   void _touchMessageCache({List<Map<String, dynamic>>? cachedEvents}) {
@@ -1338,7 +1354,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
   static const _pageSize = 30;
 
-  Future<void> _loadHistory() async {
+  Future<void> _loadHistory({int retry = 1}) async {
     if (_isLoadingFreshData) return;
     final client = ref.read(connectionProvider);
     if (client == null) return;
@@ -1347,6 +1363,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _isLoadingFreshData = true;
     });
 
+    final expectedSessionId = _currentSessionId();
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -1354,6 +1371,32 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'limit': _pageSize,
       }, timeout: const Duration(seconds: 5));
       final raw = result is Map ? result : <String, dynamic>{};
+
+      // Mid-fetch race guard: backend stamps the session this history
+      // belongs to; if the agent has rotated session id since we
+      // dispatched the RPC, the response is stale — drop it and retry
+      // once with the fresh expected session.
+      final respSessionId = (raw['sessionId'] as String? ?? '').trim();
+      final liveSessionId = _currentSessionId();
+      if (expectedSessionId.isNotEmpty &&
+          respSessionId.isNotEmpty &&
+          respSessionId != expectedSessionId) {
+        debugPrint(
+          'loadHistory: session mismatch — expected=$expectedSessionId '
+          'got=$respSessionId live=$liveSessionId, dropping and retrying',
+        );
+        if (mounted) {
+          setState(() {
+            _isLoadingFreshData = false;
+          });
+        }
+        if (retry > 0) {
+          // Retry once with the now-current session.
+          await _loadHistory(retry: retry - 1);
+        }
+        return;
+      }
+
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final firstSeqFromResp = (raw['firstSeq'] as num?)?.toInt() ?? 0;
@@ -1393,9 +1436,16 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           convertEventsToMessages(previewEvents),
         ).where((m) => !m.isThinking && !m.isActivityBlock && !m.isToolCall).toList();
         if (previewMessages.isNotEmpty) {
+          // Use the response's sessionId when available; falls back to the
+          // expected one we captured pre-RPC so the cache key matches what
+          // dashboard widgets read via agent.sessionId.
+          final cacheSessionId = respSessionId.isNotEmpty
+              ? respSessionId
+              : expectedSessionId;
           ref.read(conversationProvider.notifier).mergeHistory(
             widget.nodeId,
             widget.agentId,
+            cacheSessionId,
             previewMessages.map((m) {
               final role = m.role == 'user' ? 'user' : 'assistant';
               return {
@@ -1464,6 +1514,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _loadingOlder = true;
     });
 
+    final expectedSessionId = _currentSessionId();
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -1472,6 +1523,22 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'limit': _pageSize,
       });
       final raw = result is Map ? result : <String, dynamic>{};
+      // Drop stale older-page response if session rotated mid-fetch.
+      final respSessionId = (raw['sessionId'] as String? ?? '').trim();
+      if (expectedSessionId.isNotEmpty &&
+          respSessionId.isNotEmpty &&
+          respSessionId != expectedSessionId) {
+        debugPrint(
+          'loadOlderHistory: session mismatch — expected=$expectedSessionId '
+          'got=$respSessionId, dropping',
+        );
+        if (mounted) {
+          setState(() {
+            _loadingOlder = false;
+          });
+        }
+        return;
+      }
       final events = (raw['events'] as List?) ?? [];
       if (!mounted) return;
 
@@ -1509,6 +1576,7 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
       _pollingNewEvents = false;
       return;
     }
+    final expectedSessionId = _currentSessionId();
     try {
       final result = await client.call('conversation.history', {
         'nodeId': widget.nodeId,
@@ -1516,6 +1584,23 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         'cursor': _lastSeq,
       });
       final raw = result is Map ? result : <String, dynamic>{};
+      // Drop polling response that belongs to a previous session — the
+      // agent has rotated mid-fetch and a fresh full reload is in
+      // order.
+      final respSessionId = (raw['sessionId'] as String? ?? '').trim();
+      if (expectedSessionId.isNotEmpty &&
+          respSessionId.isNotEmpty &&
+          respSessionId != expectedSessionId) {
+        debugPrint(
+          'pollNewEvents: session mismatch — expected=$expectedSessionId '
+          'got=$respSessionId, dropping and reloading',
+        );
+        _pollingNewEvents = false;
+        if (mounted) {
+          _loadHistory();
+        }
+        return;
+      }
       final events = (raw['events'] as List?) ?? [];
       final lastSeq = (raw['lastSeq'] as num?)?.toInt() ?? 0;
       final permissionRequests = (raw['permissionRequests'] as List?) ?? [];
