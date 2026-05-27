@@ -1941,6 +1941,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                 ? Wrap(spacing: 6, runSpacing: 6, children: summaryChips)
                 : Text(
                     '${widget.node.location.displayLocation}  ·  $_statusLabel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
