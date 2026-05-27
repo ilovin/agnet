@@ -9,6 +9,7 @@
 | R-013 | `r-013-dashboard-stale-display.md` | Completed | High |
 | R-014 | `r-014-empty-user-message-filter.md` | Completed | High |
 | R-015 | `r-015-domain-download-portal.md` (PRD: `docs/plans/domain-download-portal-prd.md`) | Pending | High |
+| R-016 | `r-016-app-multi-agent-tab-view.md` (PRD: `docs/plans/multi-agent-tab-view-prd.md`，前置 [[i-018]]) | Pending | High |
 
 ## 已完成需求（见 archive/）
 
