@@ -1,21 +1,18 @@
-// Source-level guard for the composer's input box shape and the mono
-// prompt-symbol affordance.
+// Source-level guard for the composer's input box shape.
 //
 // Background: round-rect input replaces the previous capsule (Radius 24)
 // to widen the visible character count and harmonise with the mission-
-// control aesthetic. A single mono ▸ (U+25B8) glyph appears as a prefix
-// hint, rendered with the JetBrainsMono token at AppColors.accent.
+// control aesthetic.
 //
-// This test scopes its assertions to the `_InputBarState.build` method so
-// any future regression on those exact decisions surfaces here before
-// landing in Chrome.
+// Regression guard: the send-arrow/prompt symbol must not live inside the
+// TextField anymore (it consumes horizontal input space).
 
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('input bar uses Radius.circular(10) round-rect and mono ▸ prefix', () {
+  test('input bar uses Radius.circular(10) and has no in-field arrow prefix', () {
     final file = File('lib/screens/agent_detail_screen.dart');
     expect(file.existsSync(), isTrue,
         reason: 'expected agent_detail_screen.dart at lib/screens/');
@@ -37,11 +34,8 @@ void main() {
     expect(inputBarBody.contains('Radius.circular(10)'), isTrue,
         reason: 'expected Radius.circular(10) inside _InputBar TextField');
 
-    // The mono prompt-symbol ▸ (U+25B8) should appear exactly once inside
-    // _InputBar — as the prefixIcon Text content.
-    final promptMatches =
-        '▸'.allMatches(inputBarBody).length;
-    expect(promptMatches, 1,
-        reason: 'expected ▸ (U+25B8) prompt symbol exactly once in _InputBar');
+    // The in-field prompt symbol ▸ (U+25B8) must not be present anymore.
+    expect(inputBarBody.contains("'▸'"), isFalse,
+        reason: 'input TextField should not contain in-field arrow/prompt glyph');
   });
 }

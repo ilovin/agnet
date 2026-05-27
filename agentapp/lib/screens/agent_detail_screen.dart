@@ -4357,13 +4357,15 @@ class MessageBubble extends StatelessWidget {
     // Raw ANSI output: dark terminal-like background
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final bgColor = isUser
-        ? scheme.primaryContainer
+        ? (isDark
+            ? const Color(0xFF2A3B4C) // dark: muted blue-grey (low saturation)
+            : const Color(0xFFE3EDF5)) // light: cool grey-blue (readable)
         : isRaw
         ? (isDark ? const Color(0xFF1A1A2E) : const Color(0xFF1E1E2E))
         : scheme.surfaceContainerHighest;
 
     final textColor = isUser
-        ? scheme.onPrimaryContainer
+        ? (isDark ? const Color(0xFFDCE8F2) : const Color(0xFF1A2B3C))
         : isRaw
         ? const Color(0xFFE5E5E5)
         : scheme.onSurface;
@@ -4492,8 +4494,13 @@ class MessageBubble extends StatelessWidget {
             const SizedBox(width: 8),
             CircleAvatar(
               radius: 16,
-              backgroundColor: scheme.primary,
-              child: Icon(Icons.person, size: 18, color: scheme.onPrimary),
+              backgroundColor: isDark
+                  ? const Color(0xFF3A5A7A)
+                  : const Color(0xFFB8C8D8),
+              child: Icon(Icons.person, size: 18,
+                  color: isDark
+                      ? const Color(0xFFDCE8F2)
+                      : const Color(0xFF1A2B3C)),
             ),
           ],
         ],
@@ -5866,17 +5873,13 @@ class _InputBarState extends State<_InputBar> {
           Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Mode config button moved out of the composer row and into the
-              // screen's AppBar actions slot (see [BypassIndicator]); the
-              // composer now only carries the input + send affordances.
               // Consolidated "+" button: opens modal sheet with image + special-keys.
-              if (!isReadOnly &&
-                  widget.agent?.provider != 'opencode' &&
-                  widget.agent?.attachMode != 'tmux')
+              // Always shown for non-read-only agents (all providers) so special
+              // characters remain accessible even when image upload is gated.
+              if (!isReadOnly)
                 ComposerPlusButton(
                   onPickImage: effectiveLoading ? null : _pickImage,
-                  onShowSpecialKeys:
-                      isReadOnly ? null : () => _showSpecialKeysSheet(context),
+                  onShowSpecialKeys: () => _showSpecialKeysSheet(context),
                 ),
               Expanded(
                 child: TextField(
@@ -5887,19 +5890,8 @@ class _InputBarState extends State<_InputBar> {
                     border: const OutlineInputBorder(
                       borderRadius: BorderRadius.all(Radius.circular(10)),
                     ),
-                    prefixIcon: Padding(
-                      padding: const EdgeInsets.only(left: 12, right: 8),
-                      child: Text(
-                        '▸',
-                        style: AppTextStyles.monoLarge.copyWith(
-                          color: AppColors.accent,
-                        ),
-                      ),
-                    ),
-                    prefixIconConstraints: const BoxConstraints(
-                      minWidth: 28,
-                      minHeight: 0,
-                    ),
+                    // prefixIcon removed: ▸ arrow consumed horizontal input
+                    // space; send affordance remains as the right-side button.
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 8,
