@@ -168,6 +168,46 @@ func min(a, b int) int {
 	return b
 }
 
+// TestOnEventCallbackSanitizesBeforeBroadcast guards a regression: the
+// gateway main loop must call ws.SanitizeEventInPlace inside its
+// mgr.OnEvent callback, so TUI box-drawing / control glyphs are
+// stripped before the event reaches Flutter clients (which would
+// render them as tofu).
+//
+// We verify this at the source level rather than via integration
+// because wiring up a full proxy + node + WS roundtrip just to assert
+// one function call would dwarf the unit tests in `internal/ws`.
+func TestOnEventCallbackSanitizesBeforeBroadcast(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+
+	hay := string(src)
+	// Locate the OnEvent registration.
+	idx := strings.Index(hay, "mgr.OnEvent(func(nodeID string, ev map[string]any)")
+	if idx < 0 {
+		t.Fatalf("expected OnEvent callback wiring in main.go")
+	}
+	// Slice the function body (closing of the closure is within ~1KB).
+	end := idx + 1024
+	if end > len(hay) {
+		end = len(hay)
+	}
+	body := hay[idx:end]
+
+	if !strings.Contains(body, "ws.SanitizeEventInPlace(ev)") {
+		t.Fatalf("OnEvent callback in main.go must call ws.SanitizeEventInPlace(ev) before broadcasting; got:\n%s", body)
+	}
+	// And it must be invoked BEFORE the Broadcast call, otherwise the
+	// untouched event is what reaches the client.
+	sanitizeAt := strings.Index(body, "ws.SanitizeEventInPlace(ev)")
+	broadcastAt := strings.Index(body, "srv.Broadcast(")
+	if sanitizeAt < 0 || broadcastAt < 0 || sanitizeAt > broadcastAt {
+		t.Fatalf("ws.SanitizeEventInPlace must be called before srv.Broadcast (sanitize@%d, broadcast@%d)", sanitizeAt, broadcastAt)
+	}
+}
+
 func TestShowStatusPrintsTunnelTelemetry(t *testing.T) {
 	origCfgPath := configLoadPath
 	origHTTPGet := statusHTTPGet
