@@ -4649,13 +4649,18 @@ Widget _codeBlock(
   bool isDark, {
   bool isNaive = false,
 }) {
-  final codeColor = isDark ? Colors.grey.shade300 : const Color(0xFF1F2328);
+  // GitHub-style code block: elev surface + 1px border outline + JetBrains
+  // Mono. Body text uses a high-contrast on-surface colour rather than the
+  // legacy off-grey so dense code stays legible.
+  final codeColor = isDark ? AppColors.textDark : AppColors.textLight;
+  final blockBg = isDark ? AppColors.elevDark : AppColors.elevLight;
+  final blockBorder = isDark ? AppColors.borderDark : AppColors.borderLight;
   final Widget textWidget;
   if (isNaive) {
     textWidget = Text(
       code,
       style: TextStyle(
-        fontFamily: 'Noto Sans SC',
+        fontFamily: AppTextStyles.monoFontFamily,
         fontFamilyFallback: const ['Noto Sans SC'],
         fontSize: fontSize,
         height: 1.4,
@@ -4668,18 +4673,20 @@ Widget _codeBlock(
       TextSpan(
         children: [highlightCode(code, isDark: isDark)],
         style: TextStyle(
-          fontFamily: 'Noto Sans SC',
+          fontFamily: AppTextStyles.monoFontFamily,
           fontFamilyFallback: const ['Noto Sans SC'],
           fontSize: fontSize,
           height: 1.4,
           fontWeight: FontWeight.w500,
+          color: codeColor,
         ),
       ),
     );
   }
   return Container(
     decoration: BoxDecoration(
-      color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
+      color: blockBg,
+      border: Border.all(color: blockBorder, width: 1),
       borderRadius: BorderRadius.circular(8),
     ),
     margin: const EdgeInsets.symmetric(vertical: 4),
@@ -4776,17 +4783,23 @@ class _MarkdownContent extends ConsumerWidget {
             height: 1.4,
           ),
           code: TextStyle(
-            fontFamily: 'Noto Sans SC',
+            fontFamily: AppTextStyles.monoFontFamily,
             fontFamilyFallback: const ['Noto Sans SC'],
             fontSize: fontSize,
             fontWeight: FontWeight.w500,
             color: isNaive
                 ? textColor
-                : (isDark ? const Color(0xFF98C379) : const Color(0xFF1A7F37)),
-            backgroundColor: null,
+                : (isDark
+                    ? AppColors.onAccentContainerDark
+                    : AppColors.onAccentContainerLight),
+            backgroundColor: isDark ? AppColors.elevDark : AppColors.elevLight,
           ),
           codeblockDecoration: BoxDecoration(
-            color: isDark ? const Color(0xFF282C34) : const Color(0xFFF6F8FA),
+            color: isDark ? AppColors.elevDark : AppColors.elevLight,
+            border: Border.all(
+              color: isDark ? AppColors.borderDark : AppColors.borderLight,
+              width: 1,
+            ),
             borderRadius: BorderRadius.circular(8),
           ),
           codeblockPadding: const EdgeInsets.all(12),

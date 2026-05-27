@@ -72,10 +72,15 @@ class MissionControlAppBar extends StatelessWidget
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final hairlineColor =
+        isDark ? AppColors.borderDark : AppColors.borderLight;
+    final accentColor =
+        isDark ? AppColors.accentDark : AppColors.accentLight;
     final wordmarkStyle = AppTextStyles.titleLarge.copyWith(
       fontSize: 20,
       letterSpacing: -0.4,
-      color: AppColors.accent,
+      color: accentColor,
     );
 
     return Material(
@@ -83,7 +88,7 @@ class MissionControlAppBar extends StatelessWidget
       elevation: 0,
       child: Column(
         children: [
-          if (showScanningLine) const ScanningLine(),
+          if (showScanningLine) ScanningLine(color: accentColor),
           SafeArea(
             bottom: false,
             child: SizedBox(
@@ -129,7 +134,7 @@ class MissionControlAppBar extends StatelessWidget
           ),
           Container(
             height: 1,
-            color: AppColors.hairline,
+            color: hairlineColor,
           ),
         ],
       ),
@@ -140,10 +145,13 @@ class MissionControlAppBar extends StatelessWidget
 class _BarSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final hairlineColor =
+        isDark ? AppColors.borderDark : AppColors.borderLight;
     return Container(
       width: 1,
       height: 16,
-      color: AppColors.hairline,
+      color: hairlineColor,
     );
   }
 }

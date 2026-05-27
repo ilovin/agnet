@@ -72,75 +72,126 @@ void main() {
       expect(theme.brightness, Brightness.dark);
     });
 
-    test('light mode primary color is signal accent', () {
+    test('light mode primary color is GitHub light accent', () {
       final theme = AppTheme.build(
         densityMode: DensityMode.standard,
         brightness: Brightness.light,
       );
-      expect(theme.colorScheme.primary, AppColors.accent);
+      expect(theme.colorScheme.primary, AppColors.accentLight);
     });
 
-    test('dark mode primary color is signal accent', () {
+    test('dark mode primary color is GitHub dark accent', () {
       final theme = AppTheme.build(
         densityMode: DensityMode.standard,
         brightness: Brightness.dark,
       );
-      expect(theme.colorScheme.primary, AppColors.accent);
+      expect(theme.colorScheme.primary, AppColors.accentDark);
     });
 
-    test('light mode scaffold background is warm off-white surface', () {
+    test('light mode scaffold background is GitHub light bg', () {
       final theme = AppTheme.build(
         densityMode: DensityMode.standard,
         brightness: Brightness.light,
       );
-      expect(theme.scaffoldBackgroundColor, AppColors.surface);
+      expect(theme.scaffoldBackgroundColor, AppColors.bgLight);
     });
 
-    test('dark mode scaffold background is ink', () {
+    test('dark mode scaffold background is GitHub dark bg', () {
       final theme = AppTheme.build(
         densityMode: DensityMode.standard,
         brightness: Brightness.dark,
       );
-      expect(theme.scaffoldBackgroundColor, AppColors.ink);
+      expect(theme.scaffoldBackgroundColor, AppColors.bgDark);
     });
 
-    test('dark mode card background is inkElev', () {
+    test('dark mode card background is GitHub dark elev', () {
       final theme = AppTheme.build(
         densityMode: DensityMode.standard,
         brightness: Brightness.dark,
       );
-      expect(theme.cardTheme.color, AppColors.inkElev);
+      expect(theme.cardTheme.color, AppColors.elevDark);
     });
 
-    test('appBar shape uses hairline divider colour', () {
-      final theme = AppTheme.build(densityMode: DensityMode.standard);
+    test('light mode card background is GitHub light elev', () {
+      final theme = AppTheme.build(
+        densityMode: DensityMode.standard,
+        brightness: Brightness.light,
+      );
+      expect(theme.cardTheme.color, AppColors.elevLight);
+    });
+
+    test('light appBar shape uses light border divider colour', () {
+      final theme = AppTheme.build(
+        densityMode: DensityMode.standard,
+        brightness: Brightness.light,
+      );
       final shape = theme.appBarTheme.shape;
       expect(shape, isA<Border>());
       final border = shape as Border;
-      expect(border.bottom.color, AppColors.hairline);
+      expect(border.bottom.color, AppColors.borderLight);
       expect(border.bottom.width, 1);
     });
 
-    test('divider theme uses hairline accent', () {
-      final theme = AppTheme.build(densityMode: DensityMode.standard);
-      expect(theme.dividerTheme.color, AppColors.hairline);
+    test('dark appBar shape uses dark border divider colour', () {
+      final theme = AppTheme.build(
+        densityMode: DensityMode.standard,
+        brightness: Brightness.dark,
+      );
+      final shape = theme.appBarTheme.shape;
+      expect(shape, isA<Border>());
+      final border = shape as Border;
+      expect(border.bottom.color, AppColors.borderDark);
+      expect(border.bottom.width, 1);
+    });
+
+    test('light divider theme uses light border', () {
+      final theme = AppTheme.build(
+        densityMode: DensityMode.standard,
+        brightness: Brightness.light,
+      );
+      expect(theme.dividerTheme.color, AppColors.borderLight);
+    });
+
+    test('dark divider theme uses dark border', () {
+      final theme = AppTheme.build(
+        densityMode: DensityMode.standard,
+        brightness: Brightness.dark,
+      );
+      expect(theme.dividerTheme.color, AppColors.borderDark);
     });
   });
 
   group('AppColors tokens', () {
-    test('hairline is accent at ~12% alpha', () {
-      // Approximate check: alpha component should be small but nonzero.
-      final hairlineAlpha = AppColors.hairline.a;
-      expect(hairlineAlpha, lessThan(0.20));
-      expect(hairlineAlpha, greaterThan(0.0));
+    test('GitHub light accent is #0969DA', () {
+      expect(AppColors.accentLight, const Color(0xFF0969DA));
     });
 
-    test('accent is signal blue', () {
-      expect(AppColors.accent, const Color(0xFF5B9DB8));
+    test('GitHub dark accent is #58A6FF', () {
+      expect(AppColors.accentDark, const Color(0xFF58A6FF));
     });
 
-    test('ink is near-black with cool tint', () {
-      expect(AppColors.ink, const Color(0xFF0E1116));
+    test('GitHub dark bg is near-black #0D1117', () {
+      expect(AppColors.bgDark, const Color(0xFF0D1117));
+    });
+
+    test('GitHub light bg is pure white', () {
+      expect(AppColors.bgLight, const Color(0xFFFFFFFF));
+    });
+
+    test('GitHub dark elev is #161B22', () {
+      expect(AppColors.elevDark, const Color(0xFF161B22));
+    });
+
+    test('GitHub light elev is #F6F8FA', () {
+      expect(AppColors.elevLight, const Color(0xFFF6F8FA));
+    });
+
+    test('legacy accent alias resolves to dark accent', () {
+      expect(AppColors.accent, AppColors.accentDark);
+    });
+
+    test('legacy ink alias resolves to dark bg', () {
+      expect(AppColors.ink, AppColors.bgDark);
     });
   });
 }

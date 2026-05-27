@@ -40,8 +40,10 @@ class AppTheme {
     final colorScheme = _buildColorScheme(brightness);
     final textTheme = _buildTextTheme(densityMode, colorScheme);
 
-    final scaffoldBackground = isDark ? AppColors.ink : AppColors.surface;
-    final cardBackground = isDark ? AppColors.inkElev : Colors.white;
+    final scaffoldBackground = isDark ? AppColors.bgDark : AppColors.bgLight;
+    final cardBackground = isDark ? AppColors.elevDark : AppColors.elevLight;
+    final hairlineColor = isDark ? AppColors.borderDark : AppColors.borderLight;
+    final accent = isDark ? AppColors.accentDark : AppColors.accentLight;
 
     return ThemeData(
       useMaterial3: true,
@@ -61,9 +63,9 @@ class AppTheme {
           color: colorScheme.onSurface,
           fontWeight: FontWeight.w600,
         ),
-        shape: const Border(
+        shape: Border(
           bottom: BorderSide(
-            color: AppColors.hairline,
+            color: hairlineColor,
             width: 1,
           ),
         ),
@@ -73,13 +75,13 @@ class AppTheme {
         color: cardBackground,
         surfaceTintColor: Colors.transparent,
         shape: RoundedRectangleBorder(
-          side: const BorderSide(color: AppColors.hairline, width: 1),
+          side: BorderSide(color: hairlineColor, width: 1),
           borderRadius: BorderRadius.circular(12),
         ),
         clipBehavior: Clip.antiAlias,
       ),
-      dividerTheme: const DividerThemeData(
-        color: AppColors.hairline,
+      dividerTheme: DividerThemeData(
+        color: hairlineColor,
         thickness: 1,
         space: 1,
       ),
@@ -88,9 +90,9 @@ class AppTheme {
         textColor: colorScheme.onSurface,
       ),
       textSelectionTheme: TextSelectionThemeData(
-        selectionColor: AppColors.accent.withValues(alpha: 0.50),
-        cursorColor: AppColors.accent,
-        selectionHandleColor: AppColors.accent,
+        selectionColor: accent.withValues(alpha: 0.50),
+        cursorColor: accent,
+        selectionHandleColor: accent,
       ),
     );
   }
@@ -99,14 +101,10 @@ class AppTheme {
     if (brightness == Brightness.dark) {
       return const ColorScheme(
         brightness: Brightness.dark,
-        primary: AppColors.accent,
-        onPrimary: Color(0xFF06141B),
-        // primaryContainer/onPrimaryContainer must be set explicitly so
-        // Material 3 doesn't fall back to primary itself (which produces
-        // blue-on-blue cards that the user reported as illegible).
-        // 8.6:1 contrast against onPrimaryContainer.
-        primaryContainer: Color(0xFF1F3D49),
-        onPrimaryContainer: Color(0xFFE0EEF4),
+        primary: AppColors.accentDark,
+        onPrimary: AppColors.onAccent,
+        primaryContainer: AppColors.accentContainerDark,
+        onPrimaryContainer: AppColors.onAccentContainerDark,
         secondary: AppColors.data,
         onSecondary: Color(0xFF003733),
         secondaryContainer: Color(0xFF153B38),
@@ -119,21 +117,20 @@ class AppTheme {
         onError: Color(0xFFFFE6E8),
         errorContainer: Color(0xFF4A1419),
         onErrorContainer: Color(0xFFFFD9DD),
-        surface: AppColors.ink,
-        onSurface: Color(0xFFFAFAF7),
-        surfaceContainerHighest: AppColors.inkElev,
-        onSurfaceVariant: Color(0xFFB6BBC2),
-        outline: Color(0xFF3A4049),
-        outlineVariant: AppColors.hairline,
+        surface: AppColors.bgDark,
+        onSurface: AppColors.textDark,
+        surfaceContainerHighest: AppColors.elevDark,
+        onSurfaceVariant: AppColors.mutedDark,
+        outline: AppColors.borderDark,
+        outlineVariant: AppColors.borderDark,
       );
     }
     return const ColorScheme(
       brightness: Brightness.light,
-      primary: AppColors.accent,
-      onPrimary: Colors.white,
-      // Light mode: explicit container tokens (see dark-mode comment).
-      primaryContainer: Color(0xFFD9EAF1),
-      onPrimaryContainer: Color(0xFF0E2530),
+      primary: AppColors.accentLight,
+      onPrimary: AppColors.onAccent,
+      primaryContainer: AppColors.accentContainerLight,
+      onPrimaryContainer: AppColors.onAccentContainerLight,
       secondary: AppColors.data,
       onSecondary: Color(0xFF003733),
       secondaryContainer: Color(0xFFCFEEEA),
@@ -146,12 +143,12 @@ class AppTheme {
       onError: Colors.white,
       errorContainer: Color(0xFFFFD9DD),
       onErrorContainer: Color(0xFF410006),
-      surface: AppColors.surface,
-      onSurface: AppColors.ink,
-      surfaceContainerHighest: Color(0xFFEFEFEA),
-      onSurfaceVariant: Color(0xFF4A4F57),
-      outline: Color(0xFFC8C8C0),
-      outlineVariant: AppColors.hairline,
+      surface: AppColors.bgLight,
+      onSurface: AppColors.textLight,
+      surfaceContainerHighest: AppColors.elevLight,
+      onSurfaceVariant: AppColors.mutedLight,
+      outline: AppColors.borderLight,
+      outlineVariant: AppColors.borderLight,
     );
   }
 

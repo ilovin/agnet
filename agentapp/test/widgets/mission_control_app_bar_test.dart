@@ -94,6 +94,7 @@ void main() {
         _wrap(const MissionControlAppBar(showScanningLine: false)),
       );
       // Scan child Containers for one with height 1 and hairline colour.
+      // Light brightness (default in _wrap) → borderLight token.
       bool found = false;
       tester
           .widgetList<Container>(find.byType(Container))
@@ -101,7 +102,8 @@ void main() {
         final dec = c.decoration;
         final colour = c.color ??
             (dec is BoxDecoration ? dec.color : null);
-        if (c.constraints?.maxHeight == 1 && colour == AppColors.hairline) {
+        if (c.constraints?.maxHeight == 1 &&
+            colour == AppColors.borderLight) {
           found = true;
         }
       });
