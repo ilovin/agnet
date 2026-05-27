@@ -430,6 +430,19 @@ deploy_local() {
     echo "[deploy] Local runtime artifacts ready"
 }
 
+# R-012 T5: refuse to run real deploy from a worktree subdirectory.
+# A worktree's binary would replace the main runtime and silently revert
+# fixes already merged to main. Sandbox subcommand is exempt — it runs
+# entirely under $WORKTREE/.sandbox/ with redirected HOME and ports.
+guard_no_worktree_for_real_deploy() {
+    if [[ "$REPO_ROOT" == *"/.claude/worktrees/"* ]]; then
+        echo "ERROR: deploy.sh '$1' must run from main worktree root, not a worktree subdirectory" >&2
+        echo "Current REPO_ROOT: $REPO_ROOT" >&2
+        echo "If you want to test a worktree's code, use 'scripts/deploy.sh sandbox <id>' instead." >&2
+        exit 1
+    fi
+}
+
 deploy_remote_host() {
     local target_host="$1"
     echo "[deploy] Deploying to $target_host (as user, NOT sudo)..."
@@ -679,6 +692,296 @@ deploy_local_with_web_flag() {
     fi
 }
 
+# ── Sandbox (R-012) ───────────────────────────────────────────────────
+# Spawn an isolated agentd+agentgw under $REPO_ROOT/.sandbox/<id>/ with
+# redirected HOME, random ports, and separate dist. No Go code changes;
+# pure HOME + config injection. Safe to run from worktree subdirectories.
+
+SANDBOX_ROOT="$REPO_ROOT/.sandbox"
+SANDBOX_PORT_LO=17000
+SANDBOX_PORT_HI=19999
+
+sandbox_dir() { echo "$SANDBOX_ROOT/$1"; }
+
+# Find an unused TCP port in [SANDBOX_PORT_LO..SANDBOX_PORT_HI].
+# Avoid colliding with the caller's previously picked port via $exclude.
+sandbox_pick_port() {
+    local exclude="${1:-0}"
+    local tries=0 candidate
+    while [[ $tries -lt 200 ]]; do
+        candidate=$((SANDBOX_PORT_LO + RANDOM % (SANDBOX_PORT_HI - SANDBOX_PORT_LO + 1)))
+        if [[ "$candidate" == "$exclude" ]]; then
+            tries=$((tries + 1))
+            continue
+        fi
+        if ! lsof -iTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+        tries=$((tries + 1))
+    done
+    echo "[sandbox] ERROR: failed to find an unused port in $SANDBOX_PORT_LO-$SANDBOX_PORT_HI" >&2
+    return 1
+}
+
+sandbox_random_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    else
+        # Fallback for systems without openssl; uses /dev/urandom.
+        head -c 32 /dev/urandom | xxd -p -c 64
+    fi
+}
+
+# Build sandbox-only agentd+agentgw binaries to $SBX_DIR/dist/.
+# Does NOT touch $REPO_ROOT/out/ (main build cache) — sandbox has its own.
+sandbox_build_binaries() {
+    local sbx_dir="$1"
+    local dist="$sbx_dir/dist"
+    mkdir -p "$dist"
+    echo "[sandbox] Compiling agentd -> $dist/agentd"
+    (cd "$REPO_ROOT/agentd" && go build -ldflags "-s -w" -o "$dist/agentd" ./cmd/agentd/) || {
+        echo "[sandbox] ERROR: agentd build failed" >&2
+        return 1
+    }
+    echo "[sandbox] Compiling agentgw -> $dist/agentgw"
+    (cd "$REPO_ROOT/agentgw" && go build -ldflags "-s -w" -o "$dist/agentgw" ./cmd/agentgw/) || {
+        echo "[sandbox] ERROR: agentgw build failed" >&2
+        return 1
+    }
+}
+
+# Write sandbox configs: agentd config.json, agentgw config.json.
+sandbox_write_configs() {
+    local sandbox_home="$1" agentd_port="$2" agentgw_port="$3" token="$4"
+    mkdir -p "$sandbox_home/.agentd/data" "$sandbox_home/.agentgw"
+    cat >"$sandbox_home/.agentd/config.json" <<EOF
+{
+  "port": $agentd_port,
+  "data_dir": "$sandbox_home/.agentd/data",
+  "token": "$token",
+  "node_id": "sandbox"
+}
+EOF
+    cat >"$sandbox_home/.agentgw/config.json" <<EOF
+{
+  "port": $agentgw_port,
+  "token": "$token",
+  "nodes_file": "",
+  "ssh_key": "",
+  "tunnel": {
+    "hub_url": "",
+    "app_url": "",
+    "reality_sni": ""
+  },
+  "upgrade": {
+    "manifest_url": ""
+  },
+  "nodes": [
+    {
+      "id": "sandbox-local",
+      "name": "sandbox-local",
+      "host": "localhost",
+      "agentd_port": $agentd_port,
+      "token": "$token",
+      "ssh_alias": ""
+    }
+  ]
+}
+EOF
+}
+
+# Place static directory: ln -sfn to real $HOME/.agentgw/static, or rebuild on --with-web.
+sandbox_setup_static() {
+    local sandbox_home="$1" with_web="$2"
+    local target="$sandbox_home/.agentgw/static"
+    rm -rf "$target"
+    if [[ "$with_web" == "true" ]]; then
+        echo "[sandbox] --with-web: building Flutter Web (no CDN)..."
+        bash "$REPO_ROOT/agentapp/build_web.sh"
+        mkdir -p "$target"
+        cp -r "$REPO_ROOT/agentapp/build/web/." "$target/"
+        echo "[sandbox] Web static built into $target"
+    else
+        local real_static="${REAL_HOME:-$HOME}/.agentgw/static"
+        if [[ -d "$real_static" ]]; then
+            ln -sfn "$real_static" "$target"
+            echo "[sandbox] Linked static -> $real_static"
+        else
+            mkdir -p "$target"
+            echo "[sandbox] WARNING: $real_static missing; created empty static dir (web UI will 404)"
+        fi
+    fi
+}
+
+deploy_sandbox() {
+    local sandbox_id="${1:-}"
+    if [[ -z "$sandbox_id" ]]; then
+        echo "Usage: scripts/deploy.sh sandbox <id> [--with-web]" >&2
+        return 2
+    fi
+    shift || true
+    local with_web=false
+    for arg in "$@"; do
+        [[ "$arg" == "--with-web" ]] && with_web=true
+    done
+
+    # REAL_HOME captures the user's actual HOME *before* we redirect it
+    # for the sandbox children. Used by sandbox_setup_static to find the
+    # main static dir to symlink.
+    local real_home="${HOME}"
+
+    local sbx_dir
+    sbx_dir="$(sandbox_dir "$sandbox_id")"
+    if [[ -d "$sbx_dir" ]]; then
+        if [[ -f "$sbx_dir/pid/agentd.pid" ]] && kill -0 "$(cat "$sbx_dir/pid/agentd.pid" 2>/dev/null)" 2>/dev/null; then
+            echo "[sandbox] Sandbox '$sandbox_id' is already running. Use 'sandbox-stop $sandbox_id' first." >&2
+            return 1
+        fi
+        echo "[sandbox] Reusing existing dir $sbx_dir (stale; cleaning runtime state)..."
+        rm -rf "$sbx_dir/pid" "$sbx_dir/logs" "$sbx_dir/sandbox.env"
+    fi
+    local sandbox_home="$sbx_dir/home"
+    mkdir -p "$sandbox_home" "$sbx_dir/logs" "$sbx_dir/pid"
+
+    local agentd_port agentgw_port
+    agentd_port="$(sandbox_pick_port)" || return 1
+    agentgw_port="$(sandbox_pick_port "$agentd_port")" || return 1
+    local token
+    token="$(sandbox_random_token)"
+
+    cat >"$sbx_dir/sandbox.env" <<EOF
+SANDBOX_ID=$sandbox_id
+SANDBOX_HOME=$sandbox_home
+SANDBOX_DIR=$sbx_dir
+AGENTD_PORT=$agentd_port
+AGENTGW_PORT=$agentgw_port
+SANDBOX_TOKEN=$token
+REAL_HOME=$real_home
+EOF
+    chmod 600 "$sbx_dir/sandbox.env"
+
+    sandbox_write_configs "$sandbox_home" "$agentd_port" "$agentgw_port" "$token" || return 1
+    REAL_HOME="$real_home" sandbox_setup_static "$sandbox_home" "$with_web" || return 1
+    sandbox_build_binaries "$sbx_dir" || return 1
+
+    # Start agentd
+    echo "[sandbox] Starting agentd (HOME=$sandbox_home, port=$agentd_port)..."
+    (HOME="$sandbox_home" nohup "$sbx_dir/dist/agentd" start \
+        >"$sbx_dir/logs/agentd.log" 2>&1 </dev/null & echo $! >"$sbx_dir/pid/agentd.pid")
+    sleep 1
+
+    # Start agentgw — must run from $sandbox_home/.agentgw so that the relative
+    # ./static lookup falls back into the sandbox dir, not the main repo.
+    # Use `cd` inside a subshell for the nohup target only ($! captures the
+    # nohup'd binary, not the cd compound).
+    echo "[sandbox] Starting agentgw (HOME=$sandbox_home, port=$agentgw_port)..."
+    (
+        cd "$sandbox_home/.agentgw"
+        HOME="$sandbox_home" nohup "$sbx_dir/dist/agentgw" start \
+            >"$sbx_dir/logs/agentgw.log" 2>&1 </dev/null &
+        echo $! >"$sbx_dir/pid/agentgw.pid"
+    )
+
+    # Verify
+    local agentd_pid agentgw_pid
+    agentd_pid="$(cat "$sbx_dir/pid/agentd.pid")"
+    agentgw_pid="$(cat "$sbx_dir/pid/agentgw.pid")"
+    sleep 4
+    local ok=true
+    if ! kill -0 "$agentd_pid" 2>/dev/null; then
+        echo "[sandbox] ERROR: agentd ($agentd_pid) died — see $sbx_dir/logs/agentd.log" >&2
+        ok=false
+    fi
+    if ! kill -0 "$agentgw_pid" 2>/dev/null; then
+        echo "[sandbox] ERROR: agentgw ($agentgw_pid) died — see $sbx_dir/logs/agentgw.log" >&2
+        ok=false
+    fi
+
+    local http_code=""
+    if $ok; then
+        http_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://localhost:$agentgw_port/" || echo "000")"
+        if [[ "$http_code" != "200" ]]; then
+            echo "[sandbox] WARNING: agentgw HTTP responded with $http_code (expected 200)"
+        fi
+    fi
+
+    if ! $ok; then
+        return 1
+    fi
+
+    cat <<EOF
+✓ Sandbox $sandbox_id started
+  agentd PID:  $agentd_pid  port: $agentd_port
+  agentgw PID: $agentgw_pid port: $agentgw_port
+  Web:         http://localhost:$agentgw_port/  (HTTP $http_code)
+  Token:       $token
+  Sandbox dir: $sbx_dir
+  Stop:        scripts/deploy.sh sandbox-stop $sandbox_id
+EOF
+}
+
+deploy_sandbox_stop() {
+    local sandbox_id="${1:-}"
+    if [[ -z "$sandbox_id" ]]; then
+        echo "Usage: scripts/deploy.sh sandbox-stop <id>" >&2
+        return 2
+    fi
+    local sbx_dir
+    sbx_dir="$(sandbox_dir "$sandbox_id")"
+    if [[ ! -d "$sbx_dir" ]]; then
+        echo "[sandbox] No sandbox dir at $sbx_dir" >&2
+        return 1
+    fi
+    local pid
+    for proc in agentd agentgw; do
+        if [[ -f "$sbx_dir/pid/$proc.pid" ]]; then
+            pid="$(cat "$sbx_dir/pid/$proc.pid")"
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "[sandbox] Killing $proc (PID $pid)..."
+                kill "$pid" 2>/dev/null || true
+                sleep 1
+                kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+            else
+                echo "[sandbox] $proc PID $pid not running"
+            fi
+        fi
+    done
+    rm -rf "$sbx_dir"
+    echo "[sandbox] Removed $sbx_dir"
+}
+
+deploy_sandbox_list() {
+    if [[ ! -d "$SANDBOX_ROOT" ]]; then
+        echo "[sandbox] No sandboxes (root $SANDBOX_ROOT does not exist)"
+        return 0
+    fi
+    local found=false
+    local d sandbox_id env_file agentd_pid agentgw_pid agentd_port agentgw_port
+    for d in "$SANDBOX_ROOT"/*; do
+        [[ -d "$d" ]] || continue
+        sandbox_id="$(basename "$d")"
+        env_file="$d/sandbox.env"
+        if [[ ! -f "$env_file" ]]; then
+            continue
+        fi
+        # shellcheck disable=SC1090
+        source "$env_file"
+        agentd_pid="$(cat "$d/pid/agentd.pid" 2>/dev/null || echo "?")"
+        agentgw_pid="$(cat "$d/pid/agentgw.pid" 2>/dev/null || echo "?")"
+        local agentd_status="dead" agentgw_status="dead"
+        kill -0 "$agentd_pid" 2>/dev/null && agentd_status="alive"
+        kill -0 "$agentgw_pid" 2>/dev/null && agentgw_status="alive"
+        printf "%-24s agentd=%s(%s,p=%s) agentgw=%s(%s,p=%s)\n" \
+            "$sandbox_id" "$agentd_pid" "$agentd_status" "${AGENTD_PORT:-?}" \
+            "$agentgw_pid" "$agentgw_status" "${AGENTGW_PORT:-?}"
+        found=true
+    done
+    if ! $found; then
+        echo "[sandbox] No sandboxes registered under $SANDBOX_ROOT"
+    fi
+}
+
 # ── Help ──────────────────────────────────────────────────────────────
 
 show_deploy_help() {
@@ -697,6 +1000,14 @@ TARGETS:
   npm         Build + package + npm publish
   tunnelhub   Trigger tunnelhub build and deploy
   all         Run local + web + npm + tunnelhub (full release cycle)
+  sandbox <id> [--with-web]
+              R-012: spawn an isolated agentd+agentgw under \$REPO_ROOT/.sandbox/<id>/
+              with redirected HOME, random ports, separate dist. Does not touch the
+              main runtime — safe to run from a worktree subdirectory.
+  sandbox-stop <id>
+              Kill sandbox processes and remove its directory.
+  sandbox-list
+              List currently running sandboxes (under \$REPO_ROOT/.sandbox/).
   help        Show this help message
 
 ENVIRONMENT:
@@ -823,7 +1134,21 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             show_deploy_help
             exit 0
             ;;
+        sandbox)
+            # R-012: spawn isolated agentd+agentgw under .sandbox/<id>/
+            # No worktree guard — sandbox is the *intended* worktree workflow.
+            shift || true
+            deploy_sandbox "$@"
+            ;;
+        sandbox-stop)
+            shift || true
+            deploy_sandbox_stop "$@"
+            ;;
+        sandbox-list)
+            deploy_sandbox_list
+            ;;
         local)
+            guard_no_worktree_for_real_deploy local
             echo "[deploy] Running local deployment..."
             deploy_local_with_web_flag "${@:2}"
             build_agentd_mac
@@ -841,16 +1166,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
             ;;
         web)
+            guard_no_worktree_for_real_deploy web
             # deploy_web: package.sh → OSS/portal/API deploy; uses is_release_up_to_date.
             # Supports --oss-only / --portal-only / --api-only flags (portal_only api_only oss_only).
             shift || true
             deploy_web "$@"
             ;;
         npm)
+            guard_no_worktree_for_real_deploy npm
             # deploy_npm: build.sh go → package.sh → npm publish; uses is_release_up_to_date.
             deploy_npm
             ;;
         tunnelhub)
+            guard_no_worktree_for_real_deploy tunnelhub
             echo "[deploy] Running tunnelhub deployment..."
             if [[ -f "tunnelhub/scripts/build_and_deploy.sh" ]]; then
                 bash tunnelhub/scripts/build_and_deploy.sh
@@ -859,6 +1187,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             fi
             ;;
         all)
+            guard_no_worktree_for_real_deploy all
             echo "[deploy] Running full release cycle..."
             bash "$0" local
             bash "$0" web
