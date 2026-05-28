@@ -24,6 +24,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
+import '../widgets/app_bar/dashboard_status_dot.dart';
 import '../widgets/app_bar/bypass_indicator.dart';
 import '../widgets/composer/composer_plus_button.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -1253,10 +1254,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     _pollTimer?.cancel();
     _scrollCtrl.removeListener(_handleScroll);
-    final client = ref.read(connectionProvider);
-    if (_eventHandler != null) {
-      client?.offEvent(_eventHandler!);
-    }
+    // Guard: ref may be disposed before this widget in test teardown.
+    try {
+      final client = ref.read(connectionProvider);
+      if (_eventHandler != null) {
+        client?.offEvent(_eventHandler!);
+      }
+    } catch (_) {}
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
@@ -2147,7 +2151,25 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
           tooltip: '返回',
           onPressed: () => context.pop(),
         ),
-        title: agent?.name ?? '',
+        titleWidget: agent == null
+            ? null
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  DashboardStatusDot(status: agent.status),
+                  const SizedBox(width: 10),
+                  Flexible(
+                    child: Text(
+                      agent.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
         actions: [
           // Permission-mode chip (replaces the in-composer mode button so
           // the input row stays compact). Tapping it opens the same config

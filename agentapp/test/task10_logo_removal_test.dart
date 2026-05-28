@@ -18,6 +18,7 @@ import 'package:agentapp/models/agent_model.dart';
 import 'package:agentapp/providers/conversation_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
+import 'package:agentapp/widgets/app_bar/dashboard_status_dot.dart';
 import 'package:agentapp/widgets/app_bar/mission_control_app_bar.dart';
 import 'package:agentapp/widgets/app_bar/mission_control_mark.dart';
 
@@ -141,6 +142,17 @@ void main() {
       // no longer any IconButton with these icons in the AppBar actions.
       expect(find.byIcon(Icons.expand_less), findsNothing);
       expect(find.byIcon(Icons.expand_more), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    });
+
+    testWidgets('dashboard AppBar does NOT render DashboardStatusDot',
+        (tester) async {
+      await _pumpDashboard(tester);
+      // Status dot moved to Agent Detail screen per user request.
+      // Dashboard AppBar should not show it.
+      expect(find.byType(DashboardStatusDot), findsNothing);
 
       await tester.pumpWidget(const SizedBox());
       await tester.pump();
