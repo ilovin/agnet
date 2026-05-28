@@ -1115,7 +1115,7 @@ void main() {
     expect(find.text('会话活跃'), findsOneWidget);
   });
 
-  testWidgets('DashboardScreen AppBar shows subtitle with node and agent stats', (
+  testWidgets('DashboardScreen AppBar drops 仪表盘 title and subtitle (Task #10 follow-up)', (
     WidgetTester tester,
   ) async {
     await pumpDashboardScreen(
@@ -1148,15 +1148,17 @@ void main() {
       ],
     );
 
-    expect(find.text('仪表盘'), findsOneWidget);
-    expect(find.text('1 节点 · 1 活跃'), findsOneWidget);
+    // Per Task #10 follow-up the page-title block ("仪表盘" + "X 节点 · …"
+    // subtitle) was removed entirely. Assert both are absent.
+    expect(find.text('仪表盘'), findsNothing);
+    expect(find.text('1 节点 · 1 活跃'), findsNothing);
 
     // Dispose widget tree to cancel DashboardScreen periodic timer
     await tester.pumpWidget(const SizedBox());
     await tester.pump();
   });
 
-  testWidgets('DashboardScreen hides HealthIndicator when collapsed', (
+  testWidgets('DashboardScreen renders HealthIndicator without expand chevron (Task #10 follow-up)', (
     WidgetTester tester,
   ) async {
     await pumpDashboardScreen(
@@ -1177,73 +1179,61 @@ void main() {
       ],
     );
 
-    // HealthIndicator should not render when _showDetails defaults to false
-    expect(find.byKey(const Key('healthIndicator')), findsNothing);
-
-    // Dispose widget tree to cancel DashboardScreen periodic timer
-    await tester.pumpWidget(const SizedBox());
-    await tester.pump();
-  });
-
-  testWidgets('DashboardScreen toggle showDetails reveals summary chips and HealthIndicator', (
-    WidgetTester tester,
-  ) async {
-    await pumpDashboardScreen(
-      tester,
-      nodes: [
-        {
-          'id': 'n1',
-          'name': 'remote1',
-          'host': '10.0.0.1',
-          'status': 'connected',
-          'location': {
-            'type': 'remote',
-            'host': '10.0.0.1',
-            'displayLocation': 'ws (10.0.0.1)',
-          },
-          'agentCount': 1,
-        },
-      ],
-      agents: [
-        {
-          'nodeId': 'n1',
-          'id': 'a1',
-          'name': 'phone-talk (claude)',
-          'provider': 'claude',
-          'workDir': '/repo/phone-talk',
-          'status': 'idle',
-          'sessionId': 'sess-a',
-          'projectName': 'phone-talk',
-        },
-      ],
-    );
-
-    // Initially collapsed: no summary chips (legacy "会话 N" was removed
-    // entirely — see _buildSummaryChips in dashboard_screen.dart), no
-    // HealthIndicator.
-    expect(find.text('会话 1'), findsNothing);
-    expect(find.byKey(const Key('healthIndicator')), findsNothing);
-    expect(find.byIcon(Icons.expand_more), findsOneWidget);
-
-    // Tap expand button
-    await tester.tap(find.byIcon(Icons.expand_more));
-    await tester.pumpAndSettle();
-
-    expect(find.byIcon(Icons.expand_less), findsOneWidget);
-
-    // Expanded: chips were removed for good — they should still NOT appear.
-    expect(find.text('会话 1'), findsNothing);
-
-    // HealthIndicator renders when expanded
+    // Task #10 follow-up dropped the expand chevron. _showDetails is no
+    // longer toggleable from the AppBar; HealthIndicator therefore renders
+    // by default (the previous "collapsed → hidden" path is gone).
+    expect(find.byIcon(Icons.expand_more), findsNothing);
+    expect(find.byIcon(Icons.expand_less), findsNothing);
     expect(find.byKey(const Key('healthIndicator')), findsOneWidget);
 
-    // Tap collapse button
-    await tester.tap(find.byIcon(Icons.expand_less));
-    await tester.pumpAndSettle();
+    // Dispose widget tree to cancel DashboardScreen periodic timer
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+  });
 
-    // Collapsed again
+  testWidgets('DashboardScreen has no expand_less / expand_more chevron after Task #10 follow-up', (
+    WidgetTester tester,
+  ) async {
+    await pumpDashboardScreen(
+      tester,
+      nodes: [
+        {
+          'id': 'n1',
+          'name': 'remote1',
+          'host': '10.0.0.1',
+          'status': 'connected',
+          'location': {
+            'type': 'remote',
+            'host': '10.0.0.1',
+            'displayLocation': 'ws (10.0.0.1)',
+          },
+          'agentCount': 1,
+        },
+      ],
+      agents: [
+        {
+          'nodeId': 'n1',
+          'id': 'a1',
+          'name': 'phone-talk (claude)',
+          'provider': 'claude',
+          'workDir': '/repo/phone-talk',
+          'status': 'idle',
+          'sessionId': 'sess-a',
+          'projectName': 'phone-talk',
+        },
+      ],
+    );
+
+    // The chevron toggle (Icons.expand_less/expand_more) was removed; the
+    // legacy "会话 N" summary chips remain absent (they were removed
+    // earlier — see _buildSummaryChips in dashboard_screen.dart).
     expect(find.text('会话 1'), findsNothing);
-    expect(find.byKey(const Key('healthIndicator')), findsNothing);
+    expect(find.byIcon(Icons.expand_less), findsNothing);
+    expect(find.byIcon(Icons.expand_more), findsNothing);
+
+    // HealthIndicator renders by default (no chevron means details stay
+    // visible at all times).
+    expect(find.byKey(const Key('healthIndicator')), findsOneWidget);
 
     // Dispose widget tree to cancel DashboardScreen periodic timer
     await tester.pumpWidget(const SizedBox());

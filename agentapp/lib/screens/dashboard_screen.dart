@@ -607,7 +607,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   final Map<String, TextEditingController> _canvasInputControllers = {};
   final Map<String, bool> _canvasSending = {};
   String? _canvasPickerSelectionKey;
-  bool _showDetails = true;
+  // Task #10 (follow-up): the AppBar chevron that toggled _showDetails was
+  // dropped per user screenshot. _showDetails now stays `true` for the
+  // lifetime of the screen (HealthIndicator + NodeCard meta visible by
+  // default). Marked final to make the dead-state explicit. A future task
+  // can rip the field out entirely along with the gated UI branches.
+  final bool _showDetails = true;
   bool _canvasSelectionMode = false;
   EventCallback? _eventHandler;
   WsClient? _eventClient;
@@ -1504,88 +1509,31 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final nodeState = ref.watch(nodesProvider);
     final nodes = nodeState.nodeList;
 
-    // Dashboard subtitle stats
-    final connectedNodes = nodes.where((n) => n.status == NodeStatus.connected).length;
-    final activeAgents = nodes.fold<int>(
-      0,
-      (sum, n) =>
-          sum +
-          nodeState
-              .agentsFor(n.id)
-              .where(
-                (a) =>
-                    a.status == AgentStatus.working ||
-                    a.status == AgentStatus.starting ||
-                    a.status == AgentStatus.idle,
-              )
-              .length,
-    );
-    final subtitleParts = <String>[
-      '${nodes.length} 节点',
-      if (connectedNodes != nodes.length) '$connectedNodes 已连接',
-      '$activeAgents 活跃',
-    ];
-    final subtitle = subtitleParts.join(' · ');
+    // Task #10 (follow-up): page title block ("仪表盘" + "X 节点 · …" subtitle)
+    // removed per user screenshot. The connected/active stats are still
+    // surfaced inside _HealthIndicator (when re-exposed) and per-node cards.
 
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
-        leading: const IconButton(
-          icon: Icon(Icons.dashboard),
-          tooltip: '仪表盘',
-          onPressed: null,
-        ),
-        titleWidget: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    '仪表盘',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                ),
-                if (!_wsConnected) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            Text(
-              subtitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-            ),
-          ],
-        ),
+        // Task #10 (follow-up): user red-boxed 4 elements to drop —
+        //   1. 左上角 4 格 grid icon (Icons.dashboard leading)
+        //   2. 蓝色靶心 MissionControlMark
+        //   3. 「仪表盘」大标题 + 「X 节点 · …」副标题
+        //   4. 右侧 ^ chevron (Icons.expand_less / expand_more)
+        // The "Agent" wordmark stays (it sits outside the user's red boxes).
+        // showWordmark stays true; only showMark flips to false so the brand
+        // mark glyph is hidden while the "Agent" text remains.
+        showMark: false,
+        // Leading (4-grid Icons.dashboard) removed — header reads from the
+        // very left edge.
+        // titleWidget (仪表盘 + subtitle) removed — page title block dropped.
         actions: [
           if (_showDetails) const _HealthIndicator(),
-          IconButton(
-            icon: Icon(_showDetails ? Icons.expand_less : Icons.expand_more),
-            tooltip: _showDetails ? '折叠详情' : '展开详情',
-            onPressed: () {
-              setState(() {
-                _showDetails = !_showDetails;
-              });
-            },
-          ),
+          // expand_less / expand_more chevron removed; _showDetails stays
+          // false (collapsed) by default. _HealthIndicator above only
+          // renders when _showDetails is true, so under the new default
+          // it is a no-op until reintroduced via another entry point.
           IconButton(
             icon: const Icon(Icons.search),
             tooltip: '发现节点',
@@ -3111,9 +3059,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
 
   Widget _buildTitleRow(BuildContext context, String displayTitle) {
     final colors = Theme.of(context).colorScheme;
+    final unreadBadge = _buildUnreadBadge();
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
+        // Task #10: leading 槽不再用，把未读小红点前置到标题行起始（仅未读>0
+        // 时占位）。这是功能性提示，与 brand logo 无关。
+        if (unreadBadge is! SizedBox) ...[
+          unreadBadge,
+          const SizedBox(width: 6),
+        ],
         Expanded(
           child: Text(
             displayTitle,
@@ -3151,6 +3106,15 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       ),
     );
     final agent = widget.agent;
+    // Task #10: leading 已不渲染 logo Icon；保留 picker 入口于此 popup menu。
+    final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
+      provider: agent.provider,
+      sessionId: agent.sessionId,
+      pid: agent.pid,
+      agentId: agent.id,
+    )}';
+    final sessionLogo =
+        ref.read(sessionLogoProvider.notifier).iconFor(sessionKey);
     final items = <PopupMenuEntry<String>>[
       const PopupMenuItem<String>(
         value: 'rename',
@@ -3159,6 +3123,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             Icon(Icons.edit, size: 18),
             SizedBox(width: 8),
             Text('重命名'),
+          ],
+        ),
+      ),
+      const PopupMenuItem<String>(
+        value: 'change_icon',
+        child: Row(
+          children: [
+            Icon(Icons.image_outlined, size: 18),
+            SizedBox(width: 8),
+            Text('更换图标'),
           ],
         ),
       ),
@@ -3186,6 +3160,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     );
     if (!mounted || value == null) return;
     if (value == 'rename') _renameAgent();
+    if (value == 'change_icon') _showLogoPicker(sessionKey, sessionLogo);
   }
 
   Future<void> _renameAgent() async {
@@ -3337,19 +3312,19 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           )
         : const <String>[];
 
-    final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
-      provider: agent.provider,
-      sessionId: agent.sessionId,
-      pid: agent.pid,
-      agentId: agent.id,
-    )}';
-    final sessionLogo = ref.watch(sessionLogoProvider.notifier).iconFor(sessionKey);
+    // Task #10: 不再读取 sessionLogo / sessionKey 用于 leading 渲染。
+    // 「更换图标」popup menu 入口在 _showAgentActions 内自行计算 sessionKey。
 
     final tile = ListTile(
       key: _tileKey,
       dense: true,
       minLeadingWidth: 0,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      // Task #10: 删掉 agent 行左侧的 logo 圆头像（sessionLogo Icon）。
+      // - canvasSelectionMode 下保留 add/remove 圈选交互（不是 brand logo）。
+      // - 普通模式下 leading 设为 null，文字直接靠左；未读小红点改放到
+      //   title row 内（见 _buildTitleRow），不再依赖 leading 槽。
+      // 长按更换图标的入口转移到 _showAgentActions popup menu 中的「更换图标」。
       leading: widget.canvasSelectionMode
           ? InkWell(
               onTap: widget.onToggleCanvas,
@@ -3365,35 +3340,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 ),
               ),
             )
-          : Stack(
-              clipBehavior: Clip.none,
-              children: [
-                InkWell(
-                  onTap: () {
-                    final t = agent.lastMessageTime;
-                    if (t != null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('最后消息：${_formatRelativeTime(t)}'),
-                          duration: const Duration(seconds: 2),
-                        ),
-                      );
-                    }
-                  },
-                  onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
-                  borderRadius: BorderRadius.circular(16),
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(sessionLogo, color: providerColor(agent.provider), size: 18),
-                  ),
-                ),
-                Positioned(
-                  right: -2,
-                  top: -2,
-                  child: _buildUnreadBadge(),
-                ),
-              ],
-            ),
+          : null,
       title: _buildTitleRow(context, displayTitle),
       subtitle: previewLines.isNotEmpty
           ? Padding(

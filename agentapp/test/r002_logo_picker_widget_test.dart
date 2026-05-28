@@ -3,10 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:agentapp/models/agent_model.dart';
-import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
-import 'package:agentapp/providers/session_logo_provider.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
 
 /// Helper to pump DashboardScreen with a single agent for logo picker tests.
@@ -61,13 +58,27 @@ Future<void> pumpDashboardWithAgent(
   await tester.pump(const Duration(milliseconds: 150));
 }
 
-/// Finds the logo InkWell inside an AgentRow ListTile by looking for the
-/// InkWell ancestor of the leading Icon.
-/// Note: ListTile.at(0) is the NodeCard header; at(1) is the AgentRow.
-Finder findLogoInkWell() {
-  final agentListTile = find.byType(ListTile).at(1);
-  final iconInTile = find.descendant(of: agentListTile, matching: find.byType(Icon)).first;
-  return find.ancestor(of: iconInTile, matching: find.byType(InkWell)).first;
+/// Task #10 — picker entry moved from leading-Icon long-press to the agent
+/// row's popup menu under the "更换图标" item.
+///
+/// This helper expands the node header (small-screen layout collapses by
+/// default), long-presses the AgentRow ListTile to open the action menu,
+/// then taps "更换图标" to open the picker dialog.
+Future<void> openLogoPickerViaMenu(WidgetTester tester) async {
+  // Expand the NodeCard so the AgentRow becomes visible.
+  final expandIcon = find.byIcon(Icons.expand_more);
+  if (expandIcon.evaluate().isNotEmpty) {
+    await tester.tap(expandIcon.first);
+    await tester.pumpAndSettle();
+  }
+
+  // ListTile.at(0) is the NodeCard header; at(1) is the AgentRow.
+  final agentTile = find.byType(ListTile).at(1);
+  await tester.longPress(agentTile);
+  await tester.pumpAndSettle();
+
+  await tester.tap(find.text('更换图标'));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -78,7 +89,7 @@ void main() {
       SharedPreferences.setMockInitialValues({});
     });
 
-    testWidgets('long-pressing agent logo opens picker dialog', (tester) async {
+    testWidgets('agent row "更换图标" menu opens picker dialog', (tester) async {
       await pumpDashboardWithAgent(
         tester,
         nodeId: 'node1',
@@ -88,19 +99,7 @@ void main() {
         pid: 1234,
       );
 
-      // In small-screen list view, the NodeCard expands to show AgentRows.
-      // Tap the expand icon first to reveal agents.
-      final expandIcon = find.byIcon(Icons.expand_more);
-      if (expandIcon.evaluate().isNotEmpty) {
-        await tester.tap(expandIcon.first);
-        await tester.pumpAndSettle();
-      }
-
-      final logoInkWell = findLogoInkWell();
-      expect(logoInkWell, findsOneWidget);
-
-      await tester.longPress(logoInkWell);
-      await tester.pumpAndSettle();
+      await openLogoPickerViaMenu(tester);
 
       // Dialog should appear with title
       expect(find.text('选择会话图标'), findsOneWidget);
@@ -120,15 +119,7 @@ void main() {
         pid: 1234,
       );
 
-      final expandIcon = find.byIcon(Icons.expand_more);
-      if (expandIcon.evaluate().isNotEmpty) {
-        await tester.tap(expandIcon.first);
-        await tester.pumpAndSettle();
-      }
-
-      final logoInkWell = findLogoInkWell();
-      await tester.longPress(logoInkWell);
-      await tester.pumpAndSettle();
+      await openLogoPickerViaMenu(tester);
 
       // The grid should contain icons
       expect(find.byType(GridView), findsOneWidget);
@@ -147,15 +138,7 @@ void main() {
         pid: 1234,
       );
 
-      final expandIcon = find.byIcon(Icons.expand_more);
-      if (expandIcon.evaluate().isNotEmpty) {
-        await tester.tap(expandIcon.first);
-        await tester.pumpAndSettle();
-      }
-
-      final logoInkWell = findLogoInkWell();
-      await tester.longPress(logoInkWell);
-      await tester.pumpAndSettle();
+      await openLogoPickerViaMenu(tester);
 
       // Tap the second icon in the grid
       final gridItems = find.descendant(
@@ -183,15 +166,7 @@ void main() {
         pid: 1234,
       );
 
-      final expandIcon = find.byIcon(Icons.expand_more);
-      if (expandIcon.evaluate().isNotEmpty) {
-        await tester.tap(expandIcon.first);
-        await tester.pumpAndSettle();
-      }
-
-      final logoInkWell = findLogoInkWell();
-      await tester.longPress(logoInkWell);
-      await tester.pumpAndSettle();
+      await openLogoPickerViaMenu(tester);
 
       // Tap reset button
       await tester.tap(find.text('恢复默认'));
@@ -214,15 +189,7 @@ void main() {
         pid: 1234,
       );
 
-      final expandIcon = find.byIcon(Icons.expand_more);
-      if (expandIcon.evaluate().isNotEmpty) {
-        await tester.tap(expandIcon.first);
-        await tester.pumpAndSettle();
-      }
-
-      final logoInkWell = findLogoInkWell();
-      await tester.longPress(logoInkWell);
-      await tester.pumpAndSettle();
+      await openLogoPickerViaMenu(tester);
 
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
