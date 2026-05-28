@@ -760,10 +760,13 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 	// For tmux-attached sessions, write directly to PTY via tmux send-keys.
 	if isTmuxAttached {
 		log.Printf("[conversationSend] taking tmux path for agent %s", agentID)
-		// tmux-attached interactive sessions cannot receive --file flags dynamically;
-		// images would be recorded in history but never passed to the CLI process.
-		if len(imageFiles) > 0 {
-			return errResp(req.ID, -32000, "tmux-attached sessions do not support image attachments")
+		// tmux-attached interactive sessions cannot receive --file flags
+		// dynamically. Instead, we embed the saved image paths in the prompt
+		// text so Claude's REPL reads them via its Read tool. Hermes is the
+		// exception because its CLI consumes only stdin without file
+		// references and treats input as raw chat (no agentic file reads).
+		if isHermes && len(imageFiles) > 0 {
+			return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
 		}
 		// Hermes-only: verify the pane's foreground process is not a shell
 		// before sending keys. After hermes CLI crashes, the pane falls back
@@ -792,9 +795,16 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 			return errResp(req.ID, -32000, "record user message: "+err.Error())
 		}
 		h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), seq)), nil)
-		input := message
+		// Build the actual prompt sent to the CLI: for non-hermes tmux-attached
+		// sessions (Claude/etc.) embed the persisted image paths so the REPL
+		// reads them via its Read tool. Hermes was already rejected above.
+		promptText := message
+		if !isHermes && len(imagePaths) > 0 {
+			promptText = formatTmuxMessageWithImages(message, imagePaths)
+		}
+		input := promptText
 		if !raw {
-			input = message + "\n"
+			input = promptText + "\n"
 		}
 		// Hermes-only: tightly scope BeginSend to the actual write call so the
 		// HermesDBWatcher's session-switch suppression window is millisecond-
@@ -2214,6 +2224,35 @@ func base64Decode(s string) ([]byte, error) {
 		s = s[idx+1:]
 	}
 	return base64.StdEncoding.DecodeString(s)
+}
+
+// formatTmuxMessageWithImages embeds image file paths into the message text so
+// that tmux-attached Claude REPL sessions can see them. Claude's interactive
+// mode reads file paths referenced in prompts, so appending the saved temp
+// paths is enough for it to load the images via its Read tool.
+//
+// We avoid embedding raw newlines because sendTmuxInput translates "\n" into
+// the Enter key, which Claude's REPL treats as "submit prompt". Multiple
+// images therefore get separated by spaces on a single line.
+//
+// Returns the original message unchanged when there are no image paths so the
+// text-only tmux send path is fully unaffected.
+func formatTmuxMessageWithImages(message string, imagePaths []string) string {
+	if len(imagePaths) == 0 {
+		return message
+	}
+	var b strings.Builder
+	b.WriteString(message)
+	if message != "" {
+		b.WriteString(" ")
+	}
+	for i, p := range imagePaths {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 // agentAttach takes over an existing process and converts it to a managed agent.
