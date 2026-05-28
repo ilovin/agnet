@@ -95,7 +95,11 @@ class NodesNotifier extends StateNotifier<NodeState> {
           permissionMode: prev.permissionMode,
           isReadOnly: prev.isReadOnly,
           readOnlyReason: prev.readOnlyReason,
-          lastMessageTime: prev.lastMessageTime,
+          // i-017: lastMessageTime is timestamp-aware. agent.status_changed
+          // only fires on status transitions (oldStatus != newStatus), so a
+          // long-running agent staying in the same status would never refresh
+          // its lastMessageTime via WS. Take whichever timestamp is newer.
+          lastMessageTime: _newerTimestamp(prev.lastMessageTime, rpcAgent.lastMessageTime),
         ));
       } else {
         // New agent from RPC
@@ -191,6 +195,15 @@ class NodesNotifier extends StateNotifier<NodeState> {
 
   void _refreshAgents(String nodeId) {
     onAgentsRefresh?.call(nodeId);
+  }
+
+  /// Pick the newer of two unix-millisecond timestamps. Returns null only if
+  /// both inputs are null. Used by loadAgents merge so a stale WS update can't
+  /// hide a fresher RPC value (i-017).
+  static int? _newerTimestamp(int? a, int? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a > b ? a : b;
   }
 
   /// Rename a node locally (after a successful node.rename RPC call).
