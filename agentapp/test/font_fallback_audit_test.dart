@@ -37,12 +37,15 @@ import 'package:agentapp/theme/density_mode.dart';
 /// as tofu when a TextStyle does not declare a fontFamilyFallback that
 /// reaches `Noto Sans Symbols 2`. Each entry is a single Unicode code
 /// point.
+///
+/// Note on arrows (U+2190..U+2193): they used to live in this list, but
+/// `MarkdownContent` now rewrites them to ASCII at render time via
+/// [`canvaskitSafeText`] (mirrors the gateway sanitize). Under Flutter
+/// Web CanvasKit, Noto Sans SC's OS/2 bitmap claims arrow coverage and
+/// short-circuits the fallback chain even when Symbols 2 is declared,
+/// so the only reliable fix is to not let the rune reach the renderer.
+/// Arrow tofu is now covered by `test/canvaskit_safe_text_test.dart`.
 const List<String> _tofuRiskGlyphs = <String>[
-  // Arrows (U+2190..U+2193) — appear in CLI output ("→ done", "↳ note")
-  '→',
-  '←',
-  '↑',
-  '↓',
   // Geometric / decorative — used by status indicators
   '★',
   '•',
@@ -262,12 +265,17 @@ paragraph: ${_tofuRiskGlyphs.join(' ')}
     });
 
     testWidgets(
-        'MarkdownContent simple-text path declares Symbols 2 fallback on → / ★',
+        'MarkdownContent simple-text path declares Symbols 2 fallback on ★ (and the rewritten arrow ASCII)',
         (WidgetTester tester) async {
       // The simple-text path is exercised when the input has NO
       // ```/#/|/[ ] markers. The outer TextSpan style emitted by
       // `_buildTextSpan` must declare a fallback chain that covers the
       // tofu-risk glyphs.
+      //
+      // The raw → in the corpus is rewritten to "->" before rendering
+      // (canvaskitSafeText). The fallback assertion targets the surviving
+      // tofu-risk glyph (★) plus the rewritten arrow ASCII so we still
+      // verify the simple-text root span carries the chain.
       const corpus = 'plain prose with arrow → and star ★';
 
       await tester.pumpWidget(
@@ -293,7 +301,9 @@ paragraph: ${_tofuRiskGlyphs.join(' ')}
       for (final element in richTexts) {
         final widget = element.widget as RichText;
         final raw = widget.text.toPlainText();
-        if (!raw.contains('→') && !raw.contains('★')) continue;
+        // Match either the surviving ★ or the rewritten "->" produced by
+        // canvaskitSafeText (raw → no longer reaches the renderer).
+        if (!raw.contains('->') && !raw.contains('★')) continue;
         foundOuter = true;
         final rootStyle = widget.text.style;
         expect(rootStyle, isNotNull,
@@ -309,7 +319,7 @@ paragraph: ${_tofuRiskGlyphs.join(' ')}
       }
       expect(foundOuter, isTrue,
           reason:
-              'must locate at least one RichText whose plain text contains "→" or "★"');
+              'must locate at least one RichText whose plain text contains "★" or the rewritten "->"');
     });
   });
 }

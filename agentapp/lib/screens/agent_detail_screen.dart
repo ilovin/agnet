@@ -29,6 +29,7 @@ import '../widgets/app_bar/bypass_indicator.dart';
 import '../widgets/composer/composer_plus_button.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
 import '../utils/ansi_span.dart';
+import '../utils/canvaskit_safe_text.dart';
 import '../utils/highlight.dart';
 import '../providers/color_mode_provider.dart';
 import '../models/claude_interaction_models.dart';
@@ -4656,10 +4657,22 @@ class MarkdownContent extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final isNaive = ref.watch(colorModeProvider) == ColorMode.naive;
 
+    // Rewrite tofu-prone runes (arrows, ☒) to ASCII before any rendering
+    // path. This mirrors `agentgw/internal/ws/sanitize.go` and is the
+    // belt-and-braces companion to the gateway's broadcast sanitization:
+    // history loaded via `conversation.history` (proxied without
+    // sanitize) would otherwise still render `→` as a `.notdef` box on
+    // Flutter Web CanvasKit, because Noto Sans SC's OS/2 bitmap claims
+    // coverage for the Arrows block while missing the actual glyphs.
+    // Native Flutter (iOS / Android) renders the original chars fine,
+    // but the Web CanvasKit short-circuits the fontFamilyFallback chain
+    // based on the bogus OS/2 claim.
+    final renderText = canvaskitSafeText(text);
+
     if (isRaw) {
       if (isNaive) {
         return Text(
-          text,
+          renderText,
           style: TextStyle(
             fontSize: fontSize,
             color: textColor,
@@ -4670,7 +4683,7 @@ class MarkdownContent extends ConsumerWidget {
         );
       }
       return Text.rich(
-        parseAnsiToSpan(text, defaultColor: textColor, fontSize: fontSize),
+        parseAnsiToSpan(renderText, defaultColor: textColor, fontSize: fontSize),
       );
     }
 
@@ -4685,15 +4698,15 @@ class MarkdownContent extends ConsumerWidget {
     // below paints a real glyph instead of relying on the Material Icons
     // font (which can be unavailable on Flutter Web CanvasKit).
     final hasComplexMarkdown =
-        text.contains('```') ||
-        text.contains(RegExp(r'^#{1,6}\s', multiLine: true)) ||
-        text.contains(RegExp(r'^\|', multiLine: true)) ||
-        text.contains(RegExp(r'^\s*[-*+]\s+\[[ xX]\]\s', multiLine: true));
+        renderText.contains('```') ||
+        renderText.contains(RegExp(r'^#{1,6}\s', multiLine: true)) ||
+        renderText.contains(RegExp(r'^\|', multiLine: true)) ||
+        renderText.contains(RegExp(r'^\s*[-*+]\s+\[[ xX]\]\s', multiLine: true));
 
     if (hasComplexMarkdown) {
       final isDark = Theme.of(context).brightness == Brightness.dark;
       return MarkdownBody(
-        data: text,
+        data: renderText,
         builders: {
           'pre': _ExpandableCodeBuilder(
             fontSize: fontSize,
@@ -4865,7 +4878,7 @@ class MarkdownContent extends ConsumerWidget {
     // Simple text: render inline markdown (bold, italic, inline code) into TextSpans.
     final isDarkSimple = Theme.of(context).brightness == Brightness.dark;
     return Text.rich(
-      _buildTextSpan(text, fontSize, textColor, scheme, isDarkSimple),
+      _buildTextSpan(renderText, fontSize, textColor, scheme, isDarkSimple),
     );
   }
 
