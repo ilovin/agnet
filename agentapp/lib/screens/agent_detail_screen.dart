@@ -30,6 +30,7 @@ import '../widgets/composer/composer_plus_button.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
 import '../utils/ansi_span.dart';
 import '../utils/highlight.dart';
+import '../utils/tool_call_summary.dart';
 import '../providers/color_mode_provider.dart';
 import '../models/claude_interaction_models.dart';
 import '../widgets/ask_user_question_card.dart';
@@ -4262,19 +4263,12 @@ class MessageBubble extends StatelessWidget {
 
     // Collapsible tool call
     if (message.isToolCall) {
-      final toolName = message.text.substring(1, message.text.indexOf(':'));
-      // 提取参数作为标题的一部分
-      String params = '';
-      final paramMatch = RegExp(r':\s*(.+?)(?:\]|$)').firstMatch(message.text);
-      if (paramMatch != null) {
-        params = paramMatch.group(1)?.trim() ?? '';
-        if (params.length > 50) {
-          params = params.substring(0, 50) + '...';
-        }
-      }
-      final header = params.isNotEmpty
-          ? '🔧 $toolName: $params'
-          : '🔧 $toolName';
+      final parsed = ToolCallSummary.parse(message.text);
+      final toolName = parsed?.toolName ?? '';
+      final summary = parsed?.summary ?? '';
+      final header = summary.isNotEmpty
+          ? '🔧 $toolName: $summary'
+          : '🔧 ${toolName.isNotEmpty ? toolName : 'Tool'}';
       return _CollapsibleBubble(
         header: header,
         content: message.text,
