@@ -111,17 +111,17 @@ void main() {
     });
 
     test('preferredSize advertises toolbar + scan + hairline', () {
-      const bar = MissionControlAppBar(toolbarHeight: 56);
-      // 56 toolbar + 1 scan + 1 hairline = 58.
-      expect(bar.preferredSize.height, 58);
+      const bar = MissionControlAppBar(toolbarHeight: 48);
+      // 48 toolbar + 1 scan + 1 hairline = 50.
+      expect(bar.preferredSize.height, 50);
     });
 
     test('preferredSize without scanning line is toolbar + hairline', () {
       const bar = MissionControlAppBar(
-        toolbarHeight: 56,
+        toolbarHeight: 48,
         showScanningLine: false,
       );
-      expect(bar.preferredSize.height, 57);
+      expect(bar.preferredSize.height, 49);
     });
   });
 

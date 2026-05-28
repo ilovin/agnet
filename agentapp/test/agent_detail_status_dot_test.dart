@@ -316,5 +316,88 @@ void main() {
       // Agent detail should not show the brand wordmark
       expect(find.text('Agent'), findsNothing);
     });
+
+    testWidgets('title uses smaller font size (titleSmall) to fit more text', (tester) async {
+      const longName = 'ThisIsAVeryLongAgentNameThatShouldOverflow';
+      await _pumpAgentDetail(
+        tester,
+        nodeId: 'n1',
+        agentId: 'a1',
+        agents: [
+          {
+            'id': 'a1',
+            'name': longName,
+            'workDir': '/tmp',
+            'nodeId': 'n1',
+            'provider': 'claude',
+            'status': 'idle',
+            'runtimeState': 'live',
+            'sessionState': 'active',
+          },
+        ],
+      );
+
+      final textWidget = tester.widget<Text>(find.text(longName));
+      expect(textWidget.overflow, TextOverflow.ellipsis);
+      expect(textWidget.maxLines, 1);
+      // Verify the style uses titleSmall (smaller than titleMedium)
+      final expectedStyle = Theme.of(tester.element(find.text(longName))).textTheme.titleSmall?.copyWith(
+            fontWeight: FontWeight.w600,
+          );
+      expect(textWidget.style?.fontSize, expectedStyle?.fontSize);
+      expect(textWidget.style?.fontWeight, FontWeight.w600);
+    });
+
+    testWidgets('AppBar toolbar height is compact (48px)', (tester) async {
+      await _pumpAgentDetail(
+        tester,
+        nodeId: 'n1',
+        agentId: 'a1',
+        agents: [
+          {
+            'id': 'a1',
+            'name': 'TestAgent',
+            'workDir': '/tmp',
+            'nodeId': 'n1',
+            'provider': 'claude',
+            'status': 'idle',
+            'runtimeState': 'live',
+            'sessionState': 'active',
+          },
+        ],
+      );
+
+      final appBar = tester.widget<MissionControlAppBar>(find.byType(MissionControlAppBar));
+      expect(appBar.toolbarHeight, 48);
+    });
+
+    testWidgets('title is visible on narrow screen with compact layout', (tester) async {
+      const longName = 'VeryLongAgentNameForWidthTest';
+      await _pumpAgentDetail(
+        tester,
+        nodeId: 'n1',
+        agentId: 'a1',
+        agents: [
+          {
+            'id': 'a1',
+            'name': longName,
+            'workDir': '/tmp',
+            'nodeId': 'n1',
+            'provider': 'claude',
+            'status': 'idle',
+            'runtimeState': 'live',
+            'sessionState': 'active',
+          },
+        ],
+        screenSize: const Size(360, 600), // narrow phone width
+      );
+
+      // The text widget should exist and have non-zero width
+      final textFinder = find.text(longName);
+      expect(textFinder, findsOneWidget);
+      final textSize = tester.getSize(textFinder);
+      // Title must have non-zero width
+      expect(textSize.width, greaterThan(0.0));
+    });
   });
 }
