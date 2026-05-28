@@ -1,8 +1,11 @@
 // Task #10 — UI 简化：去掉左上角 logo + agent 行左侧 logo 圆头像。
 //
-// 这些测试声明 dashboard 顶部 AppBar 不再渲染 brand logo（MissionControlMark
-// 与 "Agent" wordmark），并断言 AgentRow 的 ListTile.leading 在非
-// canvasSelectionMode 下不再渲染 logo Icon（leading == null）。
+// 这些测试声明 dashboard 顶部 AppBar 不再渲染 brand mark
+// （MissionControlMark 圆+辐射线）；并断言 AgentRow 的 ListTile.leading
+// 在非 canvasSelectionMode 下不再渲染 logo Icon（leading == null）。
+//
+// Task #10 增量：用户截图四块红框（grid icon / brand mark / 仪表盘标题块 /
+// expand_less chevron）一起清掉，同时**保留 "Agent" wordmark**（截图未框）。
 //
 // 通用 picker 机制（session_logo_provider + dialog 函数）保留，详见
 // session_logo_provider_test.dart 与 r002_logo_picker_widget_test.dart。
@@ -15,6 +18,7 @@ import 'package:agentapp/models/agent_model.dart';
 import 'package:agentapp/providers/conversation_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
+import 'package:agentapp/widgets/app_bar/mission_control_app_bar.dart';
 import 'package:agentapp/widgets/app_bar/mission_control_mark.dart';
 
 Future<void> _pumpAgentRow(
@@ -95,13 +99,98 @@ void main() {
       await tester.pump();
     });
 
-    testWidgets('dashboard does not render the "Agent" wordmark', (tester) async {
+    testWidgets('dashboard KEEPS the "Agent" wordmark', (tester) async {
       await _pumpDashboard(tester);
-      // Wordmark text accompanies the brand mark; it should also be hidden.
-      expect(find.text('Agent'), findsNothing);
+      // Per follow-up: only the brand mark / grid icon / 仪表盘 title block
+      // / expand_less chevron go away. The "Agent" wordmark is intentionally
+      // preserved (it sits outside the user's red boxes in the screenshot).
+      expect(find.text('Agent'), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox());
       await tester.pump();
+    });
+
+    testWidgets('dashboard does not render the 4-grid Icons.dashboard leading',
+        (tester) async {
+      await _pumpDashboard(tester);
+      // The 4-square grid icon used to live in the AppBar leading slot
+      // (`IconButton(icon: Icon(Icons.dashboard))`). It must be gone so the
+      // header reads clean from the very left edge.
+      expect(find.byIcon(Icons.dashboard), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    });
+
+    testWidgets('dashboard does not render the "仪表盘" title text',
+        (tester) async {
+      await _pumpDashboard(tester);
+      // The big "仪表盘" header text and "X 节点 · …" subtitle were the
+      // page title block; both should be removed.
+      expect(find.text('仪表盘'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    });
+
+    testWidgets('dashboard AppBar has no expand_less / expand_more chevron',
+        (tester) async {
+      await _pumpDashboard(tester);
+      // The right-side `^` chevron toggled `_showDetails`; user wants it
+      // gone. Both states (expanded/collapsed) must be absent — there is
+      // no longer any IconButton with these icons in the AppBar actions.
+      expect(find.byIcon(Icons.expand_less), findsNothing);
+      expect(find.byIcon(Icons.expand_more), findsNothing);
+
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump();
+    });
+  });
+
+  group('Task #10 — MissionControlAppBar showMark / showWordmark decoupled', () {
+    testWidgets('default keeps both mark and wordmark visible',
+        (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            appBar: MissionControlAppBar(showScanningLine: false),
+          ),
+        ),
+      );
+      expect(find.byType(MissionControlMark), findsOneWidget);
+      expect(find.text('Agent'), findsOneWidget);
+    });
+
+    testWidgets('showMark:false hides only the mark, wordmark stays',
+        (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            appBar: MissionControlAppBar(
+              showScanningLine: false,
+              showMark: false,
+            ),
+          ),
+        ),
+      );
+      expect(find.byType(MissionControlMark), findsNothing);
+      expect(find.text('Agent'), findsOneWidget);
+    });
+
+    testWidgets('showWordmark:false hides both (legacy behaviour)',
+        (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            appBar: MissionControlAppBar(
+              showScanningLine: false,
+              showWordmark: false,
+            ),
+          ),
+        ),
+      );
+      expect(find.byType(MissionControlMark), findsNothing);
+      expect(find.text('Agent'), findsNothing);
     });
   });
 

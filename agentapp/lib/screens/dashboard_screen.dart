@@ -586,7 +586,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   final Map<String, TextEditingController> _canvasInputControllers = {};
   final Map<String, bool> _canvasSending = {};
   String? _canvasPickerSelectionKey;
-  bool _showDetails = true;
+  // Task #10 (follow-up): the AppBar chevron that toggled _showDetails was
+  // dropped per user screenshot. _showDetails now stays `true` for the
+  // lifetime of the screen (HealthIndicator + NodeCard meta visible by
+  // default). Marked final to make the dead-state explicit. A future task
+  // can rip the field out entirely along with the gated UI branches.
+  final bool _showDetails = true;
   bool _canvasSelectionMode = false;
   EventCallback? _eventHandler;
   WsClient? _eventClient;
@@ -1483,92 +1488,31 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     final nodeState = ref.watch(nodesProvider);
     final nodes = nodeState.nodeList;
 
-    // Dashboard subtitle stats
-    final connectedNodes = nodes.where((n) => n.status == NodeStatus.connected).length;
-    final activeAgents = nodes.fold<int>(
-      0,
-      (sum, n) =>
-          sum +
-          nodeState
-              .agentsFor(n.id)
-              .where(
-                (a) =>
-                    a.status == AgentStatus.working ||
-                    a.status == AgentStatus.starting ||
-                    a.status == AgentStatus.idle,
-              )
-              .length,
-    );
-    final subtitleParts = <String>[
-      '${nodes.length} 节点',
-      if (connectedNodes != nodes.length) '$connectedNodes 已连接',
-      '$activeAgents 活跃',
-    ];
-    final subtitle = subtitleParts.join(' · ');
+    // Task #10 (follow-up): page title block ("仪表盘" + "X 节点 · …" subtitle)
+    // removed per user screenshot. The connected/active stats are still
+    // surfaced inside _HealthIndicator (when re-exposed) and per-node cards.
 
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
-        // Task #10: hide brand mark + "Agent" wordmark on the dashboard so
-        // the header reads cleaner. MissionControlMark / wordmark are still
-        // available for other screens via the default showWordmark=true.
-        showWordmark: false,
-        leading: const IconButton(
-          icon: Icon(Icons.dashboard),
-          tooltip: '仪表盘',
-          onPressed: null,
-        ),
-        titleWidget: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    '仪表盘',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
-                  ),
-                ),
-                if (!_wsConnected) ...[
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            Text(
-              subtitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-            ),
-          ],
-        ),
+        // Task #10 (follow-up): user red-boxed 4 elements to drop —
+        //   1. 左上角 4 格 grid icon (Icons.dashboard leading)
+        //   2. 蓝色靶心 MissionControlMark
+        //   3. 「仪表盘」大标题 + 「X 节点 · …」副标题
+        //   4. 右侧 ^ chevron (Icons.expand_less / expand_more)
+        // The "Agent" wordmark stays (it sits outside the user's red boxes).
+        // showWordmark stays true; only showMark flips to false so the brand
+        // mark glyph is hidden while the "Agent" text remains.
+        showMark: false,
+        // Leading (4-grid Icons.dashboard) removed — header reads from the
+        // very left edge.
+        // titleWidget (仪表盘 + subtitle) removed — page title block dropped.
         actions: [
           if (_showDetails) const _HealthIndicator(),
-          IconButton(
-            icon: Icon(_showDetails ? Icons.expand_less : Icons.expand_more),
-            tooltip: _showDetails ? '折叠详情' : '展开详情',
-            onPressed: () {
-              setState(() {
-                _showDetails = !_showDetails;
-              });
-            },
-          ),
+          // expand_less / expand_more chevron removed; _showDetails stays
+          // false (collapsed) by default. _HealthIndicator above only
+          // renders when _showDetails is true, so under the new default
+          // it is a no-op until reintroduced via another entry point.
           IconButton(
             icon: const Icon(Icons.search),
             tooltip: '发现节点',
