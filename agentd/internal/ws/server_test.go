@@ -1840,3 +1840,124 @@ func TestConversationSendHermesRejectsShellPane(t *testing.T) {
 		t.Fatalf("expected agent status StatusStopped after shell-pane rejection, got %q", status)
 	}
 }
+
+// TestConversationSendClaudeTmuxAcceptsImages verifies the image upload fix:
+// when a Claude tmux-attached agent receives conversation.send with images,
+// the handler must (1) NOT return the legacy "tmux-attached sessions do not
+// support image attachments" error, (2) persist the image bytes to disk so
+// they survive across the session, and (3) embed each saved path into the
+// prompt sent through tmux send-keys so Claude's REPL reads them via Read tool.
+func TestConversationSendClaudeTmuxAcceptsImages(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	dataDir := t.TempDir()
+	mgr := agent.NewManager(s, dataDir)
+
+	ag, err := mgr.Attach(scanner.ProcessInfo{
+		PID:       os.Getpid(),
+		Provider:  "claude",
+		WorkDir:   t.TempDir(),
+		Cmd:       "claude",
+		SessionID: "sess-claude-tmux-img",
+	})
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+	ag.SetAttachInputRoute("tmux", false, "", "session:1.1")
+
+	// Capture every tmux send-keys invocation so we can assert the prompt
+	// body included the image path.
+	var (
+		mu       sync.Mutex
+		captured [][]string
+	)
+	restoreSendKeys := agent.SetTmuxSendKeysFuncForTest(func(args ...string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		dup := append([]string(nil), args...)
+		captured = append(captured, dup)
+		return nil, nil
+	})
+	defer restoreSendKeys()
+
+	srv := ws.New(mgr, "testtoken", "testnode")
+	ts := httptest.NewServer(srv)
+	t.Cleanup(func() {
+		ts.Close()
+		s.Close()
+	})
+	conn := dialWS(t, ts, "testtoken")
+
+	// 1x1 transparent PNG, base64-encoded. Smallest valid image we can use.
+	const tinyPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	resp := rpc(conn, "conversation.send", map[string]any{
+		"agentId": ag.ID,
+		"message": "What's in this picture?",
+		"images": []map[string]any{
+			{"data": tinyPNG, "mimeType": "image/png"},
+		},
+	})
+
+	// Must NOT be the legacy "not supported" error.
+	if errObj, ok := resp["error"].(map[string]any); ok && errObj != nil {
+		msg, _ := errObj["message"].(string)
+		if strings.Contains(msg, "tmux-attached sessions do not support image attachments") {
+			t.Fatalf("regression: tmux+image still returns legacy 'not supported' error: %v", msg)
+		}
+		// Any other error is also a failure for this fix.
+		t.Fatalf("conversation.send returned unexpected error: %v", errObj)
+	}
+
+	// Persisted image must exist on disk under dataDir/images/<agentId>/<ts>/.
+	imgRoot := filepath.Join(dataDir, "images", ag.ID)
+	persistedPaths := findFilesUnder(t, imgRoot)
+	if len(persistedPaths) != 1 {
+		t.Fatalf("expected exactly 1 persisted image under %s, got %d (%v)", imgRoot, len(persistedPaths), persistedPaths)
+	}
+	persistedPath := persistedPaths[0]
+
+	// The prompt sent through tmux send-keys must reference the persisted path
+	// so Claude's REPL reads it. We look for any -l literal frame containing
+	// the persistedPath substring.
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) == 0 {
+		t.Fatalf("expected at least one tmux send-keys call after conversation.send; got 0")
+	}
+	pathSeen := false
+	for _, c := range captured {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, persistedPath) {
+			pathSeen = true
+			break
+		}
+	}
+	if !pathSeen {
+		t.Fatalf("expected one of the tmux send-keys calls to carry persisted image path %q; got captures=%v", persistedPath, captured)
+	}
+}
+
+// findFilesUnder walks a directory and returns all regular file paths found.
+// Helper for image-upload tests that need to inspect persisted attachments.
+func findFilesUnder(t *testing.T, root string) []string {
+	t.Helper()
+	var paths []string
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return paths
+	}
+	err := filepath.Walk(root, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() {
+			paths = append(paths, p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return paths
+}
