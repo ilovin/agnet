@@ -2439,6 +2439,13 @@ func (m *Manager) MakeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 // makeWatcherCallback builds the standard callback used by all session watchers.
 func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
 	return func(e watcher.ConversationEvent) {
+		// Capture sessionId once per event so every onOutput emit below is tagged
+		// with the agent's current resume session. The Flutter app keys its
+		// conversation cache on (nodeId, agentId, sessionId); broadcasts that
+		// drop sessionId land in the wrong bucket and the rendered transcript
+		// freezes after a Hermes /clear-style session switch.
+		sessionID := ag.ResumeSessionID()
+
 		// Deduplicate user messages: if the last event in the buffer is an identical
 		// user message (already recorded by conversation.send), skip it. Otherwise,
 		// record it so CLI-originated messages are not lost.
@@ -2465,6 +2472,9 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 					"role": "assistant",
 					"raw":  false,
 					"kind": kind,
+				}
+				if sessionID != "" {
+					data["sessionId"] = sessionID
 				}
 				if key := PayloadKeyForKind(kind); key != "" {
 					data[key] = payloadMap
@@ -2499,6 +2509,9 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 			"text": e.Text,
 			"raw":  false,
 		}
+		if sessionID != "" {
+			data["sessionId"] = sessionID
+		}
 		if e.MsgID != "" {
 			data["msg_id"] = e.MsgID
 		}
@@ -2531,13 +2544,17 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 		m.mu.RUnlock()
 		if cb != nil {
 			if isUpdate {
-				cb(agentID, map[string]any{
+				updateData := map[string]any{
 					"_update": true,
 					"agentId": agentID,
 					"msg_id":  e.MsgID,
 					"text":    e.Text,
 					"seq":     data["seq"],
-				})
+				}
+				if sessionID != "" {
+					updateData["sessionId"] = sessionID
+				}
+				cb(agentID, updateData)
 			} else {
 				cb(agentID, data)
 			}
@@ -2611,8 +2628,9 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			m.mu.RUnlock()
 			if onOut != nil {
 				onOut(agentID, map[string]any{
-					"type":    "conversation.cleared",
-					"agentId": agentID,
+					"type":      "conversation.cleared",
+					"agentId":   agentID,
+					"sessionId": newSessionID,
 				})
 			}
 			derived := m.DeriveAgentState(agentID)
@@ -2672,8 +2690,9 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			m.mu.RUnlock()
 			if onOut != nil {
 				onOut(agentID, map[string]any{
-					"type":    "conversation.cleared",
-					"agentId": agentID,
+					"type":      "conversation.cleared",
+					"agentId":   agentID,
+					"sessionId": newSessionID,
 				})
 			}
 			derived := m.DeriveAgentState(agentID)

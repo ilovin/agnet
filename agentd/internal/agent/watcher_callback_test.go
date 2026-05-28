@@ -183,6 +183,126 @@ func TestMakeWatcherCallback_NonInteractiveToolFallsBack(t *testing.T) {
 	}
 }
 
+// TestMakeWatcherCallback_InjectsSessionID verifies that the watcher callback
+// stamps the agent's current resume session ID onto every onOutput payload.
+//
+// This is the agentd half of the "messages disappear / show stale content
+// after a Hermes /clear-style session switch" fix: the WS layer relies on
+// data["sessionId"] to populate conversation.message.params.sessionId, and
+// the Flutter app keys its conversation cache on (nodeId, agentId, sessionId).
+// Omitting sessionId at the watcher boundary causes pushes for the live
+// session to land in the wrong cache bucket and never render — the symptom
+// reported as "agent app stuck on seq 242 while agentd DB advanced to 250".
+//
+// We exercise the three onOutput-emitting branches inside makeWatcherCallback:
+//
+//  1. Interactive tool_use (AskUserQuestion / ExitPlanMode)
+//  2. Plain assistant text without msg_id (claude JSONL append path)
+//  3. Streaming update via msg_id (opencode update-or-append path) — both the
+//     "first append" map and the "_update" map fired on subsequent text growth
+func TestMakeWatcherCallback_InjectsSessionID(t *testing.T) {
+	const wantSession = "session-broadcast-fix-001"
+
+	newSetup := func(t *testing.T, name string) (*Manager, *Agent, *sync.Mutex, *[]map[string]any) {
+		t.Helper()
+		s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { s.Close() })
+		m := NewManager(s, t.TempDir())
+		ag := NewTestAgent(name, "claude")
+		ag.SetResumeSessionID(wantSession)
+
+		var mu sync.Mutex
+		var captured []map[string]any
+		m.SetOnOutput(func(_ string, data map[string]any) {
+			mu.Lock()
+			defer mu.Unlock()
+			// Defensive copy so subsequent in-place mutations by makeWatcherCallback
+			// (e.g. data["seq"] = seq) do not retroactively change earlier captures.
+			snapshot := make(map[string]any, len(data))
+			for k, v := range data {
+				snapshot[k] = v
+			}
+			captured = append(captured, snapshot)
+		})
+		return m, ag, &mu, &captured
+	}
+
+	t.Run("interactive tool_use carries sessionId", func(t *testing.T) {
+		m, ag, mu, captured := newSetup(t, "ask-agent")
+		cb := m.MakeWatcherCallback(ag.ID, ag)
+		cb(watcher.ConversationEvent{
+			Role:         "assistant",
+			Text:         "[AskUserQuestion]",
+			ToolUseName:  "AskUserQuestion",
+			ToolUseID:    "toolu_ask_002",
+			ToolUseInput: []byte(`{"questions":[{"question":"q","header":"H","multi_select":false,"options":[{"label":"A","description":"d"}]}]}`),
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(*captured) != 1 {
+			t.Fatalf("expected 1 onOutput, got %d", len(*captured))
+		}
+		if got, _ := (*captured)[0]["sessionId"].(string); got != wantSession {
+			t.Errorf("interactive tool_use sessionId = %q, want %q (full: %v)", got, wantSession, (*captured)[0])
+		}
+	})
+
+	t.Run("plain assistant text carries sessionId", func(t *testing.T) {
+		m, ag, mu, captured := newSetup(t, "plain-agent")
+		cb := m.MakeWatcherCallback(ag.ID, ag)
+		cb(watcher.ConversationEvent{
+			Role: "assistant",
+			Text: "Hello after /clear",
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		if len(*captured) != 1 {
+			t.Fatalf("expected 1 onOutput, got %d", len(*captured))
+		}
+		if got, _ := (*captured)[0]["sessionId"].(string); got != wantSession {
+			t.Errorf("plain assistant sessionId = %q, want %q (full: %v)", got, wantSession, (*captured)[0])
+		}
+	})
+
+	t.Run("streaming update path carries sessionId", func(t *testing.T) {
+		m, ag, mu, captured := newSetup(t, "stream-agent")
+		cb := m.MakeWatcherCallback(ag.ID, ag)
+		// First emit creates the message.
+		cb(watcher.ConversationEvent{
+			Role:  "assistant",
+			Text:  "partial",
+			MsgID: "msg-stream-1",
+		})
+		// Second emit with same MsgID + grown text takes the _update branch.
+		cb(watcher.ConversationEvent{
+			Role:  "assistant",
+			Text:  "partial and more",
+			MsgID: "msg-stream-1",
+		})
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(*captured) != 2 {
+			t.Fatalf("expected 2 onOutput captures, got %d (full: %v)", len(*captured), *captured)
+		}
+		// Append path.
+		if got, _ := (*captured)[0]["sessionId"].(string); got != wantSession {
+			t.Errorf("streaming append sessionId = %q, want %q (full: %v)", got, wantSession, (*captured)[0])
+		}
+		// _update path: the helper map fed to cb only carries _update/agentId/msg_id/text/seq today,
+		// which is exactly the failure mode we are fixing — sessionId must be added there too.
+		if isUpdate, _ := (*captured)[1]["_update"].(bool); !isUpdate {
+			t.Fatalf("expected second capture to be an _update map, got %v", (*captured)[1])
+		}
+		if got, _ := (*captured)[1]["sessionId"].(string); got != wantSession {
+			t.Errorf("streaming _update sessionId = %q, want %q (full: %v)", got, wantSession, (*captured)[1])
+		}
+	})
+}
+
 // TestMakeWatcherCallback_PlainAssistantText covers the existing happy path:
 // plain text assistant messages should keep flowing through unchanged.
 func TestMakeWatcherCallback_PlainAssistantText(t *testing.T) {
