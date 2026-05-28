@@ -107,6 +107,9 @@ func statusLineReplacement(r rune) (string, bool) {
 	// TUI sub-tree mark (└── style) → "L"
 	case r == 0x23BF:
 		return "L", true
+	// Record button symbol → filled circle
+	case r == 0x23FA:
+		return "●", true
 	}
 	return "", false
 }

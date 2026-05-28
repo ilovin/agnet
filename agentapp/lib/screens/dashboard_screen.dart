@@ -155,28 +155,49 @@ class _MarkdownText extends StatelessWidget {
   final TextStyle style;
   final int? maxLines;
   final TextOverflow? overflow;
+  final bool showBorder;
 
   const _MarkdownText(
     this.data, {
     required this.style,
     this.maxLines,
     this.overflow,
+    this.showBorder = true,
   });
 
   static final _pattern = RegExp(
     r'(\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_|`[^`]+`|~~[^~]+~~|\[[^\]]+\]\([^)]+\))',
   );
 
+  Widget _bordered(Widget child, BuildContext context) {
+    if (!showBorder) return child;
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          left: BorderSide(
+            color: Theme.of(context).colorScheme.outlineVariant,
+            width: 2,
+          ),
+        ),
+      ),
+      padding: const EdgeInsets.only(left: 8),
+      child: child,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final paragraphs = data.split('\n\n');
     if (paragraphs.length <= 1) {
       final spans = buildMarkdownSpans(data, style, context);
-      return Text.rich(
-        TextSpan(children: spans),
-        maxLines: maxLines,
-        overflow: overflow,
-        softWrap: true,
+      return _bordered(
+        Text.rich(
+          TextSpan(children: spans),
+          maxLines: maxLines,
+          overflow: overflow,
+          softWrap: true,
+        ),
+        context,
       );
     }
 
@@ -201,11 +222,14 @@ class _MarkdownText extends StatelessWidget {
       // pass null and let the paragraph render naturally.
       final paragraphMaxLines = remaining;
       children.add(
-        Text.rich(
-          TextSpan(children: spans),
-          softWrap: true,
-          maxLines: paragraphMaxLines,
-          overflow: paragraphMaxLines == null ? null : overflow,
+        _bordered(
+          Text.rich(
+            TextSpan(children: spans),
+            softWrap: true,
+            maxLines: paragraphMaxLines,
+            overflow: paragraphMaxLines == null ? null : overflow,
+          ),
+          context,
         ),
       );
       if (paragraphMaxLines != null) {
@@ -217,9 +241,9 @@ class _MarkdownText extends StatelessWidget {
       }
       if (i < paragraphs.length - 1 &&
           (remaining == null || remaining > 0)) {
-        children.add(const SizedBox(height: 6));
+        children.add(const SizedBox(height: 10));
         children.add(Container(height: 1, color: dividerColor));
-        children.add(const SizedBox(height: 6));
+        children.add(const SizedBox(height: 10));
       }
     }
     return Column(
@@ -261,6 +285,7 @@ class _MarkdownPreview extends StatelessWidget {
                 style: AppTextStyles.caption.copyWith(color: color),
                 maxLines: 3,
                 overflow: TextOverflow.ellipsis,
+                showBorder: false,
               ),
             ),
           ),
@@ -664,6 +689,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
   // can rip the field out entirely along with the gated UI branches.
   final bool _showDetails = true;
   bool _canvasSelectionMode = false;
+  String? _selectedAgentId;
   EventCallback? _eventHandler;
   WsClient? _eventClient;
   StreamSubscription<WsConnectionState>? _connSub;
@@ -1344,6 +1370,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             }
           }
         },
+        selectedAgentId: _selectedAgentId,
+        onAgentSelect: (agentId) => setState(() => _selectedAgentId = agentId),
       ),
     );
   }
@@ -1633,6 +1661,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       node: nodes[i],
                       showSessionPreview: _showSessionPreview,
                       isLargeScreen: false,
+                      selectedAgentId: _selectedAgentId,
+                      onAgentSelect: (agentId) => setState(() => _selectedAgentId = agentId),
                     ),
                   );
                 }
@@ -1929,6 +1959,8 @@ class NodeCard extends ConsumerStatefulWidget {
   final bool canvasSelectionMode;
   final Set<String> canvasPanelKeys;
   final ValueChanged<AgentModel>? onToggleCanvas;
+  final String? selectedAgentId;
+  final ValueChanged<String>? onAgentSelect;
   const NodeCard({
     super.key,
     required this.node,
@@ -1938,6 +1970,8 @@ class NodeCard extends ConsumerStatefulWidget {
     this.canvasSelectionMode = false,
     this.canvasPanelKeys = const {},
     this.onToggleCanvas,
+    this.selectedAgentId,
+    this.onAgentSelect,
   });
 
   @override
@@ -2064,6 +2098,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                 onToggleCanvas: widget.onToggleCanvas != null
                     ? () => widget.onToggleCanvas!(a)
                     : null,
+                isSelected: widget.selectedAgentId == a.id,
+                onSelect: widget.onAgentSelect,
               );
             },
           ),
@@ -2991,6 +3027,8 @@ class AgentRow extends ConsumerStatefulWidget {
   final bool canvasSelectionMode;
   final bool isInCanvas;
   final VoidCallback? onToggleCanvas;
+  final bool isSelected;
+  final ValueChanged<String>? onSelect;
   const AgentRow({
     super.key,
     required this.agent,
@@ -3001,6 +3039,8 @@ class AgentRow extends ConsumerStatefulWidget {
     this.canvasSelectionMode = false,
     this.isInCanvas = false,
     this.onToggleCanvas,
+    this.isSelected = false,
+    this.onSelect,
   });
 
   @override
@@ -3365,7 +3405,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     // Task #10: 不再读取 sessionLogo / sessionKey 用于 leading 渲染。
     // 「更换图标」popup menu 入口在 _showAgentActions 内自行计算 sessionKey。
 
-    final tile = ListTile(
+    Widget tile = ListTile(
       key: _tileKey,
       dense: true,
       minLeadingWidth: 0,
@@ -3403,9 +3443,20 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           : null,
       onTap: widget.canvasSelectionMode
           ? null
-          : () => context.push('/agent/${widget.nodeId}/${agent.id}'),
+          : () {
+              widget.onSelect?.call(agent.id);
+              context.push('/agent/${widget.nodeId}/${agent.id}');
+            },
       onLongPress: widget.canvasSelectionMode ? null : _showAgentActions,
     );
+
+    // Visual selection highlight feedback
+    if (widget.isSelected) {
+      tile = Container(
+        color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.3),
+        child: tile,
+      );
+    }
 
     if (widget.canvasSelectionMode) {
       return tile;
@@ -3415,6 +3466,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       key: ValueKey('${widget.nodeId}:${agent.id}'),
       direction: DismissDirection.startToEnd,
       confirmDismiss: (_) async {
+        widget.onSelect?.call(agent.id);
         context.push('/agent/${widget.nodeId}/${agent.id}');
         return false;
       },

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "package": "phone-talk",
+  "version": "v0.2.6",
+  "buildDate": "2026-05-09T02:01:06Z",
+  "downloadBaseUrl": "https://download.ilovin.xyz",
+  "installScriptUrl": "https://api.ilovin.xyz/v1/install.sh",
+  "artifacts": [
+    {
+      "name": "agentgw",
+      "description": "Gateway daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentgw-macos-arm64",
+          "url": "https://download.ilovin.xyz/v0.2.6/bin/agentgw-macos-arm64",
+          "sha256": "2746bfbe3b374431a6e73f6e5c516e9930893c29c1c61bb6324d3939a4e114c6",
+          "size":  13436978
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentgw-linux",
+          "url": "https://download.ilovin.xyz/v0.2.6/bin/agentgw-linux",
+          "sha256": "bf70e611027423dcf5311c3d0ed1687130b53d744d993c55dff5d2ed52e885ed",
+          "size":  14044913
+        }
+      ]
+    },
+    {
+      "name": "agentd",
+      "description": "Agent daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "bin/agentd",
+          "url": "https://download.ilovin.xyz/v0.2.6/bin/agentd",
+          "sha256": "3456cc289d23c4a48f5e1f8855a6ca4d638ce1f346e7f03254895204d6716356",
+          "size":  16222498
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "bin/agentd-linux",
+          "url": "https://download.ilovin.xyz/v0.2.6/bin/agentd-linux",
+          "sha256": "582ea0955d9efa439b59730daf6b96c5ce392c278cb055f7332572c0f2de1cc3",
+          "size":  16733649
+        }
+      ]
+    },
+    {
+      "name": "agentapp",
+      "description": "Mobile app",
+      "apk": {
+          "path": "bin/agentapp.apk",
+          "url": "https://download.ilovin.xyz/v0.2.6/bin/agentapp.apk",
+          "sha256": "d16d03b6702bc2f8996e78093da6eeb252548763d8ac3eae1005d3832be72b60",
+          "size":  79818007
+        },
+      "ipa": null
+    }
+  ]
+}

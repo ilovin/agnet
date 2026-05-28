@@ -107,6 +107,9 @@ flutter:
     - family: Noto Sans Symbols 2
       fonts:
         - asset: fonts/NotoSansSymbols2-Regular.ttf
+    - family: Noto Sans Math
+      fonts:
+        - asset: fonts/NotoSansMath-Regular.ttf
     - family: Noto Color Emoji
       fonts:
         - asset: fonts/NotoColorEmoji.ttf

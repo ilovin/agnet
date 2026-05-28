@@ -68,8 +68,8 @@ void main() {
       verify(AppTextStyles.labelSmall, 13, FontWeight.w500, 1.3, bodyFamily);
     });
 
-    test('caption: 12 / 1.3 / w400', () {
-      verify(AppTextStyles.caption, 12, FontWeight.w400, 1.3, bodyFamily);
+    test('caption: 12 / 1.5 / w400', () {
+      verify(AppTextStyles.caption, 12, FontWeight.w400, 1.5, bodyFamily);
     });
 
     test('mono uses JetBrainsMono family', () {

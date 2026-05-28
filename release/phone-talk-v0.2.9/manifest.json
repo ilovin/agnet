@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "package": "phone-talk",
+  "version": "v0.2.9",
+  "buildDate": "2026-05-22T13:58:40Z",
+  "downloadBaseUrl": "https://download.ilovin.xyz",
+  "installScriptUrl": "https://api.ilovin.xyz/v1/install.sh",
+  "artifacts": [
+    {
+      "name": "agentgw",
+      "description": "Gateway daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "platform/darwin-arm64/agentgw",
+          "url": "https://download.ilovin.xyz/v0.2.9/platform/darwin-arm64/agentgw",
+          "sha256": "52f379240943336f729d6b2307588e693f4a0c0bbb7523c9e21695bd7b52d38b",
+          "size":  9256850
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "platform/linux-amd64/agentgw",
+          "url": "https://download.ilovin.xyz/v0.2.9/platform/linux-amd64/agentgw",
+          "sha256": "228c38f979dfe94098db05e5acf8fd2398c6c8ab0daa18dcff14fb9d331994c0",
+          "size":  9801890
+        }
+      ]
+    },
+    {
+      "name": "agentd",
+      "description": "Agent daemon",
+      "platforms": [
+        {
+          "os": "darwin",
+          "arch": "arm64",
+          "path": "platform/darwin-arm64/agentd",
+          "url": "https://download.ilovin.xyz/v0.2.9/platform/darwin-arm64/agentd",
+          "sha256": "a410721af5ef3623ace4b51d378a2bb364cb4d563e012d1a679ed3e6c0d4b16b",
+          "size":  11028770
+        },
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "path": "platform/linux-amd64/agentd",
+          "url": "https://download.ilovin.xyz/v0.2.9/platform/linux-amd64/agentd",
+          "sha256": "7d089e9bad6dcb4a5179dc22f45b0f45dfeb34fb6366f862c3391e55ecff5451",
+          "size":  11505826
+        }
+      ]
+    },
+    {
+      "name": "agentapp",
+      "description": "Mobile app",
+      "apk": {
+          "path": "bin/agentapp.apk",
+          "url": "https://download.ilovin.xyz/v0.2.9/bin/agentapp.apk",
+          "sha256": "b7c21e6d501f04804444c81177638a52d4811d2504470662c1cae80564cdc107",
+          "size":  80670188
+        },
+      "ipa": {
+          "path": "bin/agentapp.ipa",
+          "url": "https://download.ilovin.xyz/v0.2.9/bin/agentapp.ipa",
+          "sha256": "b7bb93b2a492ad51e8e212a2c857906f85c18dcc7970a644ea4dd966378dd59e",
+          "size":  20784502
+        }
+    }
+  ]
+}

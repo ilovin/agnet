@@ -33,6 +33,7 @@ class AppTextStyles {
   static const List<String> fontFamilyFallback = <String>[
     'Noto Sans SC',
     'Noto Sans Symbols 2',
+    'Noto Sans Math',
     'Noto Color Emoji',
     'PingFang SC',
     'Microsoft YaHei',
@@ -106,7 +107,7 @@ class AppTextStyles {
     fontFamilyFallback: fontFamilyFallback,
     fontSize: 12,
     fontWeight: FontWeight.w400,
-    height: 1.3,
+    height: 1.5,
   );
 
   // ── Mono (JetBrainsMono) ─────────────────────────────────────────────
