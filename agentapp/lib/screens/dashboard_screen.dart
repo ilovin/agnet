@@ -19,6 +19,7 @@ import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
+import '../widgets/app_bar/dashboard_status_dot.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -1634,6 +1635,34 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     // removed per user screenshot. The connected/active stats are still
     // surfaced inside _HealthIndicator (when re-exposed) and per-node cards.
 
+    // Aggregate status across all visible agents for the AppBar dot.
+    // Priority: crashed > working > starting > idle > stopped.
+    AgentStatus? aggregateStatus;
+    for (final node in nodes) {
+      for (final agent in nodeState.agentsFor(node.id)) {
+        final isActive =
+            agent.status == AgentStatus.working ||
+            agent.status == AgentStatus.starting ||
+            agent.status == AgentStatus.idle;
+        if (!isActive) continue;
+        if (aggregateStatus == null) {
+          aggregateStatus = agent.status;
+        } else if (agent.status == AgentStatus.crashed) {
+          aggregateStatus = AgentStatus.crashed;
+        } else if (agent.status == AgentStatus.working &&
+            aggregateStatus != AgentStatus.crashed) {
+          aggregateStatus = AgentStatus.working;
+        } else if (agent.status == AgentStatus.starting &&
+            aggregateStatus != AgentStatus.crashed &&
+            aggregateStatus != AgentStatus.working) {
+          aggregateStatus = AgentStatus.starting;
+        } else if (agent.status == AgentStatus.idle &&
+            aggregateStatus == AgentStatus.stopped) {
+          aggregateStatus = AgentStatus.idle;
+        }
+      }
+    }
+
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
@@ -1643,12 +1672,15 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         //   3. 「仪表盘」大标题 + 「X 节点 · …」副标题
         //   4. 右侧 ^ chevron (Icons.expand_less / expand_more)
         // The "Agent" wordmark stays (it sits outside the user's red boxes).
-        // showWordmark stays true; only showMark flips to false so the brand
-        // mark glyph is hidden while the "Agent" text remains.
-        showMark: false,
         // Leading (4-grid Icons.dashboard) removed — header reads from the
         // very left edge.
         // titleWidget (仪表盘 + subtitle) removed — page title block dropped.
+        // Task #23: DashboardStatusDot replaces the brand mark glyph in the
+        // wordmark slot, surfacing aggregate agent status next to "Agent".
+        showMark: aggregateStatus != null,
+        markWidget: aggregateStatus != null
+            ? DashboardStatusDot(status: aggregateStatus)
+            : null,
         actions: [
           if (_showDetails) const _HealthIndicator(),
           // expand_less / expand_more chevron removed; _showDetails stays
