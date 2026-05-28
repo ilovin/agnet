@@ -215,6 +215,22 @@ class NodesNotifier extends StateNotifier<NodeState> {
     state = state.copyWith(nodes: updated);
   }
 
+  /// Update an agent's sessionId locally (e.g., after discovering a sessionId
+  /// from a conversation.history RPC response that the agent model doesn't yet
+  /// have). Keeps the conversation three-tuple key aligned between storage and
+  /// dashboard preview lookup.
+  void updateAgentSessionId(String nodeId, String agentId, String sessionId) {
+    final agentList = List<AgentModel>.from(state.agents[nodeId] ?? []);
+    final idx = agentList.indexWhere((a) => a.id == agentId);
+    if (idx == -1) return;
+    final current = agentList[idx];
+    if (current.sessionId == sessionId) return;
+    agentList[idx] = current.copyWith(sessionId: sessionId);
+    final updated = Map<String, List<AgentModel>>.from(state.agents);
+    updated[nodeId] = agentList;
+    state = state.copyWith(agents: updated);
+  }
+
   /// Rename an agent locally (after a successful agent.rename RPC call).
   void renameAgent(String nodeId, String agentId, String name) {
     final agentList = state.agents[nodeId];

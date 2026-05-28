@@ -229,7 +229,7 @@ class ChatMessage {
       (kind == 'activity_block' || kind == 'activity_list');
 
   /// Matches tool call patterns: [Bash: cmd], [Agent], [SendMessage], [TaskList], etc.
-  static final _toolCallPattern = RegExp(r'^\[[\w]+[:\]]');
+  static final _toolCallPattern = RegExp(r'^\[[\w]+[(\s:\]]');
   static const _thinkingKinds = {'thinking', 'thinking_delta', 'reasoning'};
   static final _explicitThinkingPrefix = RegExp(
     r'^(thinking:|思考过程[:：]|\[thinking\])',
@@ -2140,16 +2140,14 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     return Scaffold(
       appBar: MissionControlAppBar(
-        // Task #10 (follow-up): match dashboard AppBar style — minimal clean
-        // header with only the "Agent" wordmark (no brand mark), back button,
-        // and actions.  The old multi-line titleWidget (name + status + meta)
-        // is removed; that info is already visible in the screen body.
+        showWordmark: false,
         showMark: false,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           tooltip: '返回',
           onPressed: () => context.pop(),
         ),
+        title: agent?.name ?? '',
         actions: [
           // Permission-mode chip (replaces the in-composer mode button so
           // the input row stays compact). Tapping it opens the same config

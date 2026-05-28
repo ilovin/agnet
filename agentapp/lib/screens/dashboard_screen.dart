@@ -308,28 +308,16 @@ class _PreviewParagraphs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final paragraphs = <List<String>>[];
-    var current = <String>[];
-    for (final line in lines) {
-      if (line.isEmpty) {
-        if (current.isNotEmpty) {
-          paragraphs.add(current);
-          current = <String>[];
-        }
-      } else {
-        current.add(line);
-      }
-    }
-    if (current.isNotEmpty) paragraphs.add(current);
+    final visibleLines = lines.where((l) => l.isNotEmpty).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        for (var i = 0; i < paragraphs.length; i++) ...[
+        for (var i = 0; i < visibleLines.length; i++) ...[
           if (i > 0) const SizedBox(height: 4),
           _MarkdownPreview(
-            paragraphs[i].join('\n'),
+            visibleLines[i],
             color: color,
             maxLines: maxLines,
           ),
@@ -730,17 +718,44 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         'limit': 12,
       }, timeout: const Duration(seconds: 3));
       final raw = result is Map ? result : <String, dynamic>{};
-      // Resolve sessionId for the three-key cache: prefer the response's
-      // sessionId (matches the events we just fetched), fall back to the
-      // agent's current resume session in the local store.
       final responseSessionId = (raw['sessionId'] as String?) ?? '';
       final agent = ref
           .read(nodesProvider)
           .agentsFor(nodeId)
           .where((a) => a.id == agentId)
           .firstOrNull;
-      final sessionId =
-          responseSessionId.isNotEmpty ? responseSessionId : (agent?.sessionId ?? '');
+
+      // Resolve sessionId for the conversation three-tuple key.
+      // AgentRow.build() reads messages using agent.sessionId ?? '' so the
+      // key here MUST match that lookup:
+      //
+      // 1. Agent model already has a sessionId AND it matches the backend →
+      //    use it directly.
+      // 2. The backend reports a different/new sessionId → update agent model
+      //    and use the backend's value (keeps both sides consistent).
+      // 3. Neither has a value → empty string (matches AgentRow's ?? '' fallback).
+      String sessionId;
+      if (agent?.sessionId?.isNotEmpty == true) {
+        if (responseSessionId.isNotEmpty && responseSessionId != agent!.sessionId) {
+          // Session rotated on the backend.  Update the agent model so
+          // AgentRow's next rebuild picks up the correct key.
+          sessionId = responseSessionId;
+          ref
+              .read(nodesProvider.notifier)
+              .updateAgentSessionId(nodeId, agentId, responseSessionId);
+        } else {
+          sessionId = agent!.sessionId!;
+        }
+      } else if (responseSessionId.isNotEmpty) {
+        // Agent model doesn't know its sessionId yet but the backend returned
+        // one.  Store it in the agent model so future lookups are aligned.
+        sessionId = responseSessionId;
+        ref
+            .read(nodesProvider.notifier)
+            .updateAgentSessionId(nodeId, agentId, responseSessionId);
+      } else {
+        sessionId = '';
+      }
       final events = ((raw['events'] as List?) ?? const [])
           .map((e) => normalizeHistoryEvent(e as Map))
           .toList();
