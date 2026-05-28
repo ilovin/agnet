@@ -20,13 +20,20 @@ class AppTheme {
   AppTheme._();
 
   static const _fontFamily = AppTextStyles.fontFamily;
-  static const _fontFamilyFallback = <String>[
-    'Noto Sans Symbols 2',
-    'Noto Color Emoji',
-    'PingFang SC',
-    'Microsoft YaHei',
-    'sans-serif',
-  ];
+
+  /// Theme-level font-family fallback. Mirrors
+  /// [AppTextStyles.fontFamilyFallback] so that **every** TextStyle that
+  /// originates from this theme — explicit (`AppTextStyles.bodyMedium`)
+  /// or implicit (`Text('...')` inheriting `DefaultTextStyle`) —
+  /// resolves uncovered glyphs (arrows / shapes / box-drawing / emoji)
+  /// through the same chain.
+  ///
+  /// In particular `Noto Sans Symbols 2` is bundled in pubspec.yaml and
+  /// covers U+2190..U+21FF (arrows incl. `→`), U+25A0..U+25FF (geometric
+  /// shapes incl. `★`), U+2600..U+27BF (misc symbols incl. `✓`/`⏺`).
+  /// Without this fallback those glyphs render as .notdef tofu under
+  /// Flutter Web CanvasKit.
+  static const _fontFamilyFallback = AppTextStyles.fontFamilyFallback;
 
   /// Build a complete [ThemeData] for the given density and brightness.
   ///
@@ -38,7 +45,13 @@ class AppTheme {
   }) {
     final isDark = brightness == Brightness.dark;
     final colorScheme = _buildColorScheme(brightness);
-    final textTheme = _buildTextTheme(densityMode, colorScheme);
+    // Apply the shared fallback chain on every entry so that any widget
+    // that looks up `Theme.of(context).textTheme.bodyMedium` (or any
+    // other tier) is guaranteed to carry the Symbols 2 / Color Emoji
+    // fallback — not just the ones that were authored by hand in
+    // [AppTextStyles].
+    final textTheme = _buildTextTheme(densityMode, colorScheme)
+        .apply(fontFamilyFallback: _fontFamilyFallback);
 
     final scaffoldBackground = isDark ? AppColors.bgDark : AppColors.bgLight;
     final cardBackground = isDark ? AppColors.elevDark : AppColors.elevLight;

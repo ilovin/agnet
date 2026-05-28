@@ -4516,7 +4516,7 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                     collapsedCode,
                     style: TextStyle(
                       fontFamily: 'Noto Sans SC',
-                      fontFamilyFallback: const ['Noto Sans SC'],
+                      fontFamilyFallback: AppTextStyles.fontFamilyFallback,
                       fontSize: widget.fontSize,
                       height: 1.4,
                       fontWeight: FontWeight.w500,
@@ -4532,7 +4532,7 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                       ],
                       style: TextStyle(
                         fontFamily: 'Noto Sans SC',
-                        fontFamilyFallback: const ['Noto Sans SC'],
+                        fontFamilyFallback: AppTextStyles.fontFamilyFallback,
                         fontSize: widget.fontSize,
                         height: 1.4,
                         fontWeight: FontWeight.w500,
@@ -4594,7 +4594,7 @@ Widget _codeBlock(
       code,
       style: TextStyle(
         fontFamily: AppTextStyles.monoFontFamily,
-        fontFamilyFallback: const ['Noto Sans SC'],
+        fontFamilyFallback: AppTextStyles.fontFamilyFallback,
         fontSize: fontSize,
         height: 1.4,
         fontWeight: FontWeight.w500,
@@ -4607,7 +4607,7 @@ Widget _codeBlock(
         children: [highlightCode(code, isDark: isDark)],
         style: TextStyle(
           fontFamily: AppTextStyles.monoFontFamily,
-          fontFamilyFallback: const ['Noto Sans SC'],
+          fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           fontSize: fontSize,
           height: 1.4,
           fontWeight: FontWeight.w500,
@@ -4663,6 +4663,7 @@ class MarkdownContent extends ConsumerWidget {
             color: textColor,
             height: 1.4,
             fontWeight: FontWeight.w500,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
         );
       }
@@ -4721,39 +4722,88 @@ class MarkdownContent extends ConsumerWidget {
           ),
         ),
         styleSheet: MarkdownStyleSheet(
+          // Every TextStyle below carries `fontFamilyFallback:
+          // AppTextStyles.fontFamilyFallback` (Noto Sans SC → Symbols 2
+          // → Color Emoji → CJK fallbacks) so that arrows (→), box-
+          // drawing (─│), shapes (★), media glyphs (⏺), and similar
+          // characters never render as .notdef tofu under Flutter Web
+          // CanvasKit. flutter_markdown does merge these styles with
+          // the parent DefaultTextStyle, but we declare the fallback
+          // explicitly here as a hard guarantee that does not depend on
+          // the merge order.
           p: TextStyle(
             fontSize: fontSize,
             color: textColor,
             height: 1.4,
             fontWeight: FontWeight.w500,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           h1: TextStyle(
             fontSize: fontSize + 8,
             fontWeight: FontWeight.bold,
             color: textColor,
             height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           h2: TextStyle(
             fontSize: fontSize + 6,
             fontWeight: FontWeight.bold,
             color: textColor,
             height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           h3: TextStyle(
             fontSize: fontSize + 4,
             fontWeight: FontWeight.bold,
             color: textColor,
             height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           h4: TextStyle(
             fontSize: fontSize + 2,
             fontWeight: FontWeight.bold,
             color: textColor,
             height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
+          h5: TextStyle(
+            fontSize: fontSize + 1,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
+          h6: TextStyle(
+            fontSize: fontSize,
+            fontWeight: FontWeight.bold,
+            color: textColor,
+            height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
+          em: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            fontStyle: FontStyle.italic,
+            height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
+          strong: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            fontWeight: FontWeight.bold,
+            height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
+          del: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            decoration: TextDecoration.lineThrough,
+            height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           code: TextStyle(
             fontFamily: AppTextStyles.monoFontFamily,
-            fontFamilyFallback: const ['Noto Sans SC'],
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
             fontSize: fontSize,
             fontWeight: FontWeight.w500,
             color: isNaive
@@ -4777,6 +4827,7 @@ class MarkdownContent extends ConsumerWidget {
             color: textColor.withValues(alpha: 0.8),
             fontStyle: FontStyle.italic,
             height: 1.4,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
           blockquoteDecoration: BoxDecoration(
             border: Border(
@@ -4787,11 +4838,16 @@ class MarkdownContent extends ConsumerWidget {
             ),
           ),
           blockquotePadding: const EdgeInsets.only(left: 12),
-          listBullet: TextStyle(fontSize: fontSize, color: textColor),
+          listBullet: TextStyle(
+            fontSize: fontSize,
+            color: textColor,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+          ),
           a: TextStyle(
             fontSize: fontSize,
             color: scheme.primary,
             decoration: TextDecoration.underline,
+            fontFamilyFallback: AppTextStyles.fontFamilyFallback,
           ),
         ),
         onTapLink: (text, href, title) async {
@@ -4854,7 +4910,7 @@ class MarkdownContent extends ConsumerWidget {
             text: match[6]!,
             style: TextStyle(
               fontFamily: 'Noto Sans SC',
-              fontFamilyFallback: const ['Noto Sans SC'],
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
               fontSize: fontSize - 1,
               color: isDark ? const Color(0xFF98C379) : const Color(0xFF0550AE),
               backgroundColor: null,
@@ -4883,7 +4939,16 @@ class MarkdownContent extends ConsumerWidget {
     }
 
     return TextSpan(
-      style: TextStyle(fontSize: fontSize, color: color, height: 1.4),
+      // Declare the symbol fallback chain on the outer span so glyphs
+      // not covered by `Noto Sans SC` (arrows / shapes / media) resolve
+      // through `Noto Sans Symbols 2` rather than rendering as tofu —
+      // even on the simple-text path that bypasses MarkdownBody.
+      style: TextStyle(
+        fontSize: fontSize,
+        color: color,
+        height: 1.4,
+        fontFamilyFallback: AppTextStyles.fontFamilyFallback,
+      ),
       children: spans.isEmpty ? [TextSpan(text: data)] : spans,
     );
   }
