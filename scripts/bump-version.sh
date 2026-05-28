@@ -86,13 +86,16 @@ update_go_version() {
     log_info "Updating $file → version: $version"
     
     # Update var Version = "vX.Y.Z" or const version = "... vX.Y.Z"
+    # Note: ${version#v} strips a leading "v" so we can re-add a single literal "v",
+    # ensuring the rewritten value always carries the "v" prefix even if the caller
+    # passes either "v1.2.3" or "1.2.3".
     if grep -q 'var Version = "v' "$file"; then
-        sed -i '' "s/var Version = \"v[^\"]*/var Version = \"${version#v}/" "$file"
+        sed -i '' "s/var Version = \"v[^\"]*/var Version = \"v${version#v}/" "$file"
     elif grep -q 'Version.*=.*"v' "$file"; then
-        sed -i '' "s/Version.*=.*\"v[^\"]*/Version = \"${version#v}/" "$file"
+        sed -i '' "s/Version.*=.*\"v[^\"]*/Version = \"v${version#v}/" "$file"
     elif grep -q 'const version = ' "$file"; then
         # Handle const version = "agentd v0.1.0"
-        sed -i '' "s/const version = \"[^\"]*v[^\"]*/const version = \"${component} ${version#v}/" "$file"
+        sed -i '' "s/const version = \"[^\"]*v[^\"]*/const version = \"${component} v${version#v}/" "$file"
     fi
     
     # Verify update
