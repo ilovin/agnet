@@ -105,5 +105,32 @@ void main() {
       expect(preview.any((line) => line.contains('实际内容') || line.contains('第二行')), isTrue,
           reason: 'Should use last non-empty message even if last message is blank');
     });
+
+    test('preserves paragraph breaks as empty strings', () {
+      final lines = buildSessionPreviewLines(
+        ['第一段内容\n\n第二段内容'],
+        maxLines: 3,
+      );
+      expect(lines, ['第一段内容', '', '第二段内容'],
+          reason: 'Empty line between paragraphs should be preserved as empty string');
+    });
+
+    test('trims trailing empty markers', () {
+      final lines = buildSessionPreviewLines(
+        ['内容\n\n'],
+        maxLines: 3,
+      );
+      expect(lines, ['内容'],
+          reason: 'Trailing empty markers should be trimmed');
+    });
+
+    test('does not add duplicate empty markers', () {
+      final lines = buildSessionPreviewLines(
+        ['A\n\n\nB'],
+        maxLines: 3,
+      );
+      expect(lines, ['A', '', 'B'],
+          reason: 'Multiple consecutive empty lines should collapse to one paragraph break');
+    });
   });
 }
