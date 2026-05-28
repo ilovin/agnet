@@ -17,6 +17,7 @@ import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../providers/unread_provider.dart';
 import '../providers/nodes_provider.dart';
 import '../providers/conversation_provider.dart';
+import '../providers/dashboard_preview_lines_provider.dart';
 import '../models/connection_config.dart';
 import '../services/apk_downloader.dart';
 import '../theme/app_spacing.dart';
@@ -244,6 +245,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ref.read(densityModeProvider.notifier).set(v!),
                   ),
               ],
+            );
+          }),
+          Consumer(builder: (context, ref, _) {
+            final previewLines = ref.watch(dashboardPreviewLinesProvider);
+            return ListTile(
+              leading: const Icon(Icons.format_line_spacing),
+              title: const Text('Dashboard preview lines'),
+              subtitle: Text('预览行数: $previewLines'),
+              trailing: SizedBox(
+                width: 160,
+                child: Slider(
+                  value: previewLines.toDouble(),
+                  min: 1,
+                  max: 5,
+                  divisions: 4,
+                  label: '$previewLines',
+                  onChanged: (v) => ref
+                      .read(dashboardPreviewLinesProvider.notifier)
+                      .set(v.round()),
+                ),
+              ),
             );
           }),
           const Divider(),

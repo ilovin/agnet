@@ -14,6 +14,7 @@ import '../providers/dashboard_detail_panel_provider.dart';
 import '../providers/unread_provider.dart';
 import '../providers/health_provider.dart';
 import '../providers/session_logo_provider.dart';
+import '../providers/dashboard_preview_lines_provider.dart';
 import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
@@ -45,38 +46,30 @@ String _dirname(String path) {
 
 List<String> buildSessionPreviewLines(
   List<String> texts, {
-  int maxLines = 2,
+  int maxLines = 3,
   int maxCharsPerLine = 80,
 }) {
-  // Find the last non-empty text entry only; do not span across multiple texts.
-  String? lastText;
+  // Take the last 'maxLines' non-empty messages, one summary line per message.
+  final nonEmptyTexts = <String>[];
   for (var i = texts.length - 1; i >= 0; i--) {
     if (texts[i].trim().isNotEmpty) {
-      lastText = texts[i];
-      break;
+      nonEmptyTexts.add(texts[i]);
+      if (nonEmptyTexts.length >= maxLines) break;
     }
   }
-  if (lastText == null) return const [];
+  if (nonEmptyTexts.isEmpty) return const [];
 
   final lines = <String>[];
-  final normalized = lastText.replaceAll('\r', '\n');
-  for (final line in normalized.split('\n')) {
-    final trimmed = line.trim();
-    if (trimmed.isEmpty) {
-      // Preserve paragraph breaks so the UI can add visual spacing.
-      if (lines.isNotEmpty && lines.last.isNotEmpty) {
-        lines.add('');
-      }
-      continue;
-    }
-    lines.add(buildCollapsedPreview(trimmed, maxChars: maxCharsPerLine));
+  // Reverse so oldest message is first (matches chronological order)
+  for (final text in nonEmptyTexts.reversed) {
+    // Take the first line of each message
+    final firstLine = text.replaceAll('\r', '\n').split('\n').first.trim();
+    if (firstLine.isEmpty) continue;
+    final summary = buildCollapsedPreview(firstLine, maxChars: maxCharsPerLine);
+    lines.add(summary);
   }
-  // Trim trailing empty markers.
-  while (lines.isNotEmpty && lines.last.isEmpty) {
-    lines.removeLast();
-  }
-  if (lines.length <= maxLines) return lines;
-  return lines.sublist(lines.length - maxLines);
+
+  return lines;
 }
 
 List<String> sessionPreviewLinesFromMessages(
@@ -259,8 +252,13 @@ class _MarkdownText extends StatelessWidget {
 class _MarkdownPreview extends StatelessWidget {
   final String data;
   final Color color;
+  final int maxLines;
 
-  const _MarkdownPreview(this.data, {required this.color});
+  const _MarkdownPreview(
+    this.data, {
+    required this.color,
+    this.maxLines = 3,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -283,7 +281,7 @@ class _MarkdownPreview extends StatelessWidget {
               child: _MarkdownText(
                 data,
                 style: AppTextStyles.caption.copyWith(color: color),
-                maxLines: 3,
+                maxLines: maxLines,
                 overflow: TextOverflow.ellipsis,
                 showBorder: false,
               ),
@@ -300,8 +298,13 @@ class _MarkdownPreview extends StatelessWidget {
 class _PreviewParagraphs extends StatelessWidget {
   final List<String> lines;
   final Color color;
+  final int maxLines;
 
-  const _PreviewParagraphs(this.lines, {required this.color});
+  const _PreviewParagraphs(
+    this.lines, {
+    required this.color,
+    this.maxLines = 3,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -328,6 +331,7 @@ class _PreviewParagraphs extends StatelessWidget {
           _MarkdownPreview(
             paragraphs[i].join('\n'),
             color: color,
+            maxLines: maxLines,
           ),
         ],
       ],
@@ -770,11 +774,12 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     super.initState();
     _subscribeEvents();
     _startAutoRefresh();
-    // Hydrate persisted detail-panel expansion preference (lazy load avoids
-    // a race with widget tests that don't await the constructor).
+    // Hydrate persisted preferences (lazy load avoids a race with widget
+    // tests that don't await the constructor).
     Future<void>.microtask(() {
       if (!mounted) return;
       ref.read(dashboardDetailPanelExpandedProvider.notifier).hydrate();
+      ref.read(dashboardPreviewLinesProvider.notifier).hydrate();
     });
     // Listen for connection state changes
     final notifier = ref.read(connectionProvider.notifier);
@@ -1349,6 +1354,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     Set<String> canvasPanelKeys,
     Map<String, DashboardSessionTarget> sessionByKey,
   ) {
+    final previewMaxLines = ref.watch(dashboardPreviewLinesProvider);
     return ListView.builder(
       itemCount: nodes.length,
       padding: const EdgeInsets.all(8),
@@ -1372,6 +1378,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         },
         selectedAgentId: _selectedAgentId,
         onAgentSelect: (agentId) => setState(() => _selectedAgentId = agentId),
+        previewMaxLines: previewMaxLines,
       ),
     );
   }
@@ -1654,6 +1661,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
               builder: (context, constraints) {
                 final largeScreen = _isLargeScreen(context);
                 if (!largeScreen) {
+                  final previewMaxLines = ref.watch(dashboardPreviewLinesProvider);
                   return ListView.builder(
                     itemCount: nodes.length,
                     padding: const EdgeInsets.all(8),
@@ -1663,6 +1671,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                       isLargeScreen: false,
                       selectedAgentId: _selectedAgentId,
                       onAgentSelect: (agentId) => setState(() => _selectedAgentId = agentId),
+                      previewMaxLines: previewMaxLines,
                     ),
                   );
                 }
@@ -1961,6 +1970,7 @@ class NodeCard extends ConsumerStatefulWidget {
   final ValueChanged<AgentModel>? onToggleCanvas;
   final String? selectedAgentId;
   final ValueChanged<String>? onAgentSelect;
+  final int previewMaxLines;
   const NodeCard({
     super.key,
     required this.node,
@@ -1972,6 +1982,7 @@ class NodeCard extends ConsumerStatefulWidget {
     this.onToggleCanvas,
     this.selectedAgentId,
     this.onAgentSelect,
+    this.previewMaxLines = 3,
   });
 
   @override
@@ -2037,6 +2048,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
     final visibleAgents = visibleManagedAgentsForNode(agents);
     final summaryChips = _buildSummaryChips(context, visibleAgents);
 
+    final singleAgent = visibleAgents.length == 1;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: Column(
@@ -2045,6 +2058,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
           ListTile(
             dense: true,
             minLeadingWidth: 0,
+            visualDensity: singleAgent ? VisualDensity.compact : null,
+            contentPadding: singleAgent
+                ? const EdgeInsets.symmetric(horizontal: 16, vertical: 0)
+                : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             leading: Icon(nodeIcon, color: _statusColor, size: 20),
             title: Text(
               nodeDisplay,
@@ -2100,6 +2117,8 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                     : null,
                 isSelected: widget.selectedAgentId == a.id,
                 onSelect: widget.onAgentSelect,
+                previewMaxLines: widget.previewMaxLines,
+                compact: visibleAgents.length == 1,
               );
             },
           ),
@@ -3029,6 +3048,8 @@ class AgentRow extends ConsumerStatefulWidget {
   final VoidCallback? onToggleCanvas;
   final bool isSelected;
   final ValueChanged<String>? onSelect;
+  final int previewMaxLines;
+  final bool compact;
   const AgentRow({
     super.key,
     required this.agent,
@@ -3041,6 +3062,8 @@ class AgentRow extends ConsumerStatefulWidget {
     this.onToggleCanvas,
     this.isSelected = false,
     this.onSelect,
+    this.previewMaxLines = 3,
+    this.compact = false,
   });
 
   @override
@@ -3399,6 +3422,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         ? sessionPreviewLinesFromMessages(
             ref.watch(conversationProvider)[(widget.nodeId, agent.id, agent.sessionId ?? '')] ??
                 const [],
+            maxLines: widget.previewMaxLines,
           )
         : const <String>[];
 
@@ -3409,7 +3433,10 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       key: _tileKey,
       dense: true,
       minLeadingWidth: 0,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      contentPadding: widget.compact
+          ? const EdgeInsets.symmetric(horizontal: 16, vertical: 0)
+          : const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      visualDensity: widget.compact ? VisualDensity.compact : null,
       // Task #10: 删掉 agent 行左侧的 logo 圆头像（sessionLogo Icon）。
       // - canvasSelectionMode 下保留 add/remove 圈选交互（不是 brand logo）。
       // - 普通模式下 leading 设为 null，文字直接靠左；未读小红点改放到
@@ -3434,10 +3461,11 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       title: _buildTitleRow(context, displayTitle),
       subtitle: previewLines.isNotEmpty
           ? Padding(
-              padding: const EdgeInsets.only(top: 4),
+              padding: EdgeInsets.only(top: widget.compact ? 2 : 4),
               child: _PreviewParagraphs(
                 previewLines,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
+                maxLines: widget.previewMaxLines,
               ),
             )
           : null,

@@ -73,9 +73,9 @@ func TestSanitizeStatusLineRunes(t *testing.T) {
 			want: "  L found 3 files",
 		},
 		{
-			name: "leaves arrow keys intact (covered by Noto Sans SC)",
+			name: "arrows become ASCII equivalents (CanvasKit fallback sometimes misses them)",
 			in:   "↑↓←→",
-			want: "↑↓←→",
+			want: "^v<-->",
 		},
 		{
 			name: "leaves emoji intact",

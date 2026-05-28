@@ -13,75 +13,144 @@ MessageModel _msg(String text) => MessageModel(
 
 void main() {
   group('buildSessionPreviewLines', () {
-    test('does not span multiple messages - takes last N lines of last text only', () {
-      // The last text is the important one. When we have 2 texts and maxLines=2,
-      // the old code takes the last 2 lines globally (potentially spanning texts).
-      // Here the last text has 5 lines; we want only the last 2 from it,
-      // NOT one line from the first text + one from the last.
+    test('shows last N messages, one line per message', () {
       final lines = buildSessionPreviewLines(
         [
-          // first "message" text - should NOT appear in preview
-          '前一条消息内容\n更前一条行A',
-          // last "message" text - only last 2 lines should appear
-          '- M4 任务（\n详情A\n详情B\n详情C\n），完成后...',
+          'Hello world\nThis is a test',
+          'Another message here',
+          'Latest message\nWith multiple lines',
         ],
-        maxLines: 2,
+        maxLines: 3,
       );
-      // Should not include anything from the first text
-      expect(lines.any((line) => line.contains('前一条') || line.contains('更前一条行A')), isFalse,
-          reason: 'Preview should not include text from earlier messages');
-      // Should include last 2 lines of last text
-      expect(lines.any((line) => line.contains('详情C') || line.contains('完成后')), isTrue,
-          reason: 'Preview should contain last lines of last message');
+      expect(lines, [
+        'Hello world',
+        'Another message here',
+        'Latest message',
+      ]);
     });
 
-    test('bracket-in-one-message bug: paren open on earlier message, close on last', () {
-      // Bug scenario: earlier message ends with '（', later message starts with '）'
-      // Old code: last 2 global lines = ['（', '）'] → looks like empty brackets
-      // New code: last 2 lines from LAST text only
+    test('shows fewer lines when fewer messages exist', () {
       final lines = buildSessionPreviewLines(
         [
-          '一些内容\n括号开始（',  // ends with open paren
-          '），后续处理完成',       // starts with close paren - this is the "last message"
+          'Only message\nWith multiple lines',
+        ],
+        maxLines: 3,
+      );
+      expect(lines, ['Only message']);
+    });
+
+    test('respects maxLines limit', () {
+      final lines = buildSessionPreviewLines(
+        [
+          'Message 1',
+          'Message 2',
+          'Message 3',
+          'Message 4',
         ],
         maxLines: 2,
       );
-      // Old behavior would give ['括号开始（', '），后续处理完成'] - spanning two messages
-      // New behavior: only from last text
-      expect(lines.any((line) => line.contains('括号开始')), isFalse,
-          reason: 'Should not include line from an earlier message');
-      expect(lines.any((line) => line.contains('），后续处理完成')), isTrue,
-          reason: 'Should contain content from last message');
+      expect(lines, ['Message 3', 'Message 4']);
+    });
+
+    test('skips empty messages', () {
+      final lines = buildSessionPreviewLines(
+        [
+          'First message',
+          '   ',
+          'Second message',
+          '',
+          'Third message',
+        ],
+        maxLines: 3,
+      );
+      expect(lines, ['First message', 'Second message', 'Third message']);
+    });
+
+    test('truncates long messages with ellipsis', () {
+      final longText = 'A' * 100;
+      final lines = buildSessionPreviewLines(
+        [longText],
+        maxLines: 1,
+        maxCharsPerLine: 80,
+      );
+      expect(lines.length, 1);
+      // buildCollapsedPreview truncates at maxChars then appends '…'
+      expect(lines[0].length, 81); // 80 chars + '…'
+      expect(lines[0].endsWith('…'), isTrue);
+    });
+
+    test('multi-line message shows only first line', () {
+      final lines = buildSessionPreviewLines(
+        [
+          'First line\nSecond line\nThird line',
+        ],
+        maxLines: 1,
+      );
+      expect(lines, ['First line']);
+    });
+
+    test('returns empty for empty texts', () {
+      expect(buildSessionPreviewLines([]), isEmpty);
+    });
+
+    test('returns empty when all texts are blank', () {
+      expect(buildSessionPreviewLines(['   ', '']), isEmpty);
+    });
+
+    test('uses buildCollapsedPreview for long single line', () {
+      final lines = buildSessionPreviewLines(
+        ['Short'],
+        maxLines: 1,
+        maxCharsPerLine: 80,
+      );
+      expect(lines, ['Short']);
     });
   });
 
   group('sessionPreviewLinesFromMessages', () {
-    test('does not span multiple messages - paren bug reproduction', () {
-      // Reproduces the actual bug:
-      // Earlier message contains '（' on a line, later message contains '）'
+    test('shows last N messages, one line per message', () {
       final messages = <MessageModel>[
-        _msg('一些背景内容\n括号开始（'),
-        _msg('），后续处理\n完成后报根因'),
+        _msg('Hello world\nThis is a test'),
+        _msg('Another message here'),
+        _msg('Latest message\nWith multiple lines'),
       ];
-      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
-      // Old code: last 2 global lines across both messages = ['括号开始（', '），后续处理']
-      // New code: only last 2 lines from the LAST message = ['），后续处理', '完成后报根因']
-      expect(preview.any((line) => line.contains('括号开始')), isFalse,
-          reason: 'Preview must not include content from earlier message');
-      expect(preview.any((line) => line.contains('完成后报根因') || line.contains('），后续处理')), isTrue,
-          reason: 'Preview must contain content from last message only');
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 3);
+      expect(preview, [
+        'Hello world',
+        'Another message here',
+        'Latest message',
+      ]);
     });
 
-    test('does not span multiple messages - multi-line last message', () {
+    test('shows fewer lines when fewer messages exist', () {
       final messages = <MessageModel>[
-        _msg('前一条消息内容\n更前一条'),
-        _msg('- M4 任务（\n详情A\n详情B\n详情C\n），完成后...'),
+        _msg('Only message\nWith multiple lines'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 3);
+      expect(preview, ['Only message']);
+    });
+
+    test('respects maxLines limit', () {
+      final messages = <MessageModel>[
+        _msg('Message 1'),
+        _msg('Message 2'),
+        _msg('Message 3'),
+        _msg('Message 4'),
       ];
       final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
-      expect(preview.any((line) => line.contains('前一条')), isFalse,
-          reason: 'Preview must not include earlier message content');
-      expect(preview.any((line) => line.contains('详情C') || line.contains('完成后')), isTrue,
-          reason: 'Preview must contain last lines of last message');
+      expect(preview, ['Message 3', 'Message 4']);
+    });
+
+    test('skips blank messages', () {
+      final messages = <MessageModel>[
+        _msg('First message'),
+        _msg('   '),
+        _msg('Second message'),
+        _msg(''),
+        _msg('Third message'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 3);
+      expect(preview, ['First message', 'Second message', 'Third message']);
     });
 
     test('returns empty for no messages', () {
@@ -96,41 +165,23 @@ void main() {
       expect(sessionPreviewLinesFromMessages(messages), isEmpty);
     });
 
-    test('skips blank messages and finds last non-empty one', () {
+    test('multi-line message shows only first line', () {
       final messages = <MessageModel>[
-        _msg('实际内容\n第二行'),
-        _msg('   '),   // blank - should be skipped
+        _msg('First line\nSecond line\nThird line'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 1);
+      expect(preview, ['First line']);
+    });
+
+    test('does not span across messages - each message is one line', () {
+      // Earlier bug: content from message N-1 would appear in preview
+      // Now each message contributes exactly one line (its first line)
+      final messages = <MessageModel>[
+        _msg('Earlier message'),
+        _msg('Later message\nWith extra lines'),
       ];
       final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
-      expect(preview.any((line) => line.contains('实际内容') || line.contains('第二行')), isTrue,
-          reason: 'Should use last non-empty message even if last message is blank');
-    });
-
-    test('preserves paragraph breaks as empty strings', () {
-      final lines = buildSessionPreviewLines(
-        ['第一段内容\n\n第二段内容'],
-        maxLines: 3,
-      );
-      expect(lines, ['第一段内容', '', '第二段内容'],
-          reason: 'Empty line between paragraphs should be preserved as empty string');
-    });
-
-    test('trims trailing empty markers', () {
-      final lines = buildSessionPreviewLines(
-        ['内容\n\n'],
-        maxLines: 3,
-      );
-      expect(lines, ['内容'],
-          reason: 'Trailing empty markers should be trimmed');
-    });
-
-    test('does not add duplicate empty markers', () {
-      final lines = buildSessionPreviewLines(
-        ['A\n\n\nB'],
-        maxLines: 3,
-      );
-      expect(lines, ['A', '', 'B'],
-          reason: 'Multiple consecutive empty lines should collapse to one paragraph break');
+      expect(preview, ['Earlier message', 'Later message']);
     });
   });
 }

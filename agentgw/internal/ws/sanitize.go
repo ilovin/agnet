@@ -110,6 +110,16 @@ func statusLineReplacement(r rune) (string, bool) {
 	// Record button symbol → filled circle
 	case r == 0x23FA:
 		return "●", true
+	// Arrows — sometimes render as tofu in CanvasKit even though
+	// Noto Sans SC claims coverage; sanitize to ASCII for safety.
+	case r == 0x2190: // ←
+		return "<-", true
+	case r == 0x2191: // ↑
+		return "^", true
+	case r == 0x2192: // →
+		return "->", true
+	case r == 0x2193: // ↓
+		return "v", true
 	}
 	return "", false
 }

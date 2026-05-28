@@ -2140,33 +2140,15 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
 
     return Scaffold(
       appBar: MissionControlAppBar(
-        showWordmark: false,
-        titleWidget: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              _agentName ?? agent?.name ?? widget.agentId,
-              style: AppTextStyles.bodyMedium,
-            ),
-            if (agent != null)
-              Text(
-                _statusLabel(agent.status),
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: _statusColor(agent.status),
-                ),
-              ),
-            if (agent != null)
-              Text(
-                _buildMetaLine(agent),
-                style: TextStyle(
-                  fontFamily: AppTextStyles.monoFontFamily,
-                  fontSize: 11,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-          ],
+        // Task #10 (follow-up): match dashboard AppBar style — minimal clean
+        // header with only the "Agent" wordmark (no brand mark), back button,
+        // and actions.  The old multi-line titleWidget (name + status + meta)
+        // is removed; that info is already visible in the screen body.
+        showMark: false,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: '返回',
+          onPressed: () => context.pop(),
         ),
         actions: [
           // Permission-mode chip (replaces the in-composer mode button so
