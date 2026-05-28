@@ -1646,6 +1646,7 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
         // Leading (4-grid Icons.dashboard) removed — header reads from the
         // very left edge.
         // titleWidget (仪表盘 + subtitle) removed — page title block dropped.
+        showMark: false,
         actions: [
           if (_showDetails) const _HealthIndicator(),
           // expand_less / expand_more chevron removed; _showDetails stays
