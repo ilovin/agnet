@@ -1509,6 +1509,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
+        // Task #10: hide brand mark + "Agent" wordmark on the dashboard so
+        // the header reads cleaner. MissionControlMark / wordmark are still
+        // available for other screens via the default showWordmark=true.
+        showWordmark: false,
         leading: const IconButton(
           icon: Icon(Icons.dashboard),
           tooltip: '仪表盘',
@@ -3071,9 +3075,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
 
   Widget _buildTitleRow(BuildContext context, String displayTitle) {
     final colors = Theme.of(context).colorScheme;
+    final unreadBadge = _buildUnreadBadge();
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
+        // Task #10: leading 槽不再用，把未读小红点前置到标题行起始（仅未读>0
+        // 时占位）。这是功能性提示，与 brand logo 无关。
+        if (unreadBadge is! SizedBox) ...[
+          unreadBadge,
+          const SizedBox(width: 6),
+        ],
         Expanded(
           child: Text(
             displayTitle,
@@ -3110,6 +3121,15 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       ),
     );
     final agent = widget.agent;
+    // Task #10: leading 已不渲染 logo Icon；保留 picker 入口于此 popup menu。
+    final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
+      provider: agent.provider,
+      sessionId: agent.sessionId,
+      pid: agent.pid,
+      agentId: agent.id,
+    )}';
+    final sessionLogo =
+        ref.read(sessionLogoProvider.notifier).iconFor(sessionKey);
     final items = <PopupMenuEntry<String>>[
       const PopupMenuItem<String>(
         value: 'rename',
@@ -3118,6 +3138,16 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             Icon(Icons.edit, size: 18),
             SizedBox(width: 8),
             Text('重命名'),
+          ],
+        ),
+      ),
+      const PopupMenuItem<String>(
+        value: 'change_icon',
+        child: Row(
+          children: [
+            Icon(Icons.image_outlined, size: 18),
+            SizedBox(width: 8),
+            Text('更换图标'),
           ],
         ),
       ),
@@ -3145,6 +3175,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     );
     if (!mounted || value == null) return;
     if (value == 'rename') _renameAgent();
+    if (value == 'change_icon') _showLogoPicker(sessionKey, sessionLogo);
   }
 
   Future<void> _renameAgent() async {
@@ -3296,19 +3327,19 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           )
         : const <String>[];
 
-    final sessionKey = '${widget.nodeId}:${sessionIdentityKey(
-      provider: agent.provider,
-      sessionId: agent.sessionId,
-      pid: agent.pid,
-      agentId: agent.id,
-    )}';
-    final sessionLogo = ref.watch(sessionLogoProvider.notifier).iconFor(sessionKey);
+    // Task #10: 不再读取 sessionLogo / sessionKey 用于 leading 渲染。
+    // 「更换图标」popup menu 入口在 _showAgentActions 内自行计算 sessionKey。
 
     final tile = ListTile(
       key: _tileKey,
       dense: true,
       minLeadingWidth: 0,
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 0),
+      // Task #10: 删掉 agent 行左侧的 logo 圆头像（sessionLogo Icon）。
+      // - canvasSelectionMode 下保留 add/remove 圈选交互（不是 brand logo）。
+      // - 普通模式下 leading 设为 null，文字直接靠左；未读小红点改放到
+      //   title row 内（见 _buildTitleRow），不再依赖 leading 槽。
+      // 长按更换图标的入口转移到 _showAgentActions popup menu 中的「更换图标」。
       leading: widget.canvasSelectionMode
           ? InkWell(
               onTap: widget.onToggleCanvas,
@@ -3324,35 +3355,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                 ),
               ),
             )
-          : Stack(
-              clipBehavior: Clip.none,
-              children: [
-                InkWell(
-                  onTap: () {
-                    final t = agent.lastMessageTime;
-                    if (t != null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('最后消息：${_formatRelativeTime(t)}'),
-                          duration: const Duration(seconds: 2),
-                        ),
-                      );
-                    }
-                  },
-                  onLongPress: () => _showLogoPicker(sessionKey, sessionLogo),
-                  borderRadius: BorderRadius.circular(16),
-                  child: Padding(
-                    padding: const EdgeInsets.all(2),
-                    child: Icon(sessionLogo, color: providerColor(agent.provider), size: 18),
-                  ),
-                ),
-                Positioned(
-                  right: -2,
-                  top: -2,
-                  child: _buildUnreadBadge(),
-                ),
-              ],
-            ),
+          : null,
       title: _buildTitleRow(context, displayTitle),
       subtitle: previewLines.isNotEmpty
           ? Padding(
