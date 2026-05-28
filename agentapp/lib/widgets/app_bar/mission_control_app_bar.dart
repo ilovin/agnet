@@ -24,7 +24,7 @@ class MissionControlAppBar extends StatelessWidget
     this.titleWidget,
     this.leading,
     this.actions,
-    this.toolbarHeight = 56,
+    this.toolbarHeight = 48,
     this.showScanningLine = true,
     this.showWordmark = true,
     this.showMark = true,
@@ -103,7 +103,7 @@ class MissionControlAppBar extends StatelessWidget
             child: SizedBox(
               height: toolbarHeight,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Row(
                   children: [
                     if (leading != null) ...[
@@ -120,17 +120,17 @@ class MissionControlAppBar extends StatelessWidget
                     ],
                     if (titleWidget != null) ...[
                       _BarSeparator(),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       Flexible(child: titleWidget!),
                     ] else if (title != null && title!.isNotEmpty) ...[
                       _BarSeparator(),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
                       Flexible(
                         child: Text(
                           title!,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleMedium?.copyWith(
+                          style: theme.textTheme.titleSmall?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
                         ),

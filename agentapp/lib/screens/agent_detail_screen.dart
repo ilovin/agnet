@@ -2157,13 +2157,13 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   DashboardStatusDot(status: agent.status),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   Flexible(
                     child: Text(
                       agent.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
                     ),
