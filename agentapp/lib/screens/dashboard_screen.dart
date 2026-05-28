@@ -19,6 +19,7 @@ import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
 import '../widgets/agent_status_indicator.dart';
+import '../widgets/app_bar/dashboard_status_dot.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -1506,6 +1507,34 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
     ];
     final subtitle = subtitleParts.join(' · ');
 
+    // Aggregate status across all visible agents for the AppBar dot.
+    // Priority: crashed > working > starting > idle > stopped.
+    AgentStatus? aggregateStatus;
+    for (final node in nodes) {
+      for (final agent in nodeState.agentsFor(node.id)) {
+        final isActive =
+            agent.status == AgentStatus.working ||
+            agent.status == AgentStatus.starting ||
+            agent.status == AgentStatus.idle;
+        if (!isActive) continue;
+        if (aggregateStatus == null) {
+          aggregateStatus = agent.status;
+        } else if (agent.status == AgentStatus.crashed) {
+          aggregateStatus = AgentStatus.crashed;
+        } else if (agent.status == AgentStatus.working &&
+            aggregateStatus != AgentStatus.crashed) {
+          aggregateStatus = AgentStatus.working;
+        } else if (agent.status == AgentStatus.starting &&
+            aggregateStatus != AgentStatus.crashed &&
+            aggregateStatus != AgentStatus.working) {
+          aggregateStatus = AgentStatus.starting;
+        } else if (agent.status == AgentStatus.idle &&
+            aggregateStatus == AgentStatus.stopped) {
+          aggregateStatus = AgentStatus.idle;
+        }
+      }
+    }
+
     return Scaffold(
       appBar: MissionControlAppBar(
         toolbarHeight: 64,
@@ -1531,6 +1560,10 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
                         ),
                   ),
                 ),
+                if (aggregateStatus != null) ...[
+                  const SizedBox(width: 8),
+                  DashboardStatusDot(status: aggregateStatus),
+                ],
                 if (!_wsConnected) ...[
                   const SizedBox(width: 8),
                   SizedBox(
