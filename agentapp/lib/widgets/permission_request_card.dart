@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 
+import '../theme/app_text_styles.dart';
+
 /// A card that renders a Claude `permission_request` event.
 ///
 /// Displays tool-specific content (Bash command, Edit file+diff, Write
@@ -168,10 +170,11 @@ class _BashContent extends StatelessWidget {
           ),
           child: SelectableText(
             command,
-            style: const TextStyle(
+            style: TextStyle(
               fontFamily: 'monospace',
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
               fontSize: 13,
-              color: Color(0xFFE5E5E5),
+              color: const Color(0xFFE5E5E5),
             ),
           ),
         ),
@@ -354,6 +357,7 @@ class _WriteContent extends StatelessWidget {
             preview.isEmpty ? '(empty file)' : preview,
             style: TextStyle(
               fontFamily: 'monospace',
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
               fontSize: 12,
               color: textColor,
             ),
@@ -414,6 +418,7 @@ class _FallbackContent extends StatelessWidget {
             preview,
             style: TextStyle(
               fontFamily: 'monospace',
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
               fontSize: 12,
               color: scheme.onSurface,
             ),
