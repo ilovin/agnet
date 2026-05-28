@@ -77,11 +77,33 @@ List<String> sessionPreviewLinesFromMessages(
   int maxLines = 2,
 }) {
   if (messages.isEmpty) return const [];
-  final recentTexts = messages
-      .where((m) => m.text.trim().isNotEmpty)
-      .map((m) => m.text)
+
+  // Find the last non-empty message (iterate backwards so we get the newest).
+  MessageModel? lastMessage;
+  for (var i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].text.trim().isNotEmpty) {
+      lastMessage = messages[i];
+      break;
+    }
+  }
+  if (lastMessage == null) return const [];
+
+  // Extract lines from that single message — preview shows latest content only.
+  final allLines = lastMessage.text
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n')
+      .map((l) => l.trim())
+      .where((l) => l.isNotEmpty)
+      .map((l) => buildCollapsedPreview(l))
       .toList();
-  return buildSessionPreviewLines(recentTexts, maxLines: maxLines);
+
+  if (allLines.isEmpty) return const [];
+
+  // Take the last maxLines lines from the last message.
+  return allLines.length <= maxLines
+      ? allLines
+      : allLines.sublist(allLines.length - maxLines);
 }
 
 /// Renders simple inline markdown (bold, italic, code, strikethrough, links)
@@ -3163,6 +3185,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                     fontWeight: FontWeight.w600,
                     color: _statusColor,
                     letterSpacing: 0.1,
+                    fontFamilyFallback: AppTextStyles.fontFamilyFallback,
                   ),
                 ),
                 if (timeText != null)
@@ -3173,6 +3196,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
                       fontWeight: FontWeight.w400,
                       color: colors.onSurfaceVariant.withValues(alpha: 0.75),
                       letterSpacing: 0.3,
+                      fontFamilyFallback: AppTextStyles.fontFamilyFallback,
                     ),
                   ),
               ],
@@ -3212,6 +3236,7 @@ class _AgentRowState extends ConsumerState<AgentRow> {
               fontWeight: FontWeight.w700,
               letterSpacing: -0.1,
               color: colors.onSurface,
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
             ),
           ),
         ),
