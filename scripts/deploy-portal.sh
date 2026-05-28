@@ -7,12 +7,12 @@
 #   ./scripts/deploy-portal.sh test    # Run tests against dev environment
 #
 # Environment:
-#   REMOTE_HOST    SSH alias for the server (default: ali)
+#   REMOTE_HOST    SSH alias for the server (default: tx)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REMOTE_HOST="${REMOTE_HOST:-ali}"
+REMOTE_HOST="${REMOTE_HOST:-tx}"
 PORTAL_SRC="./portal"
 DEV_DIR="/opt/phonetalk/portal-dev"
 PROD_DIR="/opt/phonetalk/portal"
