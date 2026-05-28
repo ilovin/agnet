@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_text_styles.dart';
+
 class _AnsiStyle {
   Color? foreground;
   Color? background;
@@ -124,7 +126,7 @@ TextSpan parseAnsiToSpan(
         color: fg,
         backgroundColor: bg,
         fontFamily: fontFamily,
-        fontFamilyFallback: const ['Noto Sans SC'],
+        fontFamilyFallback: AppTextStyles.fontFamilyFallback,
         fontSize: fontSize,
         height: 1.4,
         fontWeight: style.bold ? FontWeight.bold : FontWeight.normal,

@@ -116,7 +116,7 @@ List<InlineSpan> buildMarkdownSpans(
       content = raw.substring(1, raw.length - 1);
       spanStyle = style.copyWith(
         fontFamily: 'monospace',
-        fontFamilyFallback: const ['Noto Sans SC', 'Roboto', 'sans-serif'],
+        fontFamilyFallback: AppTextStyles.fontFamilyFallback,
         color: style.color ?? Theme.of(context).colorScheme.onSurface,
       );
     } else if (raw.startsWith('[')) {

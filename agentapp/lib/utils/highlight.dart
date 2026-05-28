@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../theme/app_text_styles.dart';
+
 /// Color scheme for syntax highlighting — One Dark (dark) and GitHub Light (light).
 class _Dark {
   static const keyword = Color(0xFFC678DD);
@@ -45,7 +47,7 @@ TextSpan highlightCode(String code, {String? language, required bool isDark}) {
   final baseColor = isDark ? const Color(0xFFABB2BF) : const Color(0xFF1F2328);
   final baseStyle = TextStyle(
     fontFamily: 'Noto Sans SC',
-    fontFamilyFallback: const ['Noto Sans SC'],
+    fontFamilyFallback: AppTextStyles.fontFamilyFallback,
     color: baseColor,
   );
 
