@@ -53,15 +53,15 @@ class MissionControlAppBar extends StatelessWidget
   /// is undesirable.
   final bool showScanningLine;
 
-  /// Whether to render the brand wordmark slot (mark + "Agent" wordmark).
-  /// When false, both the mark widget and the "Agent" text are hidden.
+  /// Whether to render the brand wordmark slot (mark + "Agnet" wordmark).
+  /// When false, both the mark widget and the "Agnet" text are hidden.
   /// Disable for nested or modal screens where the brand would be redundant.
   final bool showWordmark;
 
   /// Whether to render the brand **mark** glyph (the circle+ray icon).
   /// Independent from [showWordmark]: when [showWordmark] is true and
-  /// [showMark] is false, only the "Agent" text is shown — this is what
-  /// the dashboard uses so the header reads as plain "Agent" without the
+  /// [showMark] is false, only the "Agnet" text is shown — this is what
+  /// the dashboard uses so the header reads as plain "Agnet" without the
   /// mission-control icon. Has no effect when [showWordmark] is false.
   final bool showMark;
 
@@ -115,7 +115,7 @@ class MissionControlAppBar extends StatelessWidget
                         markWidget ?? const MissionControlMark(size: 22),
                         const SizedBox(width: 8),
                       ],
-                      Text('Agent', style: wordmarkStyle),
+                      Text('Agnet', style: wordmarkStyle),
                       const SizedBox(width: 12),
                     ],
                     if (titleWidget != null) ...[

@@ -105,7 +105,7 @@ void main() {
       // Per follow-up: only the brand mark / grid icon / 仪表盘 title block
       // / expand_less chevron go away. The "Agent" wordmark is intentionally
       // preserved (it sits outside the user's red boxes in the screenshot).
-      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('Agnet'), findsOneWidget);
 
       await tester.pumpWidget(const SizedBox());
       await tester.pump();
@@ -170,7 +170,7 @@ void main() {
         ),
       );
       expect(find.byType(MissionControlMark), findsOneWidget);
-      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('Agnet'), findsOneWidget);
     });
 
     testWidgets('showMark:false hides only the mark, wordmark stays',
@@ -186,7 +186,7 @@ void main() {
         ),
       );
       expect(find.byType(MissionControlMark), findsNothing);
-      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('Agnet'), findsOneWidget);
     });
 
     testWidgets('showWordmark:false hides both (legacy behaviour)',
@@ -202,7 +202,7 @@ void main() {
         ),
       );
       expect(find.byType(MissionControlMark), findsNothing);
-      expect(find.text('Agent'), findsNothing);
+      expect(find.text('Agnet'), findsNothing);
     });
   });
 

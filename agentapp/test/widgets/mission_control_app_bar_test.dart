@@ -24,7 +24,7 @@ void main() {
       await tester.pumpWidget(
         _wrap(const MissionControlAppBar(showScanningLine: false)),
       );
-      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('Agnet'), findsOneWidget);
       expect(find.text('phone-talk'), findsNothing);
     });
 
