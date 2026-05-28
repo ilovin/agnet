@@ -2010,6 +2010,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                     '${widget.node.location.displayLocation}  ·  $_statusLabel',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
+                    softWrap: false,
                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
