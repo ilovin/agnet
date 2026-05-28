@@ -88,6 +88,9 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 				"text":    data["text"],
 				"seq":     data["seq"],
 			}
+			if sid, ok := data["sessionId"].(string); ok && sid != "" {
+				params["sessionId"] = sid
+			}
 			srv.broadcast(RPCEvent{
 				JSONRPC: "2.0",
 				Method:  "conversation.message_update",
@@ -115,6 +118,15 @@ func New(mgr *agent.Manager, token string, nodeID string) *Server {
 			"nodeId":  nodeID,
 			"role":    data["role"],
 			"text":    data["text"],
+		}
+		// sessionId is required by the Flutter app's (nodeId, agentId, sessionId)
+		// conversation cache key — without it conversation.message events for
+		// the live session land in the "" bucket and the rendered transcript
+		// stops advancing while agentd's DB keeps growing. The upstream
+		// makeWatcherCallback stamps data["sessionId"] from
+		// agent.ResumeSessionID() so we just forward it here.
+		if sid, ok := data["sessionId"].(string); ok && sid != "" {
+			params["sessionId"] = sid
 		}
 		// Pass through raw flag if present
 		if raw, ok := data["raw"].(bool); ok {

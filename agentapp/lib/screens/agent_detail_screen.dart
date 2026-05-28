@@ -1311,24 +1311,79 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
   }
 
   void _onPushEvent(WsMessage event) {
-    if (event.method != 'conversation.cleared') return;
-    final params = event.params as Map<String, dynamic>?;
-    if (params == null) return;
-    final nodeId = params['nodeId'] as String? ?? '';
-    final agentId = params['agentId'] as String? ?? '';
-    final sessionId = params['sessionId'] as String? ?? '';
-    if (nodeId != widget.nodeId || agentId != widget.agentId) return;
-    setState(() {
-      _rawEvents = [];
-      _lastSeq = 0;
-      _oldestSeq = 0;
-      _hasMoreHistory = true;
-      _loading = false;
-      _rebuildMessageCache();
-    });
-    _touchMessageCache(cachedEvents: []);
-    ref.read(conversationProvider.notifier).clear(nodeId, agentId, sessionId);
-    ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId);
+    if (event.method == 'conversation.cleared') {
+      final params = event.params as Map<String, dynamic>?;
+      if (params == null) return;
+      final nodeId = params['nodeId'] as String? ?? '';
+      final agentId = params['agentId'] as String? ?? '';
+      final sessionId = params['sessionId'] as String? ?? '';
+      if (nodeId != widget.nodeId || agentId != widget.agentId) return;
+      setState(() {
+        _rawEvents = [];
+        _lastSeq = 0;
+        _oldestSeq = 0;
+        _hasMoreHistory = true;
+        _loading = false;
+        _rebuildMessageCache();
+      });
+      _touchMessageCache(cachedEvents: []);
+      ref.read(conversationProvider.notifier).clear(nodeId, agentId, sessionId);
+      ref.read(unreadProvider.notifier).markAsRead(nodeId, agentId);
+      return;
+    }
+
+    // Live broadcast for conversation.message / conversation.message_update.
+    // The detail screen previously waited for the next poll tick (~1s) to pick
+    // up new events; with the broadcast also reaching this screen the rendered
+    // transcript stays in lock-step with agentd's DB instead of lagging behind
+    // by a polling interval (or longer if a poll response races with broadcast
+    // delivery and the cursor advances without filling events).
+    if (event.method == 'conversation.message' ||
+        event.method == 'conversation.message_update') {
+      final params = event.params as Map<String, dynamic>?;
+      if (params == null) return;
+      final nodeId = params['nodeId'] as String? ?? '';
+      final agentId = params['agentId'] as String? ?? '';
+      if (nodeId != widget.nodeId || agentId != widget.agentId) return;
+
+      // Only consume broadcasts whose sessionId matches the live session. The
+      // backend now stamps sessionId on every conversation.* push so events
+      // targeted at a stale (post-/clear) session id never bleed in here.
+      final eventSessionId = params['sessionId'] as String? ?? '';
+      final liveSessionId = _currentSessionId();
+      if (eventSessionId.isNotEmpty &&
+          liveSessionId.isNotEmpty &&
+          eventSessionId != liveSessionId) {
+        return;
+      }
+
+      final seq = (params['seq'] as num?)?.toInt() ?? 0;
+      final merged = mergeConversationEvents(_rawEvents, [params]);
+      final hadNewEvents = merged.length > _rawEvents.length;
+      // For conversation.message_update the event count stays the same but
+      // the text grew; force a re-render so the streaming bubble updates.
+      final shouldRebuild =
+          hadNewEvents || event.method == 'conversation.message_update';
+      if (!shouldRebuild) return;
+
+      setState(() {
+        _rawEvents = merged;
+        if (seq > _lastSeq) {
+          _lastSeq = seq;
+        }
+        if (_oldestSeq == 0 && _rawEvents.isNotEmpty) {
+          _oldestSeq = oldestConversationSeq(_rawEvents);
+          _hasMoreHistory = _oldestSeq > 1;
+        }
+        _lastError = null;
+        _rebuildMessageCache();
+      });
+      _touchMessageCache();
+      if (hadNewEvents) {
+        _scrollToBottom();
+      }
+      return;
+    }
   }
 
   void _touchMessageCache({List<Map<String, dynamic>>? cachedEvents}) {

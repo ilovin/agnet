@@ -13,6 +13,7 @@ import (
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
+	"github.com/phone-talk/agentd/internal/watcher"
 )
 
 var testSvc = NewAgentService()
@@ -565,5 +566,180 @@ func TestUserMessageBroadcastOmitsSeqWhenZero(t *testing.T) {
 	data := h.buildUserMessageBroadcast(ag, "ping", nil, 0, 0)
 	if _, has := data["seq"]; has {
 		t.Fatalf("broadcast should omit seq when zero, got %v", data["seq"])
+	}
+}
+
+// TestAssistantMessageBroadcastIncludesSessionID verifies the end-to-end
+// "agent fires output → ws server broadcasts conversation.message" pipeline
+// stamps the agent's resume sessionId onto the broadcast params. This is the
+// regression test for the symptom "app shows stale message (seq 242) while
+// agentd DB has seq 250": when sessionId is missing from the broadcast,
+// conversation_provider.dart routes the event into the (nodeId, agentId, "")
+// bucket instead of the live (nodeId, agentId, sessionId) bucket and the
+// rendered transcript stops advancing.
+func TestAssistantMessageBroadcastIncludesSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	const wantSession = "session-assistant-broadcast-123"
+	if err := mgr.UpdateResumeSessionID(ag.ID, wantSession); err != nil {
+		t.Fatalf("UpdateResumeSessionID: %v", err)
+	}
+
+	const wantNode = "testnode-assistant"
+	srv := New(mgr, "testtoken", wantNode)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	header := http.Header{"Authorization": {"Bearer testtoken"}}
+	conn, _, err := websocket.DefaultDialer.Dial(u, header)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Wait briefly for the server to register the client before driving the
+	// watcher callback (otherwise the broadcast lands before the client is in
+	// the map and we time out).
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.ClientCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Drive the production watcher → onOutput → broadcast pipeline by firing a
+	// synthetic ConversationEvent through the same callback the JSONL watcher
+	// uses in production.
+	cb := mgr.MakeWatcherCallback(ag.ID, ag)
+	cb(watcher.ConversationEvent{
+		Role: "assistant",
+		Text: "hello after /clear",
+	})
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if msg["method"] != "conversation.message" {
+			continue
+		}
+		params, _ := msg["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("conversation.message missing params: %v", msg)
+		}
+		gotSession, _ := params["sessionId"].(string)
+		if gotSession != wantSession {
+			t.Fatalf("conversation.message sessionId: got %q want %q (full params: %v)", gotSession, wantSession, params)
+		}
+		if got, _ := params["nodeId"].(string); got != wantNode {
+			t.Fatalf("conversation.message nodeId: got %q want %q", got, wantNode)
+		}
+		if got, _ := params["agentId"].(string); got != ag.ID {
+			t.Fatalf("conversation.message agentId: got %q want %q", got, ag.ID)
+		}
+		return
+	}
+}
+
+// TestAssistantMessageUpdateBroadcastIncludesSessionID is the streaming
+// counterpart of TestAssistantMessageBroadcastIncludesSessionID. The
+// conversation.message_update event (opencode-style streaming where text
+// grows under a stable msg_id) must also carry sessionId, otherwise the
+// frontend's _handleMessageUpdate lookup in the wrong cache bucket leaves
+// the streaming bubble frozen at its first chunk.
+func TestAssistantMessageUpdateBroadcastIncludesSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionFile := filepath.Join(tmpDir, "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("write session file: %v", err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	mgr := agent.NewManager(s, t.TempDir())
+
+	info := scanner.ProcessInfo{
+		Provider:    "claude",
+		PID:         os.Getpid(),
+		SessionFile: sessionFile,
+		WorkDir:     tmpDir,
+	}
+	ag, err := mgr.Attach(info)
+	if err != nil {
+		t.Fatalf("attach failed: %v", err)
+	}
+
+	const wantSession = "session-stream-update-456"
+	if err := mgr.UpdateResumeSessionID(ag.ID, wantSession); err != nil {
+		t.Fatalf("UpdateResumeSessionID: %v", err)
+	}
+
+	srv := New(mgr, "testtoken", "n-stream")
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	u := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	header := http.Header{"Authorization": {"Bearer testtoken"}}
+	conn, _, err := websocket.DefaultDialer.Dial(u, header)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.ClientCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cb := mgr.MakeWatcherCallback(ag.ID, ag)
+	// First fire creates the message under msg_id; second fire grows the text
+	// and triggers the _update path which the server forwards as
+	// conversation.message_update.
+	cb(watcher.ConversationEvent{Role: "assistant", Text: "chunk1", MsgID: "msg-update-1"})
+	cb(watcher.ConversationEvent{Role: "assistant", Text: "chunk1 chunk2", MsgID: "msg-update-1"})
+
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	sawUpdate := false
+	for !sawUpdate {
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if msg["method"] != "conversation.message_update" {
+			continue
+		}
+		sawUpdate = true
+		params, _ := msg["params"].(map[string]any)
+		if params == nil {
+			t.Fatalf("conversation.message_update missing params: %v", msg)
+		}
+		gotSession, _ := params["sessionId"].(string)
+		if gotSession != wantSession {
+			t.Fatalf("conversation.message_update sessionId: got %q want %q (full params: %v)", gotSession, wantSession, params)
+		}
 	}
 }
