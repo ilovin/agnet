@@ -45,7 +45,14 @@ TextSpan highlightCode(String code, {String? language, required bool isDark}) {
   final baseColor = isDark ? const Color(0xFFABB2BF) : const Color(0xFF1F2328);
   final baseStyle = TextStyle(
     fontFamily: 'Noto Sans SC',
-    fontFamilyFallback: const ['Noto Sans SC'],
+    fontFamilyFallback: const [
+      'Noto Sans SC',
+      'Noto Sans Symbols 2',
+      'Noto Color Emoji',
+      'PingFang SC',
+      'Microsoft YaHei',
+      'sans-serif',
+    ],
     color: baseColor,
   );
 

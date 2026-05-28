@@ -4516,7 +4516,14 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                     collapsedCode,
                     style: TextStyle(
                       fontFamily: 'Noto Sans SC',
-                      fontFamilyFallback: const ['Noto Sans SC'],
+                      fontFamilyFallback: const [
+                        'Noto Sans SC',
+                        'Noto Sans Symbols 2',
+                        'Noto Color Emoji',
+                        'PingFang SC',
+                        'Microsoft YaHei',
+                        'sans-serif',
+                      ],
                       fontSize: widget.fontSize,
                       height: 1.4,
                       fontWeight: FontWeight.w500,
@@ -4532,7 +4539,14 @@ class _ExpandableCodeBlockState extends State<_ExpandableCodeBlock> {
                       ],
                       style: TextStyle(
                         fontFamily: 'Noto Sans SC',
-                        fontFamilyFallback: const ['Noto Sans SC'],
+                        fontFamilyFallback: const [
+                          'Noto Sans SC',
+                          'Noto Sans Symbols 2',
+                          'Noto Color Emoji',
+                          'PingFang SC',
+                          'Microsoft YaHei',
+                          'sans-serif',
+                        ],
                         fontSize: widget.fontSize,
                         height: 1.4,
                         fontWeight: FontWeight.w500,
@@ -4594,7 +4608,14 @@ Widget _codeBlock(
       code,
       style: TextStyle(
         fontFamily: AppTextStyles.monoFontFamily,
-        fontFamilyFallback: const ['Noto Sans SC'],
+        fontFamilyFallback: const [
+          'Noto Sans SC',
+          'Noto Sans Symbols 2',
+          'Noto Color Emoji',
+          'PingFang SC',
+          'Microsoft YaHei',
+          'sans-serif',
+        ],
         fontSize: fontSize,
         height: 1.4,
         fontWeight: FontWeight.w500,
@@ -4607,7 +4628,14 @@ Widget _codeBlock(
         children: [highlightCode(code, isDark: isDark)],
         style: TextStyle(
           fontFamily: AppTextStyles.monoFontFamily,
-          fontFamilyFallback: const ['Noto Sans SC'],
+          fontFamilyFallback: const [
+            'Noto Sans SC',
+            'Noto Sans Symbols 2',
+            'Noto Color Emoji',
+            'PingFang SC',
+            'Microsoft YaHei',
+            'sans-serif',
+          ],
           fontSize: fontSize,
           height: 1.4,
           fontWeight: FontWeight.w500,
@@ -4753,7 +4781,14 @@ class MarkdownContent extends ConsumerWidget {
           ),
           code: TextStyle(
             fontFamily: AppTextStyles.monoFontFamily,
-            fontFamilyFallback: const ['Noto Sans SC'],
+            fontFamilyFallback: const [
+              'Noto Sans SC',
+              'Noto Sans Symbols 2',
+              'Noto Color Emoji',
+              'PingFang SC',
+              'Microsoft YaHei',
+              'sans-serif',
+            ],
             fontSize: fontSize,
             fontWeight: FontWeight.w500,
             color: isNaive
@@ -4854,7 +4889,14 @@ class MarkdownContent extends ConsumerWidget {
             text: match[6]!,
             style: TextStyle(
               fontFamily: 'Noto Sans SC',
-              fontFamilyFallback: const ['Noto Sans SC'],
+              fontFamilyFallback: const [
+                'Noto Sans SC',
+                'Noto Sans Symbols 2',
+                'Noto Color Emoji',
+                'PingFang SC',
+                'Microsoft YaHei',
+                'sans-serif',
+              ],
               fontSize: fontSize - 1,
               color: isDark ? const Color(0xFF98C379) : const Color(0xFF0550AE),
               backgroundColor: null,
