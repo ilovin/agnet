@@ -220,10 +220,29 @@
         .local-gw-start-cmd code {
             word-break: break-all;
         }
+        .local-gw-start-cmd .cmd-line {
+            position: relative;
+            padding: 6px 70px 6px 0;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .local-gw-start-cmd .cmd-line + .cmd-line {
+            border-top: 1px solid #3d3d3d;
+            margin-top: 4px;
+        }
+        .local-gw-start-cmd .cmd-label {
+            color: #9aa0a6;
+            font-family: sans-serif;
+            font-size: 0.85em;
+            margin-right: 4px;
+        }
         .copy-cmd-btn {
             position: absolute;
-            top: 8px;
-            right: 8px;
+            top: 50%;
+            right: 0;
+            transform: translateY(-50%);
             background: #555;
             color: white;
             border: none;
@@ -337,8 +356,16 @@
                 <button class="local-gw-btn" onclick="tryConnectLocalGW()">尝试连接本机 gw</button>
                 <div class="local-gw-status" id="local-gw-status"></div>
                 <div class="local-gw-start-cmd" id="local-gw-start-cmd">
-                    <code>~/.agentgw/agentgw start</code>
-                    <button class="copy-cmd-btn" onclick="copyStartCmd(event)">复制</button>
+                    <div class="cmd-line" data-cmd-label="npm 安装方式">
+                        <span class="cmd-label">npm 安装：</span>
+                        <code>agnet start</code>
+                        <button class="copy-cmd-btn" onclick="copyStartCmd(event, this)">复制</button>
+                    </div>
+                    <div class="cmd-line" data-cmd-label="脚本安装方式">
+                        <span class="cmd-label">脚本安装：</span>
+                        <code>~/.agentgw/agentgw start</code>
+                        <button class="copy-cmd-btn" onclick="copyStartCmd(event, this)">复制</button>
+                    </div>
                 </div>
                 <div id="local-qr-display">
                     <div class="qr-container" id="qr-local-container">
@@ -485,11 +512,15 @@
             document.getElementById('qr-local-container').style.display = 'none';
         }
 
-        function copyStartCmd(event) {
+        function copyStartCmd(event, btnEl) {
             event.stopPropagation();
-            const cmd = document.querySelector('#local-gw-start-cmd code').textContent;
+            const btn = btnEl || event.currentTarget || event.target;
+            // Find the closest <code> in the same .cmd-line; fallback to first code
+            const line = btn.closest ? btn.closest('.cmd-line') : null;
+            const codeEl = (line && line.querySelector('code'))
+                || document.querySelector('#local-gw-start-cmd code');
+            const cmd = codeEl ? codeEl.textContent : '';
             navigator.clipboard.writeText(cmd).then(() => {
-                const btn = event.target;
                 btn.textContent = '已复制!';
                 setTimeout(() => btn.textContent = '复制', 2000);
             }).catch(() => {
@@ -499,7 +530,6 @@
                 textArea.select();
                 document.execCommand('copy');
                 document.body.removeChild(textArea);
-                const btn = event.target;
                 btn.textContent = '已复制!';
                 setTimeout(() => btn.textContent = '复制', 2000);
             });
