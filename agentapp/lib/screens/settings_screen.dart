@@ -33,11 +33,14 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   List<ConnectionConfig> _saved = [];
   bool _connecting = false;
+  String _appVersion = '';
+  String _appBuildNumber = '';
 
   @override
   void initState() {
     super.initState();
     _load();
+    _loadAppVersion();
   }
 
   Future<void> _load() async {
@@ -45,6 +48,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final configs = await store.load();
     configs.sort((a, b) => a.url.toLowerCase().compareTo(b.url.toLowerCase()));
     if (mounted) setState(() => _saved = configs);
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() {
+          _appVersion = info.version;
+          _appBuildNumber = info.buildNumber;
+        });
+      }
+    } catch (_) {
+      // PackageInfo is unavailable in some test/headless contexts; leave blank.
+    }
+  }
+
+  /// Build the About subtitle text from PackageInfo so it tracks pubspec.yaml
+  /// across releases (no manual sync needed in bump-version.sh).
+  String _aboutSubtitle() {
+    const tagline = 'Multi-AI-Agent Remote Manager';
+    if (_appVersion.isEmpty) {
+      return tagline;
+    }
+    final build = _appBuildNumber.isNotEmpty ? '+$_appBuildNumber' : '';
+    return 'v$_appVersion$build — $tagline';
   }
 
   Future<void> _delete(int index) async {
@@ -410,10 +438,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Text('关于', style: TextStyle(color: Colors.grey, fontSize: 13)),
           ),
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('Agnet'),
-            subtitle: Text('v0.2.2 — Multi-AI-Agent Remote Manager'),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('Agnet'),
+            subtitle: Text(_aboutSubtitle()),
           ),
           ],
         ),
