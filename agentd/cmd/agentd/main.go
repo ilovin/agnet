@@ -18,7 +18,7 @@ import (
 	"github.com/phone-talk/agentd/internal/ws"
 )
 
-const version = "agentd v0.1.0"
+const version = "agentd v1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {

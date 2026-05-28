@@ -37,7 +37,7 @@ var currentTunnelToken string
 var currentRealityCfg *tunnel.RealityConfig
 
 // Version is set at build time via -ldflags "-X main.Version=<version>".
-var Version = "v0.1.0"
+var Version = "v1.0.0"
 
 // Domain defaults are injected at build time via -ldflags.
 // Subdomains are automatically derived from the root domain.
