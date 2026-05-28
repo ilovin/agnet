@@ -19,6 +19,7 @@ import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
+import '../utils/canvaskit_safe_text.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -201,7 +202,13 @@ class _MarkdownText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final paragraphs = data.split('\n\n');
+    // Rewrite tofu-prone runes (arrows, ☒) to ASCII before splitting into
+    // paragraphs so each rendered span is CanvasKit-safe. Mirrors the
+    // gateway's `sanitizeStatusLine` and is the second line of defense
+    // for preview text loaded via `conversation.history`, which the
+    // gateway proxies without sanitization.
+    final safeData = canvaskitSafeText(data);
+    final paragraphs = safeData.split('\n\n');
     if (paragraphs.length <= 1) {
       final spans = buildMarkdownSpans(data, style, context);
       return _bordered(
