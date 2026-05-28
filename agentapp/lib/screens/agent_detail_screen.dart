@@ -602,10 +602,18 @@ Map<String, dynamic> _buildActivityItem(
       };
     }
 
+    // Use ToolCallSummary to convert raw params (e.g. full file paths or
+    // multi-line Bash commands) into a concise, human-friendly title for the
+    // activity card. Falls back to the raw suffix if parsing fails.
+    final parsed = ToolCallSummary.parse(text);
+    final displayTitle = parsed?.summary.isNotEmpty == true
+        ? parsed!.summary
+        : suffix;
+
     return {
       'kind': 'tool_use',
       'toolName': explicitToolName.isNotEmpty ? explicitToolName : prefix,
-      'title': suffix,
+      'title': displayTitle,
       'content': '',
     };
   }

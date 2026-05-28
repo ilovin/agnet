@@ -685,6 +685,45 @@ void main() {
     },
   );
 
+  test(
+    'activity block tool_use title uses ToolCallSummary (basename for Read)',
+    () {
+      // When a tool_use event sits inside an activity block, the rendered
+      // title should be the parsed summary (e.g. basename of a Read path),
+      // not the raw suffix from the backend's `[ToolName: ...]` text.
+      final messages = convertEventsToMessages([
+        {'seq': 1, 'role': 'user', 'text': '看一下文件', 'raw': false},
+        {
+          'seq': 2,
+          'role': 'assistant',
+          'text': '[Read: /Users/foo/project/lib/screens/dashboard_screen.dart]',
+          'raw': false,
+        },
+        {
+          'seq': 3,
+          'role': 'assistant',
+          'text': '[Bash: scripts/deploy.sh local --with-web]',
+          'raw': false,
+        },
+      ]);
+
+      // Find the activity_list message.
+      final block = messages.firstWhere((m) => m.kind == 'activity_list');
+      expect(block.activities, hasLength(2));
+
+      // Read: title should be the basename, not the full absolute path.
+      expect(block.activities[0]['toolName'], equals('Read'));
+      expect(block.activities[0]['title'], equals('dashboard_screen.dart'));
+
+      // Bash: title should be the (single-line) command, unchanged.
+      expect(block.activities[1]['toolName'], equals('Bash'));
+      expect(
+        block.activities[1]['title'],
+        equals('scripts/deploy.sh local --with-web'),
+      );
+    },
+  );
+
   test('read-only Claude sessions return clear input hint', () {
     const agent = AgentModel(
       id: 'a1',
