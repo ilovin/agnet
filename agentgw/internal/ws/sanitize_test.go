@@ -107,6 +107,16 @@ func TestSanitizeStatusLineRunes(t *testing.T) {
 			in:   "╭─ Bash ─╮\n│ ls ↵  │\n╰───────╯",
 			want: "+- Bash -+\n| ls <CR>  |\n+-------+",
 		},
+		{
+			name: "ballot box with X becomes [X] (U+2612 CanvasKit tofu)",
+			in:   "☒ failed task",
+			want: "[X] failed task",
+		},
+		{
+			name: "ballot box with X in mixed content",
+			in:   "☐ todo\n☑ done\n☒ failed",
+			want: "☐ todo\n☑ done\n[X] failed",
+		},
 	}
 
 	for _, tc := range cases {

@@ -234,6 +234,34 @@ paragraph: ${_tofuRiskGlyphs.join(' ')}
     });
 
     testWidgets(
+        'MarkdownContent renders [X] fallback when ballot-box-with-X (U+2612) appears in text',
+        (WidgetTester tester) async {
+      // Background: U+2612 (☒) is covered by Noto Sans Symbols 2, but
+      // Noto Sans SC claims the Miscellaneous Symbols block via OS/2
+      // ulUnicodeRange1 bit 29 without actually containing the glyph.
+      // Under Flutter Web CanvasKit this causes the fallback chain to
+      // be skipped and the glyph renders as tofu. The gateway now
+      // sanitizes ☒ → [X] before the text reaches the app.
+      //
+      // This test verifies the app renders the sanitized [X] correctly
+      // (no tofu, no raw ☒) and that the fallback chain is still declared.
+      const corpus = 'Task status: [X] failed';
+
+      await _pumpMarkdown(tester, corpus);
+
+      final pairs = _collectTextWithStyles(tester);
+      final visible = pairs.map((p) => p.text).join('|');
+
+      // The sanitized [X] must be visible.
+      expect(visible, contains('[X]'),
+          reason: 'sanitized [X] must be rendered');
+
+      // The original ☒ must NOT survive (it would tofu on CanvasKit).
+      expect(visible.contains('☒'), isFalse,
+          reason: 'raw U+2612 (☒) must not appear — it renders as tofu');
+    });
+
+    testWidgets(
         'MarkdownContent simple-text path declares Symbols 2 fallback on → / ★',
         (WidgetTester tester) async {
       // The simple-text path is exercised when the input has NO
