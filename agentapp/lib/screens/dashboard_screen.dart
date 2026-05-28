@@ -230,11 +230,32 @@ class _MarkdownPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _MarkdownText(
-      data,
-      style: AppTextStyles.caption.copyWith(color: color),
-      maxLines: 3,
-      overflow: TextOverflow.ellipsis,
+    // task#14: wrap the preview body in a quote-style accent bar + left
+    // indent so the message content visually attaches to the agent header
+    // above it. The 2px wide bar uses outlineVariant so it stays subtle in
+    // both light and dark mode; the 8px gap then sits the text apart from
+    // the bar itself. This is the structural cue users were missing — the
+    // raw 12/w400 caption alone wasn't enough hierarchy versus the title.
+    final accent = Theme.of(context).colorScheme.outlineVariant;
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(width: 2, color: accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 0),
+              child: _MarkdownText(
+                data,
+                style: AppTextStyles.caption.copyWith(color: color),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1996,9 +2017,11 @@ class _NodeCardState extends ConsumerState<NodeCard> {
             title: Text(
               nodeDisplay,
               // Top of dashboard hierarchy: node header sits above multiple
-              // AgentRow titles (15/w700), so it must be visibly heavier.
+              // AgentRow titles (14/w700), so it must be visibly heavier.
+              // 18/w800 widens the size gap to the agent tier (4px) so the
+              // header dominates at a glance — task#14 follow-up.
               style: TextStyle(
-                fontSize: 17,
+                fontSize: 18,
                 fontWeight: FontWeight.w800,
                 letterSpacing: -0.2,
                 color: Theme.of(context).colorScheme.onSurface,
@@ -3027,6 +3050,13 @@ class _AgentRowState extends ConsumerState<AgentRow> {
         ? _formatRelativeTime(agent.lastMessageTime!)
         : null;
     final colors = Theme.of(context).colorScheme;
+    // task#14: lift the status+time pair from bare text into a chip-like
+    // surface block. The subtle background (surfaceContainerHighest with
+    // light alpha) gives the meta tier its own visual container so it
+    // doesn't compete with the title row, and reinforces the size-ordering
+    // (status 11 / time 10) — both reduced by 1px from task#5 to widen the
+    // gap to the agent title (14).
+    final chipBg = colors.surfaceContainerHighest.withValues(alpha: 0.6);
     return Row(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -3037,34 +3067,43 @@ class _AgentRowState extends ConsumerState<AgentRow> {
           color: _statusColor,
         ),
         const SizedBox(width: 6),
-        // Status keeps its semantic colour; timestamp recedes one tier so the
-        // row reads as: title (primary) > status (semantic) > time (meta).
-        Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: statusText,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: _statusColor,
-                  letterSpacing: 0.1,
-                ),
-              ),
-              if (timeText != null)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: chipBg,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          // Status keeps its semantic colour; timestamp recedes one tier so
+          // the row reads as: title (primary) > status (semantic chip) >
+          // time (meta). Sizes are 11 / 10 — kept ≥1px apart so time still
+          // recedes but stays legible at letterSpacing 0.3.
+          child: Text.rich(
+            TextSpan(
+              children: [
                 TextSpan(
-                  text: '  $timeText',
+                  text: statusText,
                   style: TextStyle(
                     fontSize: 11,
-                    fontWeight: FontWeight.w400,
-                    color: colors.onSurfaceVariant.withValues(alpha: 0.75),
-                    letterSpacing: 0.3,
+                    fontWeight: FontWeight.w600,
+                    color: _statusColor,
+                    letterSpacing: 0.1,
                   ),
                 ),
-            ],
+                if (timeText != null)
+                  TextSpan(
+                    text: '  $timeText',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w400,
+                      color: colors.onSurfaceVariant.withValues(alpha: 0.75),
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+              ],
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
         ),
       ],
     );
@@ -3082,10 +3121,11 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             overflow: TextOverflow.ellipsis,
             // Primary anchor in the row hierarchy: explicitly larger and
             // heavier than the timestamp / preview / subtitle so users can
-            // scan-read the agent name without effort. Colour is themed so
-            // it adapts to dark mode.
+            // scan-read the agent name without effort. 14/w700 keeps a 4px
+            // gap to the node header (18) and a 3px gap to the status chip
+            // (11) — task#14 widened ladders.
             style: TextStyle(
-              fontSize: 15,
+              fontSize: 14,
               fontWeight: FontWeight.w700,
               letterSpacing: -0.1,
               color: colors.onSurface,
