@@ -121,17 +121,21 @@ detect_devices() {
 # ── Mobile install functions ──────────────────────────────────────────
 
 install_android() {
+    # Exit-code contract:
+    #   0 = installed OR skipped (no device / no APK / flutter unavailable)
+    #   1 = a real install attempt against a connected device failed
+    # This keeps `deploy.sh all` running through web/npm/tunnelhub when
+    # there is simply no Android device attached, while still surfacing
+    # real install errors if the user has a device hooked up.
     if ! command -v adb &>/dev/null; then
-        echo "[deploy] adb not found, trying flutter install..."
-        install_android_flutter
-        return
+        echo "[deploy] adb not found; skipping Android install (no error)"
+        return 0
     fi
     local devices
     devices=$(detect_android_devices)
     if [[ -z "$devices" ]]; then
-        echo "[deploy] No Android device connected via adb, trying flutter install..."
-        install_android_flutter
-        return
+        echo "[deploy] No Android device connected via adb; skipping Android install (no error)"
+        return 0
     fi
     # Canonical APK output ($APK_OUTPUT = out/android/agentapp.apk) is the
     # first choice — `build_apk` copies the freshly built apk there. Fall
@@ -142,8 +146,15 @@ install_android() {
         apk="$AGENTAPP_DIR/build/app/outputs/flutter-apk/app-release.apk"
     fi
     if [[ ! -f "$apk" ]]; then
-        echo "[deploy] ERROR: APK not found at $APK_OUTPUT or Flutter build dir"
-        return 1
+        # Device is connected but no APK was built. Try flutter install as
+        # a best-effort, but treat absence as a skip rather than a failure
+        # so `deploy.sh all` can proceed.
+        echo "[deploy] APK not found at $APK_OUTPUT or Flutter build dir; trying flutter install..."
+        install_android_flutter || {
+            echo "[deploy] WARNING: flutter install failed; skipping Android install"
+            return 0
+        }
+        return 0
     fi
     local ok=0
     echo "$devices" | while read -r device; do
@@ -156,8 +167,12 @@ install_android() {
     done
     if [[ $ok -eq 0 ]]; then
         echo "[deploy] All adb installs failed, trying flutter install..."
-        install_android_flutter
+        install_android_flutter || {
+            echo "[deploy] ERROR: Android install failed on connected device"
+            return 1
+        }
     fi
+    return 0
 }
 
 install_android_flutter() {
@@ -170,13 +185,18 @@ install_android_flutter() {
 }
 
 install_ios() {
+    # Exit-code contract (same as install_android):
+    #   0 = installed OR skipped (no IPA / no device / no install tool)
+    #   1 = a real install attempt against a connected device failed
+    # Without this, `set -e` plus a missing IPA / no iOS device would abort
+    # `deploy.sh all`, skipping web/npm/tunnelhub. This is the original bug.
     local ipa="$IPA_OUTPUT"
     if [[ ! -f "$ipa" ]]; then
         ipa=$(ls -t "$AGENTAPP_DIR/build/ios/ipa/"*.ipa 2>/dev/null | head -1)
     fi
     if [[ ! -f "$ipa" ]]; then
-        echo "[deploy] ERROR: IPA not found for install"
-        return 1
+        echo "[deploy] IPA not found; skipping iOS install (no error)"
+        return 0
     fi
 
     local has_ios_deploy=false has_idevice=false has_cfgutil=false
@@ -192,16 +212,26 @@ install_ios() {
     fi
 
     if [[ -n "$devices" ]]; then
-        echo "$devices" | while read -r udid; do
+        # Real install attempts here — if they fail we DO want to surface it.
+        # The inner `while read` loop runs in a subshell so its exit status
+        # is lost; capture failure via a tempfile-style flag in the parent.
+        local install_failed=0
+        while read -r udid; do
             if [[ -z "$udid" ]]; then continue; fi
             echo "[deploy] Installing IPA to iOS device $udid ..."
             if $has_ios_deploy; then
-                ios-deploy --id "$udid" --ipa "$ipa" --justlaunch || echo "[deploy] WARNING: ios-deploy failed on $udid"
+                ios-deploy --id "$udid" --ipa "$ipa" --justlaunch \
+                    || { echo "[deploy] WARNING: ios-deploy failed on $udid"; install_failed=1; }
             elif $has_idevice; then
-                ideviceinstaller -u "$udid" -i "$ipa" || echo "[deploy] WARNING: ideviceinstaller failed on $udid"
+                ideviceinstaller -u "$udid" -i "$ipa" \
+                    || { echo "[deploy] WARNING: ideviceinstaller failed on $udid"; install_failed=1; }
             fi
-        done
-        return
+        done <<< "$devices"
+        if [[ $install_failed -eq 1 ]]; then
+            echo "[deploy] ERROR: at least one iOS install failed against a connected device"
+            return 1
+        fi
+        return 0
     fi
 
     if $has_cfgutil; then
@@ -209,17 +239,30 @@ install_ios() {
         local ecids
         ecids=$(cfgutil list 2>/dev/null | grep -E "ECID:" | awk '{print $2}')
         if [[ -n "$ecids" ]]; then
-            echo "$ecids" | while read -r ecid; do
+            local install_failed=0
+            while read -r ecid; do
                 if [[ -z "$ecid" ]]; then continue; fi
                 echo "[deploy] Installing IPA via cfgutil to ECID $ecid ..."
-                cfgutil --ecid "$ecid" install-app "$ipa" || echo "[deploy] WARNING: cfgutil failed on $ecid"
-            done
-            return
+                cfgutil --ecid "$ecid" install-app "$ipa" \
+                    || { echo "[deploy] WARNING: cfgutil failed on $ecid"; install_failed=1; }
+            done <<< "$ecids"
+            if [[ $install_failed -eq 1 ]]; then
+                echo "[deploy] ERROR: at least one cfgutil install failed against a connected device"
+                return 1
+            fi
+            return 0
         fi
     fi
 
-    echo "[deploy] No iOS device connected via ios-deploy/ideviceinstaller/cfgutil, trying flutter install..."
-    install_ios_flutter
+    # No connected device at all — neither real failure nor success. Try
+    # flutter install as a best-effort, but treat absence/failure of that
+    # as a skip so `deploy.sh all` can keep running.
+    echo "[deploy] No iOS device connected via ios-deploy/ideviceinstaller/cfgutil; trying flutter install (best effort)..."
+    install_ios_flutter || {
+        echo "[deploy] flutter iOS install unavailable or failed; skipping iOS install (no error)"
+        return 0
+    }
+    return 0
 }
 
 install_ios_flutter() {
@@ -307,6 +350,15 @@ install_ios_simulator() {
 }
 
 deploy_mobile() {
+    # Returns:
+    #   0 = all platforms either installed cleanly or were skipped (no device)
+    #   1 = at least one platform had a device connected and the install failed
+    #
+    # Important: install_android / install_ios already distinguish skip (return 0)
+    # from real failure (return 1). We just OR the failures together and use
+    # `|| flag=1` so `set -e` does not abort the whole chain mid-function.
+    local mobile_failed=0
+
     # Build APK if Android device connected
     local android_devs
     android_devs=$(detect_android_devices)
@@ -331,8 +383,14 @@ deploy_mobile() {
         fi
     fi
 
-    install_android
-    install_ios
+    install_android || mobile_failed=1
+    install_ios || mobile_failed=1
+
+    if [[ $mobile_failed -eq 1 ]]; then
+        echo "[deploy] WARNING: deploy_mobile finished with one or more real install failures"
+        return 1
+    fi
+    return 0
 }
 
 # ── Server deploy functions ───────────────────────────────────────────
@@ -1200,11 +1258,19 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             # not just $REMOTE_HOST. resolve_remote_targets() filters out localhost.
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_remote_targets_parallel
             [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || restart_agentgw
-            [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]] || deploy_mobile
+            # deploy_mobile may return non-zero only on a real install failure
+            # (device connected, install errored). We don't want that to abort
+            # the surrounding `all` chain (web/npm/tunnelhub), so log+continue.
+            # Skips (no device) are already return 0 and never enter this branch.
+            if [[ "${DEPLOY_DRY_RUN:-0}" != "1" ]]; then
+                deploy_mobile || echo "[deploy] WARNING: deploy_mobile reported install failure; continuing"
+            fi
             ;;
         local-mobile)
             guard_no_worktree_for_real_deploy "local-mobile"
             echo "[deploy] Running local mobile-only deployment..."
+            # local-mobile is the *explicit* mobile target — propagate real failure
+            # so the user sees a non-zero exit when their install actually broke.
             deploy_mobile
             ;;
         web)
@@ -1231,10 +1297,23 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         all)
             guard_no_worktree_for_real_deploy all
             echo "[deploy] Running full release cycle..."
-            bash "$0" local
-            bash "$0" web
-            bash "$0" npm
-            bash "$0" tunnelhub
+            # Run each phase independently so a failure in one (e.g. mobile
+            # install with a connected device that errored, or a flaky tunnelhub
+            # step) does NOT skip the rest. The overall exit code reflects
+            # whether any phase failed, but every phase still gets a chance
+            # to run. This is the fix for the original bug where iOS install
+            # returning 1 (no device / no IPA) under `set -e` aborted the
+            # whole chain before web/npm/tunnelhub.
+            all_failed=0
+            bash "$0" local     || { echo "[deploy] WARNING: 'local' phase failed";     all_failed=1; }
+            bash "$0" web       || { echo "[deploy] WARNING: 'web' phase failed";       all_failed=1; }
+            bash "$0" npm       || { echo "[deploy] WARNING: 'npm' phase failed";       all_failed=1; }
+            bash "$0" tunnelhub || { echo "[deploy] WARNING: 'tunnelhub' phase failed"; all_failed=1; }
+            if [[ $all_failed -eq 1 ]]; then
+                echo "[deploy] ERROR: one or more phases of 'all' failed (see warnings above)"
+                exit 1
+            fi
+            echo "[deploy] Full release cycle completed"
             ;;
         *)
             echo "Unknown target: $TARGET"
