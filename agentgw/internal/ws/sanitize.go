@@ -120,6 +120,12 @@ func statusLineReplacement(r rune) (string, bool) {
 		return "->", true
 	case r == 0x2193: // ↓
 		return "v", true
+	// Ballot box with X (U+2612 ☒) — Noto Sans SC claims coverage for
+	// the Miscellaneous Symbols block (OS/2 ulUnicodeRange1 bit 29) but
+	// does not actually contain this glyph. CanvasKit sees the range bit
+	// and skips the fallback chain, rendering tofu. Sanitize to ASCII.
+	case r == 0x2612: // ☒
+		return "[X]", true
 	}
 	return "", false
 }
