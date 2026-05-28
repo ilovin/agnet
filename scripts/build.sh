@@ -474,9 +474,16 @@ OUTPUT LOCATIONS:
   out/linux-amd64/agentgw  — Linux gateway (amd64)
   out/linux-arm64/agentd   — Linux daemon (arm64)
   out/linux-arm64/agentgw  — Linux gateway (arm64)
-  out/android/agentapp.apk — Android APK
-  out/ios/agentapp.ipa     — iOS IPA
+  out/android/agentapp.apk — Android APK (canonical)
+  out/ios/agentapp.ipa     — iOS IPA (canonical)
   out/static/              — Web static assets
+
+  Legacy (symlinked → canonical, do not edit):
+  agentgw/agentapp.apk     — symlink → ../out/android/agentapp.apk
+  agentgw/agentapp.ipa     — symlink → ../out/ios/agentapp.ipa
+  agentgw/agentgw          — symlink → ../out/darwin-arm64/agentgw
+  agentd/agentd            — symlink → ../out/darwin-arm64/agentd
+  agentgw/static/          — symlink → ../out/static
 EOF
 }
 

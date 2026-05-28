@@ -133,12 +133,16 @@ install_android() {
         install_android_flutter
         return
     fi
-    local apk="$AGENTAPP_DIR/build/app/outputs/flutter-apk/app-release.apk"
+    # Canonical APK output ($APK_OUTPUT = out/android/agentapp.apk) is the
+    # first choice — `build_apk` copies the freshly built apk there. Fall
+    # back to Flutter's native path only if canonical is missing (e.g. when
+    # the user invoked `flutter build apk` outside of build.sh).
+    local apk="$APK_OUTPUT"
     if [[ ! -f "$apk" ]]; then
-        apk="$APK_OUTPUT"
+        apk="$AGENTAPP_DIR/build/app/outputs/flutter-apk/app-release.apk"
     fi
     if [[ ! -f "$apk" ]]; then
-        echo "[deploy] ERROR: APK not found for install"
+        echo "[deploy] ERROR: APK not found at $APK_OUTPUT or Flutter build dir"
         return 1
     fi
     local ok=0

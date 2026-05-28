@@ -719,12 +719,27 @@ func runServer(tunnelURLFlag, tunnelTokenFlag, hubBaseFlag, appURLFlag string, r
 	}
 	http.Handle("/ws", srv)
 
-	// APK download endpoint for dev updates
+	// APK download endpoint for dev updates.
+	// Resolves canonical out/android/agentapp.apk first (set by scripts/build.sh apk),
+	// then falls back to legacy paths (agentgw/agentapp.apk symlink, exe-dir).
 	apkCandidates := func() []string {
-		candidates := []string{"agentapp.apk", "./agentapp.apk", "../agentapp.apk"}
+		candidates := []string{
+			// Canonical (run from repo root, or with cwd inside out/)
+			"out/android/agentapp.apk",
+			"./out/android/agentapp.apk",
+			"../out/android/agentapp.apk",
+			// Legacy / symlink locations (kept for backward compat)
+			"agentapp.apk",
+			"./agentapp.apk",
+			"../agentapp.apk",
+		}
 		if ex, err := os.Executable(); err == nil {
 			exDir := filepath.Dir(ex)
 			candidates = append([]string{
+				// exDir-anchored canonical (matches dev where exe sits in out/<plat>/)
+				filepath.Join(exDir, "..", "android", "agentapp.apk"),
+				filepath.Join(exDir, "..", "..", "out", "android", "agentapp.apk"),
+				// exDir-anchored legacy
 				filepath.Join(exDir, "agentapp.apk"),
 				filepath.Join(exDir, "..", "agentapp.apk"),
 			}, candidates...)
