@@ -19,7 +19,6 @@ import '../services/ws_client.dart';
 import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
-import '../widgets/agent_status_indicator.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -3113,20 +3112,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
   String get _statusLabel => AgentStatusTheme.getLabel(widget.agent.status);
   Color get _statusColor => AgentStatusTheme.getColor(widget.agent.status);
 
-  AgentIndicatorStatus get _indicatorStatus {
-    switch (widget.agent.status) {
-      case AgentStatus.working:
-        return AgentIndicatorStatus.running;
-      case AgentStatus.starting:
-        return AgentIndicatorStatus.thinking;
-      case AgentStatus.crashed:
-        return AgentIndicatorStatus.error;
-      case AgentStatus.idle:
-      case AgentStatus.stopped:
-        return AgentIndicatorStatus.idle;
-    }
-  }
-
   Widget _buildUnreadBadge() {
     final unreadCount = ref.watch(unreadProvider)[(widget.nodeId, widget.agent.id)] ?? 0;
     if (unreadCount == 0) return const SizedBox.shrink();
@@ -3159,12 +3144,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        AgentStatusIndicator(
-          status: _indicatorStatus,
-          size: 10,
-          color: _statusColor,
-        ),
-        const SizedBox(width: 6),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           decoration: BoxDecoration(

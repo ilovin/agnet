@@ -7,6 +7,7 @@ import 'package:agentapp/models/node_model.dart';
 import 'package:agentapp/providers/conversation_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/dashboard_screen.dart';
+import 'package:agentapp/widgets/agent_status_indicator.dart';
 
 /// Pumps an [AgentRow] inside a real Material app so its TextStyles resolve
 /// against the actual theme. We then read the rendered styles back out of the
@@ -285,6 +286,25 @@ void main() {
           reason: 'node header (size=$nodeSize, weight=$nodeWeight) must be '
               'heavier OR larger than agent title (size=$agentSize, '
               'weight=$agentWeight) to maintain hierarchy');
+    });
+
+    testWidgets('AgentRow does not render a status dot widget', (tester) async {
+      await _pumpAgentRow(
+        tester,
+        agent: baseAgent,
+        nodeId: 'n1',
+      );
+
+      // The colored dot (AgentStatusIndicator) was removed as redundant:
+      // status text already conveys the same information.
+      expect(
+        find.byType(AgentStatusIndicator),
+        findsNothing,
+        reason: 'AgentRow should not contain a status dot; text is sufficient',
+      );
+
+      // Status text must still be present.
+      expect(find.textContaining('Standby'), findsOneWidget);
     });
 
     testWidgets('hierarchy holds in dark mode (no hardcoded light colours)', (tester) async {
