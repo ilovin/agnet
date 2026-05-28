@@ -42,11 +42,7 @@ class BypassIndicator extends StatelessWidget {
             label,
             style: TextStyle(
               fontFamily: AppTextStyles.monoFontFamily,
-              fontFamilyFallback: const [
-                'Noto Sans SC',
-                'Noto Sans Symbols 2',
-                'Noto Color Emoji',
-              ],
+              fontFamilyFallback: AppTextStyles.fontFamilyFallback,
               fontSize: 11,
               height: 1.2,
               fontWeight: FontWeight.w600,

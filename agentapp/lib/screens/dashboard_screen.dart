@@ -2920,6 +2920,7 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                     overflow: TextOverflow.ellipsis,
                                     style: Theme.of(context).textTheme.labelMedium?.copyWith(
                                       fontFamily: AppTextStyles.monoFontFamily,
+                                      fontFamilyFallback: AppTextStyles.fontFamilyFallback,
                                       fontWeight: FontWeight.w600,
                                       color: AgentStatusTheme.getColor(a.status),
                                     ),
