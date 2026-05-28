@@ -690,10 +690,10 @@ EOF
 restart_agentgw() {
     if [[ "${DEPLOY_DRY_RUN:-0}" == "1" ]]; then
         echo "[deploy] DEPLOY_DRY_RUN=1: skipping actual restart, running CHECK_ONLY validation..."
-        CHECK_ONLY=1 bash "$INSTALL_SCRIPT" restart
+        CHECK_ONLY=1 INSTALL_USE_CACHED_WEB="${INSTALL_USE_CACHED_WEB:-0}" bash "$INSTALL_SCRIPT" restart
     else
         echo "[deploy] Refreshing local gateway runtime via install.sh restart..."
-        bash "$INSTALL_SCRIPT" restart
+        INSTALL_USE_CACHED_WEB="${INSTALL_USE_CACHED_WEB:-0}" bash "$INSTALL_SCRIPT" restart
     fi
 }
 
@@ -1179,6 +1179,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             guard_no_worktree_for_real_deploy local
             echo "[deploy] Running local deployment..."
             deploy_local_with_web_flag "${@:2}"
+            # When --with-web just copied fresh web to ~/.agentgw/static/,
+            # tell install.sh restart not to overwrite it with stale $OUT_DIR/static.
+            if printf '%s\n' "${@:2}" | grep -qx -- '--with-web'; then
+                export INSTALL_USE_CACHED_WEB=1
+            fi
             build_agentd_mac
             build_agentgw_mac
             build_agentd_linux

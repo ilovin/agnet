@@ -528,6 +528,15 @@ sync_local_agentgw_binary() {
 }
 
 sync_web_static() {
+  # When INSTALL_USE_CACHED_WEB=1 and static already has content, skip all
+  # source lookups. This prevents stale $OUT_DIR/static (from a previous
+  # package.sh run) from overwriting a fresh web build that deploy.sh just
+  # copied in via --with-web.
+  if [[ "${INSTALL_USE_CACHED_WEB:-0}" == "1" && -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
+    info "Web 控制台保留已有内容 (INSTALL_USE_CACHED_WEB=1)"
+    return
+  fi
+
   local static_src=""
   local out_static="${OUT_DIR:-}"
   if [[ -n "$out_static" ]]; then
@@ -546,11 +555,8 @@ sync_web_static() {
     cp -R "$static_src/." "$INSTALL_DIR/static/"
     return
   fi
-  # If ~/.agentgw/static/ already has content and INSTALL_USE_CACHED_WEB is not
-  # explicitly set to "1", skip any cache/download step to avoid overwriting a
-  # freshly deployed web build (e.g. one written by `deploy.sh local --with-web`).
-  if [[ "${INSTALL_USE_CACHED_WEB:-0}" != "1" && -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
-    info "Web 控制台已存在，跳过缓存覆盖 (INSTALL_USE_CACHED_WEB=1 可强制更新)"
+  if [[ -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
+    info "Web 控制台已存在，跳过缓存覆盖"
     return
   fi
   # Check cache — skip download if already extracted
