@@ -37,7 +37,14 @@ while [[ "$_dir" != "/" && "$_dir" != "." ]]; do
   _dir="$_parent"
 done
 BIN_DIR="$PACKAGE_ROOT/bin"
-# OUT_DIR removed: install.sh now only resolves from standard layout paths
+# OUT_DIR: build output root used by sync_web_static to find $OUT_DIR/static.
+# Default to $REPO_ROOT/out when running from the repo, so `install.sh restart`
+# (called by deploy.sh) finds freshly-built web assets without callers having
+# to set OUT_DIR explicitly. Empty when REPO_ROOT can't be located (e.g.
+# release tarball layout) — sync_web_static still falls back to PACKAGE_ROOT/static.
+if [[ -z "${OUT_DIR:-}" && -n "$REPO_ROOT" && -d "$REPO_ROOT/out" ]]; then
+  OUT_DIR="$REPO_ROOT/out"
+fi
 INSTALL_DIR="$HOME/.agentgw"
 CACHE_DIR="$INSTALL_DIR/cache"
 RUNTIME_ENV_FILE="$INSTALL_DIR/runtime.env"
@@ -550,9 +557,36 @@ sync_web_static() {
     fi
   done
   if [[ -n "$static_src" ]]; then
-    rm -rf "$INSTALL_DIR/static"
-    mkdir -p "$INSTALL_DIR/static"
-    cp -R "$static_src/." "$INSTALL_DIR/static/"
+    # Compare mtimes: only overwrite if source is newer than destination.
+    # This way, deploy.sh's --with-web (which copies fresh web → INSTALL_DIR/static
+    # right before calling install.sh restart) wins over a stale $OUT_DIR/static
+    # from an earlier package.sh run, without anyone needing to set
+    # INSTALL_USE_CACHED_WEB=1.
+    local dest_dir="$INSTALL_DIR/static"
+    if [[ -d "$dest_dir" && -n "$(ls -A "$dest_dir" 2>/dev/null)" ]]; then
+      local src_mtime dst_mtime
+      # _newest_mtime: print epoch seconds of newest entry under $1 (recursive).
+      # Use find+stat — portable across macOS (BSD stat) and Linux (GNU stat).
+      _newest_mtime() {
+        if stat -f '%m' / >/dev/null 2>&1; then
+          # BSD stat (macOS)
+          find "$1" -type f -exec stat -f '%m' {} + 2>/dev/null | sort -n | tail -1
+        else
+          # GNU stat (Linux)
+          find "$1" -type f -exec stat -c '%Y' {} + 2>/dev/null | sort -n | tail -1
+        fi
+      }
+      src_mtime="$(_newest_mtime "$static_src")"
+      dst_mtime="$(_newest_mtime "$dest_dir")"
+      if [[ -n "$src_mtime" && -n "$dst_mtime" && "$src_mtime" -le "$dst_mtime" ]]; then
+        info "Web 控制台已是最新 (源 $static_src 不比目标新，跳过)"
+        return
+      fi
+    fi
+    step "同步 Web 控制台: $static_src -> $dest_dir"
+    rm -rf "$dest_dir"
+    mkdir -p "$dest_dir"
+    cp -R "$static_src/." "$dest_dir/"
     return
   fi
   if [[ -d "$INSTALL_DIR/static" && -n "$(ls -A "$INSTALL_DIR/static" 2>/dev/null)" ]]; then
