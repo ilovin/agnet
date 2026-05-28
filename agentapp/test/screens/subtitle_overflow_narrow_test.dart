@@ -332,5 +332,64 @@ void main() {
       expect(pattern.hasMatch(src), isTrue,
           reason: "node['name'] Text must include `maxLines:`");
     });
+
+    // Task #11: NodeCard subtitle (port · UUID · workDir style strings) was
+    // wrapping to 3 lines on narrow nodes despite maxLines:1 + ellipsis.
+    // Adding `softWrap: false` forces the layout engine to keep the line
+    // single and ellipsize, even when the surrounding ListTile reserves
+    // enough vertical room for multi-line content.
+    test('dashboard_screen NodeCard subtitle has softWrap: false', () {
+      final src = _readSource('dashboard_screen.dart');
+      // Match: subtitle: ...Text('${widget.node.location.displayLocation} ...
+      // ...softWrap: false somewhere in the property list.
+      final pattern = RegExp(
+        r"Text\(\s*'\$\{widget\.node\.location\.displayLocation\}[^']*',(?:[^()]|\([^()]*\))*?softWrap:\s*false",
+        dotAll: true,
+      );
+      expect(pattern.hasMatch(src), isTrue,
+          reason:
+              'NodeCard subtitle Text(displayLocation · status) must include `softWrap: false` so long port·UUID·workDir strings ellipsize on a single line');
+    });
+  });
+
+  // Widget-level narrow-container test: pump the same Text shape used by
+  // NodeCard subtitle inside a 280px-wide ListTile and verify it does not
+  // overflow vertically into multiple lines.
+  testWidgets('NodeCard subtitle (port·UUID·workDir) stays single line at 280px',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    const String longSubtitle =
+        '6031 · 7c13b5d8-e08f-4f80-aa3a-8c4ea755a5c2 · /  ·  健康';
+
+    await tester.pumpWidget(
+      _wrapNarrow(
+        Material(
+          child: ListTile(
+            dense: true,
+            leading: const Icon(Icons.computer, size: 20),
+            title: const Text('phone-talk - 6031'),
+            subtitle: const Text(
+              longSubtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              softWrap: false,
+            ),
+            trailing: const Icon(Icons.circle, size: 12),
+          ),
+        ),
+        width: 280,
+      ),
+    );
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+
+    final subtitle = tester.widget<Text>(find.text(longSubtitle));
+    expect(subtitle.maxLines, 1);
+    expect(subtitle.overflow, TextOverflow.ellipsis);
+    expect(subtitle.softWrap, isFalse);
   });
 }
