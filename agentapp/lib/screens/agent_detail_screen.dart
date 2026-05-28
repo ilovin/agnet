@@ -2154,22 +2154,38 @@ class _AgentDetailScreenState extends ConsumerState<AgentDetailScreen> {
         ),
         titleWidget: agent == null
             ? null
-            : Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  DashboardStatusDot(status: agent.status),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text(
-                      agent.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+            : Builder(
+                builder: (ctx) {
+                  // Mobile widths (< 480px) shrink the title from titleSmall
+                  // (~16px) to bodySmall (~14px) so phone widths (375/390/414)
+                  // fit the agent name alongside the back arrow + bypass-mode
+                  // chip without aggressive ellipsis truncation. Wider widths
+                  // keep titleSmall. Test #28 introduced titleSmall but it
+                  // was still too large on narrow mobile screens.
+                  final width = MediaQuery.of(ctx).size.width;
+                  final isMobile = width < 480;
+                  final theme = Theme.of(ctx);
+                  final baseStyle = isMobile
+                      ? theme.textTheme.bodySmall
+                      : theme.textTheme.titleSmall;
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DashboardStatusDot(status: agent.status),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          agent.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: baseStyle?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
-                    ),
-                  ),
-                ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
         actions: [
           // Permission-mode chip (replaces the in-composer mode button so
