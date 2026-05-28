@@ -317,7 +317,11 @@ void main() {
       ));
       expect(container.read(nodesProvider).agentsFor('n1')[0].lastMessageTime, equals(1700000000000));
 
-      // RPC returns a newer lastMessageTime — should update
+      // RPC returns a newer lastMessageTime — should update.
+      // i-017: agent.status_changed only fires when status actually changes
+      // (oldStatus != newStatus). If the agent stays in the same status,
+      // lastMessageTime would never refresh via WS, so loadAgents must accept
+      // a newer RPC value to keep dashboard time fresh.
       notifier.loadAgents('n1', [
         {
           'id': 'a1', 'name': 'claude-1', 'status': 'idle',
@@ -327,7 +331,7 @@ void main() {
       ]);
 
       final agent = container.read(nodesProvider).agentsFor('n1')[0];
-      expect(agent.lastMessageTime, equals(1700000000000), reason: 'newer RPC lastMessageTime should not overwrite WS-updated value');
+      expect(agent.lastMessageTime, equals(1700000001000), reason: 'newer RPC lastMessageTime should refresh stale WS-updated value');
     });
 
     test('loadAgents merge: older RPC lastMessageTime preserves existing value', () {
