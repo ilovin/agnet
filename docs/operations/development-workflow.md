@@ -56,9 +56,16 @@ flutter analyze                  # lint/static analysis
 - `out/darwin-arm64/agentgw` — macOS gateway
 - `out/linux-amd64/agentd` — Linux daemon (amd64)
 - `out/linux-amd64/agentgw` — Linux gateway (amd64)
-- `out/android/agentapp.apk` — Android APK
-- `out/ios/agentapp.ipa` — iOS IPA
+- `out/android/agentapp.apk` — Android APK (canonical)
+- `out/ios/agentapp.ipa` — iOS IPA (canonical)
 - `out/static/` — Web 静态资源
+
+**关于 APK/IPA 路径**：
+- 唯一的「canonical」位置是 `out/android/agentapp.apk` 和 `out/ios/agentapp.ipa`。
+- 历史路径 `agentgw/agentapp.apk` / `agentgw/agentapp.ipa` 仍然存在，但 **是相对软链** 指向 canonical（由 `build.sh` 中 `link_legacy` 自动维护）。不要替换为真实文件。
+- Flutter 原生产物路径 `agentapp/build/app/outputs/flutter-apk/app-release.apk` 与 `agentapp/build/ios/ipa/*.ipa` 是 Flutter 工具链强制的，无法迁移；`build.sh` 会立刻复制到 canonical。
+- 发布产物 `dist/bin/agentapp.apk` / `dist/bin/agentapp.ipa` 是 `package.sh` 复制 canonical 得到的，归打包过程使用，不应手动操作。
+- agentgw HTTP `/apk` 端点会优先解析 canonical（运行时依据 cwd 与 exe 目录探测），软链仅作为备用，可在不破坏功能的前提下删除/重建。
 
 ### `scripts/deploy.sh` — 部署
 
