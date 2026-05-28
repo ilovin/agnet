@@ -8,6 +8,8 @@ import 'package:agentapp/providers/connection_provider.dart';
 import 'package:agentapp/providers/nodes_provider.dart';
 import 'package:agentapp/screens/agent_detail_screen.dart';
 import 'package:agentapp/services/ws_client.dart';
+import 'package:agentapp/theme/app_theme.dart';
+import 'package:agentapp/theme/density_mode.dart';
 import 'package:agentapp/widgets/app_bar/dashboard_status_dot.dart';
 import 'package:agentapp/widgets/app_bar/mission_control_app_bar.dart';
 
@@ -93,6 +95,10 @@ Future<void> _pumpAgentDetail(
     UncontrolledProviderScope(
       container: container,
       child: MaterialApp(
+        theme: AppTheme.build(
+          densityMode: DensityMode.standard,
+          brightness: Brightness.light,
+        ),
         home: AgentDetailScreen(nodeId: nodeId, agentId: agentId),
       ),
     ),
@@ -398,6 +404,107 @@ void main() {
       final textSize = tester.getSize(textFinder);
       // Title must have non-zero width
       expect(textSize.width, greaterThan(0.0));
+    });
+
+    // Mobile responsive title sizing — narrow widths (< 480px) should use a
+    // smaller font than the default titleSmall (16px) to keep titles legible
+    // and reduce ellipsis truncation on iPhone 12/13/14/15 widths (375/390/393).
+    for (final width in [375.0, 390.0, 414.0]) {
+      testWidgets(
+          'title uses bodySmall (14px) on mobile width ${width.toInt()}px',
+          (tester) async {
+        const name = 'MobileAgent';
+        await _pumpAgentDetail(
+          tester,
+          nodeId: 'n1',
+          agentId: 'a1',
+          agents: [
+            {
+              'id': 'a1',
+              'name': name,
+              'workDir': '/tmp',
+              'nodeId': 'n1',
+              'provider': 'claude',
+              'status': 'idle',
+              'runtimeState': 'live',
+              'sessionState': 'active',
+            },
+          ],
+          screenSize: Size(width, 700),
+        );
+
+        final textWidget = tester.widget<Text>(find.text(name));
+        // On mobile widths the title must shrink to bodySmall (14px),
+        // smaller than titleSmall (16px), to fit alongside the back arrow
+        // and bypass-mode chip without truncation.
+        expect(textWidget.style?.fontSize, 14.0,
+            reason: 'mobile width ${width.toInt()} should use 14px font');
+        // Still bold so it reads as a title.
+        expect(textWidget.style?.fontWeight, FontWeight.w600);
+        // Still ellipsis-clamped as a final fallback.
+        expect(textWidget.maxLines, 1);
+        expect(textWidget.overflow, TextOverflow.ellipsis);
+      });
+    }
+
+    testWidgets('title keeps titleSmall (16px) on tablet/desktop width >= 600px',
+        (tester) async {
+      const name = 'DesktopAgent';
+      await _pumpAgentDetail(
+        tester,
+        nodeId: 'n1',
+        agentId: 'a1',
+        agents: [
+          {
+            'id': 'a1',
+            'name': name,
+            'workDir': '/tmp',
+            'nodeId': 'n1',
+            'provider': 'claude',
+            'status': 'idle',
+            'runtimeState': 'live',
+            'sessionState': 'active',
+          },
+        ],
+        screenSize: const Size(1024, 768),
+      );
+
+      final textWidget = tester.widget<Text>(find.text(name));
+      // Wide widths keep titleSmall = 16px (bodyMedium scaled).
+      expect(textWidget.style?.fontSize, 16.0,
+          reason: 'desktop width 1024 should keep 16px title');
+      expect(textWidget.style?.fontWeight, FontWeight.w600);
+    });
+
+    testWidgets('long title on 375px mobile fits without 0-width clip',
+        (tester) async {
+      // Realistic worst-case: long Chinese + English mix on iPhone 13 width.
+      const longName = '前端开发-MobileAgent-RefactoringTask';
+      await _pumpAgentDetail(
+        tester,
+        nodeId: 'n1',
+        agentId: 'a1',
+        agents: [
+          {
+            'id': 'a1',
+            'name': longName,
+            'workDir': '/tmp',
+            'nodeId': 'n1',
+            'provider': 'claude',
+            'status': 'idle',
+            'runtimeState': 'live',
+            'sessionState': 'active',
+          },
+        ],
+        screenSize: const Size(375, 812),
+      );
+
+      final textFinder = find.text(longName);
+      expect(textFinder, findsOneWidget);
+      final textSize = tester.getSize(textFinder);
+      // Title must have meaningful width — not collapsed.
+      expect(textSize.width, greaterThan(40.0),
+          reason: 'title must remain visible on 375px width');
     });
   });
 }

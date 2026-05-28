@@ -126,13 +126,26 @@ class MissionControlAppBar extends StatelessWidget
                       _BarSeparator(),
                       const SizedBox(width: 8),
                       Flexible(
-                        child: Text(
-                          title!,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
+                        child: Builder(
+                          builder: (ctx) {
+                            // Mobile widths (< 480px) shrink the title to
+                            // bodySmall so phone widths (375/390/414) fit
+                            // along with the wordmark + actions without
+                            // aggressive ellipsis truncation.
+                            final w = MediaQuery.of(ctx).size.width;
+                            final isMobile = w < 480;
+                            final base = isMobile
+                                ? theme.textTheme.bodySmall
+                                : theme.textTheme.titleSmall;
+                            return Text(
+                              title!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: base?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            );
+                          },
                         ),
                       ),
                     ],
