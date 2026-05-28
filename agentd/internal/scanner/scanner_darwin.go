@@ -215,14 +215,35 @@ func (s *Scanner) detectDarwinTmuxFromTTY(terminal string) (target string, sessi
 	if wantTTY == "" {
 		return "", ""
 	}
+	format := "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}"
 
-	cmd := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}\t#{session_name}:#{window_index}.#{pane_index}")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", ""
+	// Try default tmux first
+	cmd := exec.Command("tmux", "list-panes", "-a", "-F", format)
+	if out, err := cmd.Output(); err == nil {
+		if tgt, sess := resolveTmuxTargetFromPaneList(string(out), wantTTY); tgt != "" {
+			return tgt, sess
+		}
 	}
 
-	return resolveTmuxTargetFromPaneList(string(out), wantTTY)
+	// On macOS, tmux sockets may be in /private/tmp/tmux-* or /tmp/tmux-*
+	for _, baseDir := range []string{"/tmp", "/private/tmp"} {
+		tmuxDirs, _ := filepath.Glob(filepath.Join(baseDir, "tmux-*"))
+		for _, dir := range tmuxDirs {
+			sockets, _ := filepath.Glob(filepath.Join(dir, "*"))
+			for _, sock := range sockets {
+				cmd := exec.Command("tmux", "-S", sock, "list-panes", "-a", "-F", format)
+				out, err := cmd.Output()
+				if err != nil {
+					continue
+				}
+				if tgt, sess := resolveTmuxTargetFromPaneList(string(out), wantTTY); tgt != "" {
+					return tgt, sess
+				}
+			}
+		}
+	}
+
+	return "", ""
 }
 
 // stub for Linux compatibility - never called on macOS

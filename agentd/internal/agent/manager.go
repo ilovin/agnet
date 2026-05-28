@@ -2895,7 +2895,28 @@ func (m *Manager) RunPeriodicScanOnce() {
 		m.mu.RUnlock()
 
 		if foundWithWatcher {
-			// Already tracked with an active watcher — nothing to do.
+			// Refresh tmux metadata in case the process moved to a different pane.
+			m.mu.RLock()
+			for _, ag := range m.agents {
+				if ag.PID == proc.PID && ag.Provider == proc.Provider {
+					oldTarget := ag.TmuxTarget()
+					ag.SetAttachInputRoute(
+						proc.AttachMode(),
+						proc.AttachReadOnly(),
+						proc.AttachReadOnlyReason(),
+						proc.TmuxTarget,
+					)
+					if oldTarget != proc.TmuxTarget && proc.TmuxTarget != "" {
+						log.Printf("[PeriodicScan] PID %d tmux target changed: %s -> %s",
+							proc.PID, oldTarget, proc.TmuxTarget)
+						if w, ok := ag.Watcher().(*watcher.ClaudeWatcher); ok {
+							w.SetTmuxTarget(proc.TmuxTarget)
+						}
+					}
+					break
+				}
+			}
+			m.mu.RUnlock()
 			continue
 		}
 
