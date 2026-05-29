@@ -74,6 +74,38 @@
             position: relative;
             overflow-x: auto;
         }
+        .install-command.recommended {
+            background: #f0f4ff;
+            border: 1.5px solid #667eea;
+            box-shadow: 0 2px 10px rgba(102, 126, 234, 0.12);
+        }
+        .install-command.secondary {
+            background: #fafafa;
+            opacity: 0.92;
+        }
+        .recommended-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-family: sans-serif;
+            font-size: 0.7em;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-bottom: 8px;
+            vertical-align: middle;
+        }
+        .install-method-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 10px;
+            font-family: sans-serif;
+        }
+        .install-method-label.recommended-label {
+            color: #4a5bd1;
+            font-weight: 600;
+        }
         .copy-btn {
             position: absolute;
             top: 10px;
@@ -238,6 +270,27 @@
             font-size: 0.85em;
             margin-right: 4px;
         }
+        .local-gw-start-cmd .cmd-line.recommended {
+            background: rgba(102, 126, 234, 0.12);
+            border-radius: 6px;
+            padding-left: 8px;
+            padding-right: 78px;
+        }
+        .local-gw-start-cmd .cmd-line.recommended .cmd-label {
+            color: #b8c4ff;
+            font-weight: 600;
+        }
+        .local-gw-start-cmd .cmd-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            font-family: sans-serif;
+            font-size: 0.7em;
+            font-weight: 600;
+            padding: 1px 7px;
+            border-radius: 9px;
+            margin-right: 4px;
+        }
         .copy-cmd-btn {
             position: absolute;
             top: 50%;
@@ -294,16 +347,18 @@
                 <div class="platform-icon">💻</div>
                 <h2>Mac / Linux</h2>
                 <p>适用于 macOS 和 Linux 的安装</p>
-                <div class="install-command">
+                <div class="install-command recommended">
+                    <span class="recommended-badge">推荐</span>
+                    <div class="install-method-label recommended-label">通过 npm 安装</div>
+                    <button class="copy-btn" onclick="copyCommand(event, 'desktop-npm')">复制</button>
+                    <code id="desktop-npm-command">npm i -g @ai-alignment/agnet && agnet setup</code>
+                </div>
+                <div class="install-command secondary" style="margin-top: 20px;">
+                    <div class="install-method-label">或使用脚本安装</div>
                     <button class="copy-btn" onclick="copyCommand(event, 'desktop')">复制</button>
                     <code id="desktop-command">wget --no-check-certificate https://api.ilovin.xyz/v1/install.sh && bash install.sh</code>
                 </div>
                 <a href="https://api.ilovin.xyz/v1/install.sh" class="download-btn" download="install.sh">下载 install.sh</a>
-                <div class="install-command" style="margin-top: 30px; border-top: 2px dashed #e0e0e0; padding-top: 20px;">
-                    <div style="font-size: 0.85em; color: #666; margin-bottom: 10px; font-family: sans-serif;">或通过 npm 安装（推荐）</div>
-                    <button class="copy-btn" onclick="copyCommand(event, 'desktop-npm')">复制</button>
-                    <code id="desktop-npm-command">npm i -g @ai-alignment/agnet && agnet setup</code>
-                </div>
             </div>
 
             <div class="platform-card" onclick="selectPlatform('android')">
@@ -356,7 +411,8 @@
                 <button class="local-gw-btn" onclick="tryConnectLocalGW()">尝试连接本机 gw</button>
                 <div class="local-gw-status" id="local-gw-status"></div>
                 <div class="local-gw-start-cmd" id="local-gw-start-cmd">
-                    <div class="cmd-line" data-cmd-label="npm 安装方式">
+                    <div class="cmd-line recommended" data-cmd-label="npm 安装方式">
+                        <span class="cmd-badge">推荐</span>
                         <span class="cmd-label">npm 安装：</span>
                         <code>agnet start</code>
                         <button class="copy-cmd-btn" onclick="copyStartCmd(event, this)">复制</button>
