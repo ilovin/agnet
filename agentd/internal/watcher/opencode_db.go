@@ -34,6 +34,7 @@ type OpenCodeDBWatcher struct {
 	// We keep re-querying it until a newer message appears.
 	streamingMsgID      string // msgID of the message still receiving parts
 	streamingMsgText    string // last emitted text for the streaming message
+	streamingMsgHasTool bool   // last observed hasTool state for the streaming message
 	streamingUnchanged  int    // consecutive polls with unchanged text
 }
 
@@ -126,6 +127,7 @@ func (w *OpenCodeDBWatcher) SetSkipExisting(bool) {}
 func (w *OpenCodeDBWatcher) ResetOffset() {
 	w.streamingMsgID = ""
 	w.streamingMsgText = ""
+	w.streamingMsgHasTool = false
 	// Seed lastMsgID to the latest message so we don't re-process history after clear
 	if w.dbPath != "" {
 		if db, err := w.getDB(); err == nil {
@@ -305,6 +307,7 @@ func (w *OpenCodeDBWatcher) poll() {
 		if m.id == w.streamingMsgID {
 			w.streamingMsgID = ""
 			w.streamingMsgText = ""
+			w.streamingMsgHasTool = false
 		}
 		if m.text != "" {
 			ev := ConversationEvent{
@@ -329,34 +332,66 @@ func (w *OpenCodeDBWatcher) poll() {
 	last := msgs[len(msgs)-1]
 
 	if last.id == w.streamingMsgID {
-		// Same message as last poll — check if text changed
-		if last.text == w.streamingMsgText {
+		// Same message as last poll — check if text or tool state changed.
+		// The original implementation only compared text, so a brand-new
+		// tool-invocation/step-start that arrived without any text emerging
+		// produced no status event and the UI stayed idle. We now also
+		// detect the hasTool transition so reasoning/tool-only updates emit
+		// StatusWorking even while text remains "".
+		textUnchanged := last.text == w.streamingMsgText
+		toolStateChanged := last.hasTool != w.streamingMsgHasTool
+
+		if textUnchanged && !toolStateChanged {
 			w.streamingUnchanged++
 			if w.streamingUnchanged >= 10 && last.role == "assistant" {
-				// No text change for ~30s — treat as complete
+				// No change for ~30s — treat as complete
 				s := StatusStandby
 				w.callback(ConversationEvent{StatusChange: &s})
 				w.lastMsgID = last.id
 				w.streamingMsgID = ""
 				w.streamingMsgText = ""
+				w.streamingMsgHasTool = false
 				w.streamingUnchanged = 0
 			}
 			return
 		}
-		// Text updated — emit update event
+
+		// Either text or tool state changed — reset the unchanged counter.
 		w.streamingUnchanged = 0
-		w.streamingMsgText = last.text
-		if last.text != "" {
+
+		// hasTool transitioned false → true: emit StatusWorking. This is the
+		// regression fix — previously suppressed when text was unchanged.
+		if last.hasTool && !w.streamingMsgHasTool && last.role == "assistant" {
+			s := StatusWorking
 			ev := ConversationEvent{
-				Role:  last.role,
-				Text:  last.text,
-				MsgID: last.id,
+				Role:         last.role,
+				MsgID:        last.id,
+				StatusChange: &s,
 			}
-			if last.role == "assistant" {
-				s := StatusWorking
-				ev.StatusChange = &s
+			if last.text != "" {
+				ev.Text = last.text
 			}
 			w.callback(ev)
+		}
+
+		// Update the cached tool state regardless of direction.
+		w.streamingMsgHasTool = last.hasTool
+
+		// Text update path (separate from the hasTool-only transition).
+		if !textUnchanged {
+			w.streamingMsgText = last.text
+			if last.text != "" {
+				ev := ConversationEvent{
+					Role:  last.role,
+					Text:  last.text,
+					MsgID: last.id,
+				}
+				if last.role == "assistant" {
+					s := StatusWorking
+					ev.StatusChange = &s
+				}
+				w.callback(ev)
+			}
 		}
 		return
 	}
@@ -364,6 +399,7 @@ func (w *OpenCodeDBWatcher) poll() {
 	// New streaming message
 	w.streamingMsgID = last.id
 	w.streamingMsgText = last.text
+	w.streamingMsgHasTool = last.hasTool
 	if last.text != "" {
 		ev := ConversationEvent{
 			Role:  last.role,
@@ -414,6 +450,7 @@ func (w *OpenCodeDBWatcher) refreshSession() {
 	w.lastMsgID = ""
 	w.streamingMsgID = ""
 	w.streamingMsgText = ""
+	w.streamingMsgHasTool = false
 	w.onSwitch(latestSessionID)
 }
 
