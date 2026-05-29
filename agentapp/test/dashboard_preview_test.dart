@@ -184,4 +184,81 @@ void main() {
       expect(preview, ['Earlier message', 'Later message']);
     });
   });
+
+  group('sessionPreviewLinesFromMessages tool-call summarization', () {
+    // The dashboard list preview must surface semantic info from tool-call
+    // messages so users see e.g. "Bash: scripts/deploy.sh local" instead of
+    // a blunt truncation like "[Bash: scripts/deploy.sh local --with-web fl…".
+    // These tests pin that integration with ToolCallSummary.
+
+    test('Bash tool call shows ToolName: command preview', () {
+      final messages = <MessageModel>[
+        _msg('[Bash: scripts/deploy.sh local --with-web]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Bash: scripts/deploy.sh local --with-web']);
+    });
+
+    test('Read tool call shows basename instead of full path', () {
+      final messages = <MessageModel>[
+        _msg('[Read: /Users/foo/project/lib/screens/dashboard_screen.dart]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Read: dashboard_screen.dart']);
+    });
+
+    test('TaskCreate tool call shows subject', () {
+      final messages = <MessageModel>[
+        _msg('[TaskCreate: Wire ToolCallSummary into dashboard]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['TaskCreate: Wire ToolCallSummary into dashboard']);
+    });
+
+    test('Agent tool call shows description', () {
+      final messages = <MessageModel>[
+        _msg('[Agent: Run dashboard preview tests]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Agent: Run dashboard preview tests']);
+    });
+
+    test('tool call without details falls back to collapsed preview', () {
+      // [TaskList] has no params — the preview should still show the raw
+      // bracketed token rather than blowing up.
+      final messages = <MessageModel>[
+        _msg('[TaskList]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['[TaskList]']);
+    });
+
+    test('non tool-call line falls back to buildCollapsedPreview', () {
+      final messages = <MessageModel>[
+        _msg('Just a normal assistant reply'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Just a normal assistant reply']);
+    });
+
+    test('multi-line message: each line parsed independently', () {
+      // When the last message contains multiple tool-call lines, each line
+      // should be summarized via ToolCallSummary individually.
+      final messages = <MessageModel>[
+        _msg(
+          '[Bash: ls -la]\n[Read: /a/b/foo.dart]',
+        ),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Bash: ls -la', 'Read: foo.dart']);
+    });
+
+    test('mixed tool-call + plain text lines summarize per line', () {
+      final messages = <MessageModel>[
+        _msg('Working on it…\n[Bash: pwd]'),
+      ];
+      final preview = sessionPreviewLinesFromMessages(messages, maxLines: 2);
+      expect(preview, ['Working on it…', 'Bash: pwd']);
+    });
+  });
 }

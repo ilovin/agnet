@@ -20,6 +20,7 @@ import '../theme/agent_status_theme.dart';
 import '../theme/app_spacing.dart';
 import '../theme/app_text_styles.dart';
 import '../utils/canvaskit_safe_text.dart';
+import '../utils/tool_call_summary.dart';
 import '../widgets/app_bar/mission_control_app_bar.dart';
 import '../widgets/empty_states/empty_state.dart';
 import '../widgets/loaders/oscilloscope_loader.dart';
@@ -65,11 +66,31 @@ List<String> buildSessionPreviewLines(
     // Take the first line of each message
     final firstLine = text.replaceAll('\r', '\n').split('\n').first.trim();
     if (firstLine.isEmpty) continue;
-    final summary = buildCollapsedPreview(firstLine, maxChars: maxCharsPerLine);
-    lines.add(summary);
+    lines.add(_previewLine(firstLine, maxChars: maxCharsPerLine));
   }
 
   return lines;
+}
+
+/// Renders a single dashboard preview line with tool-call awareness.
+///
+/// Tool-call messages emitted by agentd are wrapped in `[ToolName: params]`
+/// brackets. A naive `buildCollapsedPreview` would just truncate the bracketed
+/// text, e.g. `[Bash: scripts/deploy.sh local --with-web …`, which hides the
+/// useful semantic. Routing through [ToolCallSummary.parse] lets us render
+/// `Bash: scripts/deploy.sh local` instead — `Read` shows the basename,
+/// `TaskCreate`/`Agent` show their subject, etc. Falls back to
+/// [buildCollapsedPreview] when the line is not a tool call or when the
+/// summary collapses to empty (e.g. `[TaskList]`).
+String _previewLine(String line, {int maxChars = 80}) {
+  final parsed = ToolCallSummary.parse(line);
+  if (parsed != null && parsed.summary.isNotEmpty) {
+    return buildCollapsedPreview(
+      '${parsed.toolName}: ${parsed.summary}',
+      maxChars: maxChars,
+    );
+  }
+  return buildCollapsedPreview(line, maxChars: maxChars);
 }
 
 List<String> sessionPreviewLinesFromMessages(
@@ -95,7 +116,7 @@ List<String> sessionPreviewLinesFromMessages(
       .split('\n')
       .map((l) => l.trim())
       .where((l) => l.isNotEmpty)
-      .map((l) => buildCollapsedPreview(l))
+      .map(_previewLine)
       .toList();
 
   if (allLines.isEmpty) return const [];
