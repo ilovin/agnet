@@ -311,7 +311,7 @@
                 <h2>Android</h2>
                 <p>下载 APK 安装包</p>
                 <a id="apk-link-btn" href="#" class="download-btn" onclick="downloadFor('android')">下载 APK</a>
-                <div id="apk-version" style="font-size: 0.75em; color: #999; margin-top: 8px;"></div>
+                <div id="apk-version" style="font-size: 0.75em; color: #555; margin-top: 8px; min-height: 1.2em; line-height: 1.4; font-weight: 500;"></div>
             </div>
         </div>
 
@@ -483,18 +483,26 @@
 
         // Load latest version and update APK link
         async function loadLatestVersion() {
+            const versionEl = document.getElementById('apk-version');
+            if (versionEl) versionEl.textContent = '加载版本中...';
             try {
                 const response = await fetch(`https://${API_DOMAIN}/v1/release/latest`);
-                if (!response.ok) return;
+                if (!response.ok) {
+                    if (versionEl) versionEl.textContent = '版本信息加载失败';
+                    return;
+                }
                 const manifest = await response.json();
                 const agentapp = manifest.artifacts?.find(a => a.name === 'agentapp');
                 if (agentapp?.apk?.url) {
+                    console.log('[portal] version loaded:', manifest.version);
+                    if (versionEl) versionEl.textContent = `最新版本: ${manifest.version}`;
                     document.getElementById('apk-link-btn').href = agentapp.apk.url;
-                    document.getElementById('apk-version').textContent =
-                        `最新版本: ${manifest.version}`;
+                } else {
+                    if (versionEl) versionEl.textContent = '版本信息加载失败';
                 }
             } catch (error) {
                 console.error('Failed to load manifest:', error);
+                if (versionEl) versionEl.textContent = '版本信息加载失败';
             }
         }
 
