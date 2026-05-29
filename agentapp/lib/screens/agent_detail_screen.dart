@@ -4007,54 +4007,60 @@ class _ActivityBlockState extends State<_ActivityBlock> {
           ),
           const SizedBox(width: 8),
           Flexible(
-            child: GestureDetector(
-              onTap: () {
-                widget.onToggle?.call();
-                setState(() => _expanded = !_expanded);
-              },
-              onLongPress: () {
-                final text = widget.message.text;
-                if (text.isEmpty) return;
-                Clipboard.setData(ClipboardData(text: text));
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('已复制'),
-                    duration: Duration(seconds: 1),
-                    behavior: SnackBarBehavior.floating,
-                  ),
-                );
-              },
-              child: AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                curve: Curves.easeInOut,
-                alignment: Alignment.topCenter,
-                child: Container(
-                  padding: _expanded
-                      ? const EdgeInsets.all(10)
-                      : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: scheme.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border(
-                      left: BorderSide(
-                        color: accentColor.withValues(alpha: 0.7),
-                        width: 3,
-                      ),
-                      top: BorderSide(
-                        color: scheme.outlineVariant.withValues(alpha: 0.2),
-                      ),
-                      right: BorderSide(
-                        color: scheme.outlineVariant.withValues(alpha: 0.2),
-                      ),
-                      bottom: BorderSide(
-                        color: scheme.outlineVariant.withValues(alpha: 0.2),
-                      ),
+            child: AnimatedSize(
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeInOut,
+              alignment: Alignment.topCenter,
+              child: Container(
+                padding: _expanded
+                    ? const EdgeInsets.all(10)
+                    : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border(
+                    left: BorderSide(
+                      color: accentColor.withValues(alpha: 0.7),
+                      width: 3,
+                    ),
+                    top: BorderSide(
+                      color: scheme.outlineVariant.withValues(alpha: 0.2),
+                    ),
+                    right: BorderSide(
+                      color: scheme.outlineVariant.withValues(alpha: 0.2),
+                    ),
+                    bottom: BorderSide(
+                      color: scheme.outlineVariant.withValues(alpha: 0.2),
                     ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Only the header row is tap/long-press interactive.
+                    // Wrapping the entire block (including expanded body)
+                    // would let GestureDetector's tap/long-press recognizers
+                    // win the gesture arena for horizontal drag, blocking
+                    // SelectionArea text selection inside body cards (#67).
+                    GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        widget.onToggle?.call();
+                        setState(() => _expanded = !_expanded);
+                      },
+                      onLongPress: () {
+                        final text = widget.message.text;
+                        if (text.isEmpty) return;
+                        Clipboard.setData(ClipboardData(text: text));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('已复制'),
+                            duration: Duration(seconds: 1),
+                            behavior: SnackBarBehavior.floating,
+                          ),
+                        );
+                      },
+                      child: Row(
                         children: [
                           AnimatedRotation(
                             turns: _expanded ? 0.25 : 0,
@@ -4082,19 +4088,19 @@ class _ActivityBlockState extends State<_ActivityBlock> {
                           ),
                         ],
                       ),
-                      if (_expanded) ...[
-                        const SizedBox(height: 8),
-                        ...items.map(
-                          (item) => _ActivityCard(
-                            kind: (item['kind'] as String?) ?? 'activity',
-                            toolName: (item['toolName'] as String?) ?? '',
-                            title: (item['title'] as String?) ?? '',
-                            content: (item['content'] as String?) ?? '',
-                          ),
+                    ),
+                    if (_expanded) ...[
+                      const SizedBox(height: 8),
+                      ...items.map(
+                        (item) => _ActivityCard(
+                          kind: (item['kind'] as String?) ?? 'activity',
+                          toolName: (item['toolName'] as String?) ?? '',
+                          title: (item['title'] as String?) ?? '',
+                          content: (item['content'] as String?) ?? '',
                         ),
-                      ],
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               ),
             ),
