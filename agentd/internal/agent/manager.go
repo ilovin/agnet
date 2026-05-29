@@ -2206,8 +2206,9 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 			if historyEvents, err := watcher.OpenCodeDBHistory(sessionID); err == nil && len(historyEvents) > 0 {
 				log.Printf("[ReAttach] Loaded %d historical events for OpenCode agent %s", len(historyEvents), existing.ID)
 				for _, ev := range historyEvents {
-					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
-					m.appendAndPersistEvent(existing.ID, existing, data)
+					if data, ok := opencodeHistoryEventData(ev); ok {
+						m.appendAndPersistEvent(existing.ID, existing, data)
+					}
 				}
 			}
 		} else if info.Provider == "claude" && sessionFile != "" {
@@ -2360,12 +2361,9 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		} else {
 			log.Printf("[Attach] Loaded %d historical events for OpenCode agent %s", len(historyEvents), id)
 			for _, ev := range historyEvents {
-				data := map[string]any{
-					"role": ev.Role,
-					"text": ev.Text,
-					"raw":  false,
+				if data, ok := opencodeHistoryEventData(ev); ok {
+					m.appendAndPersistEvent(id, ag, data)
 				}
-				m.appendAndPersistEvent(id, ag, data)
 			}
 		}
 	}
@@ -2434,6 +2432,49 @@ func getString(m map[string]any, key string) string {
 // watcher. Production code calls makeWatcherCallback (lowercase) directly.
 func (m *Manager) MakeWatcherCallback(agentID string, ag *Agent) func(watcher.ConversationEvent) {
 	return m.makeWatcherCallback(agentID, ag)
+}
+
+// opencodeHistoryEventData converts a ConversationEvent loaded from the
+// OpenCode DB history into a persistable conversation-event data map. It
+// mirrors the kind/toolName/interactive-payload tagging that
+// makeWatcherCallback applies to live events, so that re-attach reproduces the
+// same thinking blocks, activity blocks and interactive cards as the live
+// poll path. Returns (nil, false) for events that carry no renderable content.
+func opencodeHistoryEventData(ev watcher.ConversationEvent) (map[string]any, bool) {
+	// Interactive tools (question → AskUserQuestion): emit the structured
+	// payload so the app can rebuild the card on history reload.
+	if ev.ToolUseName != "" {
+		if kind, payload, ok := ParseInteractiveToolUse(ev.ToolUseName, ev.ToolUseID, ev.ToolUseInput); ok {
+			payloadBytes, _ := json.Marshal(payload)
+			var payloadMap map[string]any
+			_ = json.Unmarshal(payloadBytes, &payloadMap)
+			data := map[string]any{
+				"role": "assistant",
+				"raw":  false,
+				"kind": kind,
+			}
+			if key := PayloadKeyForKind(kind); key != "" {
+				data[key] = payloadMap
+			}
+			return data, true
+		}
+	}
+
+	if ev.Text == "" {
+		return nil, false
+	}
+	data := map[string]any{
+		"role": ev.Role,
+		"text": ev.Text,
+		"raw":  false,
+	}
+	if ev.Kind != "" {
+		data["kind"] = ev.Kind
+	}
+	if ev.ToolName != "" {
+		data["toolName"] = ev.ToolName
+	}
+	return data, true
 }
 
 // makeWatcherCallback builds the standard callback used by all session watchers.
@@ -2508,6 +2549,16 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 			"role": e.Role,
 			"text": e.Text,
 			"raw":  false,
+		}
+		// Kind classifies reasoning (thinking) and non-interactive tool calls
+		// (tool_use) so the Flutter app routes them to its thinking/activity
+		// buckets — mirrors the Claude stream-json path. Plain assistant text
+		// leaves Kind empty (the app treats it as chat).
+		if e.Kind != "" {
+			data["kind"] = e.Kind
+		}
+		if e.ToolName != "" {
+			data["toolName"] = e.ToolName
 		}
 		if sessionID != "" {
 			data["sessionId"] = sessionID
@@ -2681,8 +2732,9 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			if historyEvents, err := watcher.OpenCodeDBHistory(newSessionID); err == nil && len(historyEvents) > 0 {
 				log.Printf("[Watcher] Loaded %d historical events for session switch %s → %s", len(historyEvents), sessionID, newSessionID)
 				for _, ev := range historyEvents {
-					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
-					m.appendAndPersistEvent(agentID, ag, data)
+					if data, ok := opencodeHistoryEventData(ev); ok {
+						m.appendAndPersistEvent(agentID, ag, data)
+					}
 				}
 			}
 			m.mu.RLock()

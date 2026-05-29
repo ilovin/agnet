@@ -35,6 +35,24 @@ type ConversationEvent struct {
 	StatusChange *AgentStatus // non-nil when this line changes agent status
 	MsgID        string       // unique message ID for update tracking (opencode DB message.id)
 
+	// Kind classifies the event for the Flutter app's grouping logic
+	// (thinking blocks, activity blocks, plain assistant text). Set to
+	// "thinking" for reasoning content, "tool_use" for non-interactive
+	// tool invocations. Empty for plain text — the manager-side callback
+	// then leaves the event un-kinded and the app treats it as assistant
+	// chat. Interactive tools (AskUserQuestion / ExitPlanMode) leave Kind
+	// empty here because the manager dispatches via ParseInteractiveToolUse
+	// and assigns the canonical interactive kind there.
+	Kind string
+
+	// ToolName is the display name of a NON-interactive tool call
+	// (e.g. "Bash", "Read") for Kind=="tool_use" events. It maps to the
+	// app-facing data["toolName"] field (used for tool-icon selection) and
+	// is intentionally distinct from ToolUseName below: ToolUseName is the
+	// trigger for ParseInteractiveToolUse (AskUserQuestion / ExitPlanMode),
+	// whereas ToolName never triggers interactive dispatch.
+	ToolName string
+
 	// Tool-use payload preserved for downstream interactive-tool detection
 	// (AskUserQuestion / ExitPlanMode). When the assistant message contains
 	// a tool_use block, ToolUseName/ID/Input describe it; otherwise empty.
@@ -67,15 +85,15 @@ type ClaudeWatcher struct {
 	offset     int64
 
 	mu            sync.Mutex
-	lastRefreshAt time.Time              // rate-limit refreshSessionFile (lsof is expensive)
-	lastSwitchAt  time.Time              // cooldown after switchToFile to prevent oscillation
-	onSwitch      func(newPath string)   // called when session file changes
+	lastRefreshAt time.Time            // rate-limit refreshSessionFile (lsof is expensive)
+	lastSwitchAt  time.Time            // cooldown after switchToFile to prevent oscillation
+	onSwitch      func(newPath string) // called when session file changes
 
 	skipExisting bool // when true, Start() skips existing file content (for restarted watchers)
 	hasPolled    bool // true after the first poll; gates refreshSessionFile on empty polls
 
 	findSessionIDsFromTasksFunc func(tasksDir string) []string // test hook
-	startTime                   time.Time                     // watcher start time; used to filter out old sessions
+	startTime                   time.Time                      // watcher start time; used to filter out old sessions
 }
 
 func NewClaudeWatcher(path string, callback func(ConversationEvent)) *ClaudeWatcher {
@@ -1054,18 +1072,18 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 							}
 						}
 					}
-					case "tool_result":
-						// Tool results are system-level messages (responses to tool_use).
-						// They should not appear as conversation text in the dashboard.
-						// Skip them entirely - they contribute no visible content.
-					}
+				case "tool_result":
+					// Tool results are system-level messages (responses to tool_use).
+					// They should not appear as conversation text in the dashboard.
+					// Skip them entirely - they contribute no visible content.
 				}
 			}
-			// If the content array had only tool_result blocks (no text, no tool_use),
-			// the event has no meaningful content - skip it to avoid empty user messages.
-			if ev.Text == "" && !hasToolUse {
-				return ConversationEvent{}, false
-			}
+		}
+		// If the content array had only tool_result blocks (no text, no tool_use),
+		// the event has no meaningful content - skip it to avoid empty user messages.
+		if ev.Text == "" && !hasToolUse {
+			return ConversationEvent{}, false
+		}
 		// Status change detection
 		if line.Type == "assistant" {
 			if hasToolUse {

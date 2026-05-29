@@ -303,8 +303,7 @@ func TestMakeWatcherCallback_InjectsSessionID(t *testing.T) {
 	})
 }
 
-// TestMakeWatcherCallback_PlainAssistantText covers the existing happy path:
-// plain text assistant messages should keep flowing through unchanged.
+// TestMakeWatcherCallback_PlainAssistantText covers the existing happy path:// plain text assistant messages should keep flowing through unchanged.
 func TestMakeWatcherCallback_PlainAssistantText(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -342,5 +341,102 @@ func TestMakeWatcherCallback_PlainAssistantText(t *testing.T) {
 	// Plain text should not be tagged with an interactive kind.
 	if k, _ := captured["kind"].(string); k == "ask_user_question" || k == "exit_plan_mode" {
 		t.Errorf("plain text should not emit interactive kind, got %q", k)
+	}
+}
+
+// TestMakeWatcherCallback_ReasoningKindPassesThrough verifies that an opencode
+// reasoning sub-event (Kind="thinking") propagates data["kind"]="thinking" to
+// the client so the Flutter app renders it as a thinking block (#77).
+func TestMakeWatcherCallback_ReasoningKindPassesThrough(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	m := NewManager(s, t.TempDir())
+	ag := NewTestAgent("reason-agent", "opencode")
+
+	var (
+		mu       sync.Mutex
+		captured map[string]any
+	)
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = data
+	})
+
+	cb := m.MakeWatcherCallback(ag.ID, ag)
+	cb(watcher.ConversationEvent{
+		Role:  "assistant",
+		Text:  "Let me reason about this.",
+		Kind:  "thinking",
+		MsgID: "msg_a:part_r1",
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if captured == nil {
+		t.Fatal("expected onOutput to fire")
+	}
+	if k, _ := captured["kind"].(string); k != "thinking" {
+		t.Errorf("expected kind=thinking, got %q (full: %v)", k, captured)
+	}
+	if txt, _ := captured["text"].(string); txt != "Let me reason about this." {
+		t.Errorf("expected reasoning text preserved, got %q", txt)
+	}
+}
+
+// TestMakeWatcherCallback_ToolUseKindPassesThrough verifies that an opencode
+// non-interactive tool sub-event (Kind="tool_use", ToolName="Bash") propagates
+// data["kind"]="tool_use" and data["toolName"]="Bash" to the client so the
+// Flutter app renders it as an activity block (#77).
+func TestMakeWatcherCallback_ToolUseKindPassesThrough(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	m := NewManager(s, t.TempDir())
+	ag := NewTestAgent("tool-agent", "opencode")
+
+	var (
+		mu       sync.Mutex
+		captured map[string]any
+	)
+	m.SetOnOutput(func(agentID string, data map[string]any) {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = data
+	})
+
+	cb := m.MakeWatcherCallback(ag.ID, ag)
+	cb(watcher.ConversationEvent{
+		Role:     "assistant",
+		Text:     "[Bash: ls -la]",
+		Kind:     "tool_use",
+		ToolName: "Bash",
+		MsgID:    "msg_a:part_t1",
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if captured == nil {
+		t.Fatal("expected onOutput to fire")
+	}
+	if k, _ := captured["kind"].(string); k != "tool_use" {
+		t.Errorf("expected kind=tool_use, got %q (full: %v)", k, captured)
+	}
+	if tn, _ := captured["toolName"].(string); tn != "Bash" {
+		t.Errorf("expected toolName=Bash, got %q (full: %v)", tn, captured)
+	}
+	if txt, _ := captured["text"].(string); txt != "[Bash: ls -la]" {
+		t.Errorf("expected tool text preserved, got %q", txt)
+	}
+	// Must NOT be tagged as interactive.
+	if k, _ := captured["kind"].(string); k == "ask_user_question" || k == "exit_plan_mode" {
+		t.Errorf("tool_use must not be interactive kind, got %q", k)
 	}
 }
