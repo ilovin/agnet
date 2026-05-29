@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -604,11 +604,20 @@ Map<String, dynamic> _buildActivityItem(
 
     // Use ToolCallSummary to convert raw params (e.g. full file paths or
     // multi-line Bash commands) into a concise, human-friendly title for the
-    // activity card. Falls back to the raw suffix if parsing fails.
+    // activity card. Falls back to the raw suffix if parsing fails, then to
+    // the tool name itself so the card never has an empty title.
     final parsed = ToolCallSummary.parse(text);
-    final displayTitle = parsed?.summary.isNotEmpty == true
-        ? parsed!.summary
-        : suffix;
+    final parsedSummary = parsed?.summary ?? '';
+    String displayTitle;
+    if (parsedSummary.isNotEmpty) {
+      displayTitle = parsedSummary;
+    } else if (suffix.isNotEmpty) {
+      displayTitle = suffix;
+    } else {
+      // No detail available (backend emitted bare `[ToolName]`). Show the
+      // tool name itself so the card stays visually meaningful.
+      displayTitle = prefix;
+    }
 
     return {
       'kind': 'tool_use',
@@ -625,6 +634,16 @@ Map<String, dynamic> _buildActivityItem(
     'content': '',
   };
 }
+
+/// Test-only re-export of [_buildActivityItem] so widget/unit tests can verify
+/// the title fallback behavior for tool-call cards.
+@visibleForTesting
+Map<String, dynamic> buildActivityItemForTest(
+  String text,
+  String kind,
+  Map<String, dynamic> rawEvent,
+) =>
+    _buildActivityItem(text, kind, rawEvent);
 
 List<ChatMessage> convertEventsToMessages(List<Map<String, dynamic>> events) {
   final messages = <ChatMessage>[];

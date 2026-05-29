@@ -115,41 +115,51 @@ func (sp *StreamParser) BuildToolResultSummary(toolName string, output []byte) s
 }
 
 // BuildToolInputSummary extracts a concise summary from tool input parameters.
+//
+// Guarantees a non-empty summary whenever a `toolName` we know how to describe
+// is supplied, even if `input` is empty/unparseable. This prevents downstream
+// activity cards from rendering a bare `[ToolName]` (no detail) which the
+// Flutter app cannot turn into a meaningful card title — see
+// agentapp/lib/screens/agent_detail_screen.dart `_buildActivityItem`.
+//
+// Streaming note: Anthropic stream-json emits `content_block_start` for a
+// tool_use block before its input deltas have arrived, so `input` is `{}` at
+// that point. We must still produce something useful for that early emission.
 func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
 	var params map[string]any
-	if err := json.Unmarshal(input, &params); err != nil {
-		return ""
+	if len(input) > 0 {
+		_ = json.Unmarshal(input, &params)
+	}
+	if params == nil {
+		params = map[string]any{}
 	}
 
 	switch toolName {
 	case "Bash":
-		if cmd, ok := params["command"].(string); ok {
+		if cmd, ok := params["command"].(string); ok && cmd != "" {
 			if len(cmd) > 100 {
 				cmd = cmd[:100] + "..."
 			}
 			return cmd
 		}
 	case "Read":
-		if path, ok := params["file_path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok && path != "" {
 			return path
 		}
 	case "Write":
-		if path, ok := params["file_path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok && path != "" {
 			return path
 		}
 	case "Edit":
-		if path, ok := params["file_path"].(string); ok {
+		if path, ok := params["file_path"].(string); ok && path != "" {
 			return path
 		}
 	case "Grep":
-		if pattern, ok := params["pattern"].(string); ok {
+		if pattern, ok := params["pattern"].(string); ok && pattern != "" {
 			return "pattern: " + pattern
 		}
 	case "Glob":
-		if pattern, ok := params["pattern"].(string); ok {
+		if pattern, ok := params["pattern"].(string); ok && pattern != "" {
 			return pattern
 		}
 	case "Agent":
@@ -162,6 +172,9 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 			}
 			return prompt
 		}
+		if subagent, ok := params["subagent_type"].(string); ok && subagent != "" {
+			return subagent
+		}
 	case "SendMessage":
 		to, _ := params["to"].(string)
 		summary, _ := params["summary"].(string)
@@ -171,15 +184,24 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 		if to != "" {
 			return "-> " + to
 		}
+		if summary != "" {
+			return summary
+		}
 	case "TaskCreate":
 		if subject, ok := params["subject"].(string); ok && subject != "" {
 			return subject
+		}
+		if desc, ok := params["description"].(string); ok && desc != "" {
+			return desc
 		}
 	case "TaskUpdate":
 		taskId, _ := params["taskId"].(string)
 		status, _ := params["status"].(string)
 		if taskId != "" && status != "" {
 			return fmt.Sprintf("#%s -> %s", taskId, status)
+		}
+		if taskId != "" {
+			return "#" + taskId
 		}
 		if status != "" {
 			return status
@@ -202,7 +224,7 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 		}
 	}
 
-	// Generic fallback: show first string value
+	// Generic fallback: show first string value present in params.
 	for _, v := range params {
 		if s, ok := v.(string); ok && len(s) > 0 {
 			if len(s) > 80 {
@@ -210,6 +232,14 @@ func (sp *StreamParser) BuildToolInputSummary(toolName string, input json.RawMes
 			}
 			return s
 		}
+	}
+
+	// Last-resort fallback: if the tool name is non-empty, return a marker so
+	// callers can produce `[ToolName: …]` rather than a bare `[ToolName]` whose
+	// title would be empty after frontend parsing. The ellipsis signals
+	// "details pending / unavailable" without being misleading.
+	if toolName != "" {
+		return "…"
 	}
 	return ""
 }

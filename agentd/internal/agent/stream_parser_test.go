@@ -148,8 +148,106 @@ func TestBuildToolInputSummary_Read(t *testing.T) {
 
 func TestBuildToolInputSummary_Empty(t *testing.T) {
 	sp := agent.NewStreamParser()
+	// Even when input is empty (e.g. a streaming `content_block_start` for a
+	// tool_use whose deltas have not arrived yet), we must return a non-empty
+	// summary so callers don't emit a bare `[ToolName]` card.
 	summary := sp.BuildToolInputSummary("Bash", []byte{})
-	if summary != "" {
-		t.Fatalf("expected empty, got %q", summary)
+	if summary == "" {
+		t.Fatalf("expected non-empty fallback for empty input, got empty")
+	}
+}
+
+func TestBuildToolInputSummary_TaskUpdate_FullArgs(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"taskId":"63","status":"completed"}`)
+	got := sp.BuildToolInputSummary("TaskUpdate", input)
+	if got != "#63 -> completed" {
+		t.Fatalf("expected '#63 -> completed', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_TaskUpdate_OnlyTaskId(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"taskId":"63","status":""}`)
+	got := sp.BuildToolInputSummary("TaskUpdate", input)
+	if got != "#63" {
+		t.Fatalf("expected '#63', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_TaskUpdate_OnlyStatus(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"taskId":"","status":"completed"}`)
+	got := sp.BuildToolInputSummary("TaskUpdate", input)
+	if got != "completed" {
+		t.Fatalf("expected 'completed', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_TaskUpdate_EmptyArgs(t *testing.T) {
+	sp := agent.NewStreamParser()
+	// Streaming content_block_start case: input is `{}`. Must still produce
+	// a non-empty summary so the activity card has a meaningful title.
+	got := sp.BuildToolInputSummary("TaskUpdate", []byte(`{}`))
+	if got == "" {
+		t.Fatalf("expected non-empty summary for TaskUpdate with empty input, got empty")
+	}
+}
+
+func TestBuildToolInputSummary_Agent_Description(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"description":"Find Python bugs","prompt":"long prompt..."}`)
+	got := sp.BuildToolInputSummary("Agent", input)
+	if got != "Find Python bugs" {
+		t.Fatalf("expected 'Find Python bugs', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_Agent_PromptOnly(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"description":"","prompt":"do thing"}`)
+	got := sp.BuildToolInputSummary("Agent", input)
+	if got != "do thing" {
+		t.Fatalf("expected 'do thing', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_Agent_SubagentTypeFallback(t *testing.T) {
+	sp := agent.NewStreamParser()
+	input := []byte(`{"description":"","prompt":"","subagent_type":"general-purpose"}`)
+	got := sp.BuildToolInputSummary("Agent", input)
+	if got != "general-purpose" {
+		t.Fatalf("expected 'general-purpose', got %q", got)
+	}
+}
+
+func TestBuildToolInputSummary_Agent_EmptyArgs(t *testing.T) {
+	sp := agent.NewStreamParser()
+	// Streaming early-emit case: input is `{}`. Must produce a non-empty
+	// summary; otherwise the activity card has no detail.
+	got := sp.BuildToolInputSummary("Agent", []byte(`{}`))
+	if got == "" {
+		t.Fatalf("expected non-empty summary for Agent with empty input, got empty")
+	}
+}
+
+func TestBuildToolInputSummary_UnknownTool_NonEmpty(t *testing.T) {
+	sp := agent.NewStreamParser()
+	// Even an unknown tool name with empty input should produce a non-empty
+	// fallback so the card stays meaningful.
+	got := sp.BuildToolInputSummary("MysteryTool", []byte(`{}`))
+	if got == "" {
+		t.Fatalf("expected non-empty fallback, got empty")
+	}
+}
+
+func TestBuildToolInputSummary_UnknownTool_FirstStringField(t *testing.T) {
+	sp := agent.NewStreamParser()
+	// Generic fallback should pick the first non-empty string value when no
+	// specific case matches.
+	input := []byte(`{"foo":"hello"}`)
+	got := sp.BuildToolInputSummary("MysteryTool", input)
+	if got != "hello" {
+		t.Fatalf("expected 'hello', got %q", got)
 	}
 }
