@@ -391,7 +391,11 @@
 
     <script>
         // Domain configuration (will be replaced during build)
-        const API_DOMAIN = 'api.ilovin.xyz';
+        // Dev portal (dev.download.ilovin.xyz) self-serves /v1/release/latest via Caddy
+        // so it reads its own latest-dev manifest instead of the prod API.
+        const API_DOMAIN = window.location.hostname.startsWith('dev.')
+            ? window.location.hostname
+            : 'api.ilovin.xyz';
         const DOWNLOAD_DOMAIN = 'download.ilovin.xyz';
 
         function copyCommand(event, platform) {
