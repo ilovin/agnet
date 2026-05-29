@@ -83,25 +83,46 @@ deploy_to_prod() {
         exit 1
     fi
     
-    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "mkdir -p '$PROD_DIR'" || {
-        echo "[deploy-portal] ERROR: Cannot connect to $REMOTE_HOST"
+    # Verify connectivity and ensure prod dir exists (uses sudo since /opt/phonetalk/portal is root-owned)
+    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "sudo -n mkdir -p '$PROD_DIR'" || {
+        echo "[deploy-portal] ERROR: Cannot connect to $REMOTE_HOST or sudo requires password"
+        echo "[deploy-portal] Hint: ensure passwordless sudo is configured for the deploy user on $REMOTE_HOST"
         exit 1
     }
-    
-    # Backup current prod
-    echo "[deploy-portal] Backing up current production..."
-    ssh "$REMOTE_HOST" "cp -r '$PROD_DIR' '${PROD_DIR}.bak.$(date +%Y%m%d_%H%M%S)'" || true
-    
-    scp -o ConnectTimeout=5 -r "$PORTAL_SRC/"* "$REMOTE_HOST:$PROD_DIR/" || {
-        echo "[deploy-portal] ERROR: SCP failed"
+
+    # Backup current prod (sibling .bak.<ts> directory, sudo so root-owned files copy cleanly)
+    local backup_ts
+    backup_ts="$(date +%Y%m%d_%H%M%S)"
+    echo "[deploy-portal] Backing up current production to ${PROD_DIR}.bak.${backup_ts}..."
+    ssh "$REMOTE_HOST" "sudo -n cp -r '$PROD_DIR' '${PROD_DIR}.bak.${backup_ts}'" || {
+        echo "[deploy-portal] WARNING: Backup step failed (continuing)"
+    }
+
+    # /opt/phonetalk/portal is root-owned; ubuntu cannot scp directly.
+    # Workaround: scp to /tmp staging area, then sudo cp into place.
+    local stage_ts stage_path
+    stage_ts="$(date +%s)"
+    stage_path="/tmp/portal_index_${stage_ts}.html"
+
+    echo "[deploy-portal] Staging index.html to $REMOTE_HOST:$stage_path ..."
+    scp -o ConnectTimeout=5 "$PORTAL_SRC/index.html" "$REMOTE_HOST:$stage_path" || {
+        echo "[deploy-portal] ERROR: SCP to staging path failed"
         exit 1
     }
-    
+
+    echo "[deploy-portal] Installing index.html to $PROD_DIR via sudo ..."
+    ssh -o ConnectTimeout=5 "$REMOTE_HOST" "sudo -n cp '$stage_path' '$PROD_DIR/index.html' && sudo -n chmod 644 '$PROD_DIR/index.html' && rm -f '$stage_path'" || {
+        echo "[deploy-portal] ERROR: sudo cp into $PROD_DIR failed"
+        echo "[deploy-portal] Hint: passwordless sudo is required for the deploy user on $REMOTE_HOST"
+        echo "[deploy-portal] Staging file left at $REMOTE_HOST:$stage_path for manual recovery"
+        exit 1
+    }
+
     echo "[deploy-portal] Production deployment complete"
     echo "[deploy-portal] URL: https://download.ilovin.xyz"
     echo ""
     echo "[deploy-portal] Rollback command (if needed):"
-    echo "  ssh $REMOTE_HOST 'cp -r ${PROD_DIR}.bak.*/* $PROD_DIR/'"
+    echo "  ssh $REMOTE_HOST 'sudo cp -r ${PROD_DIR}.bak.${backup_ts}/index.html $PROD_DIR/index.html'"
 }
 
 run_tests() {
