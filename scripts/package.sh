@@ -22,32 +22,34 @@ cd "$(dirname "$0")/.."
 OUT_DIR="./out"
 DIST_DIR="./dist"
 
-# ── Auto-increment version ─────────────────────────────────────────────
-auto_increment_version() {
-  local latest="0.0.0"
-  for d in release/phone-talk-v*/; do
-    [[ -d "$d" ]] || continue
-    local v
-    v="$(basename "$d")"
-    v="${v#phone-talk-v}"
-    # Skip non-semver versions (e.g. vv0.99.0)
-    if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      continue
-    fi
-    if [[ "$(printf '%s\n' "$latest" "$v" | sort -V | tail -n1)" == "$v" ]]; then
-      latest="$v"
-    fi
-  done
-
-  local major minor patch
-  major="${latest%%.*}"
-  minor="${latest#*.}"
-  minor="${minor%%.*}"
-  patch="${latest##*.}"
-  patch="${patch:-0}"
-  patch=$((patch + 1))
-
-  echo "${major}.${minor}.${patch}"
+# ── Resolve version from agentapp/pubspec.yaml ─────────────────────────
+#
+# Version source of truth: agentapp/pubspec.yaml `version:` line, e.g.
+#   version: 1.0.0+6  → "1.0.0"
+#
+# This script does NOT auto-increment. Two consecutive runs produce the
+# same version. To bump, edit pubspec.yaml (or use scripts/bump-version.sh)
+# or pass an explicit override via PACKAGE_VERSION.
+#
+# Override: PACKAGE_VERSION=1.2.3 scripts/package.sh
+resolve_version_from_pubspec() {
+  local pubspec="agentapp/pubspec.yaml"
+  if [[ ! -f "$pubspec" ]]; then
+    echo "[package] ERROR: $pubspec not found; cannot resolve version" >&2
+    return 1
+  fi
+  local raw
+  raw="$(grep -E '^version:[[:space:]]*' "$pubspec" | head -n1 | sed -E 's/^version:[[:space:]]*//')"
+  # Strip trailing build metadata after '+' (Flutter style: 1.0.0+6 → 1.0.0)
+  raw="${raw%%+*}"
+  # Trim whitespace
+  raw="${raw## }"
+  raw="${raw%% }"
+  if ! [[ "$raw" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[package] ERROR: pubspec version '$raw' is not semver" >&2
+    return 1
+  fi
+  echo "$raw"
 }
 
 # ── Compute SHA256 ─────────────────────────────────────────────────────
@@ -63,7 +65,15 @@ sha256_file() {
 
 # ── Main ───────────────────────────────────────────────────────────────
 
-VERSION="${VERSION:-$(auto_increment_version)}"
+# Precedence:
+#   1) PACKAGE_VERSION env var (explicit override)
+#   2) VERSION env var (legacy, retained for backwards compat)
+#   3) pubspec.yaml `version:` (default — no auto-increment)
+if [[ -n "${PACKAGE_VERSION:-}" ]]; then
+  VERSION="$PACKAGE_VERSION"
+elif [[ -z "${VERSION:-}" ]]; then
+  VERSION="$(resolve_version_from_pubspec)"
+fi
 # Normalize: strip leading 'v' if present, we'll add it consistently
 VERSION="${VERSION#v}"
 
