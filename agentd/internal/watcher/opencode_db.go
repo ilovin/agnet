@@ -166,10 +166,49 @@ type openCodeMsg struct {
 	Role string `json:"role"`
 }
 
-// openCodePart is the structure of part.data JSON in opencode.db
+// openCodePart is the structure of part.data JSON in opencode.db.
+//
+// OpenCode tool parts have shape:
+//
+//	{
+//	  "type": "tool",
+//	  "tool": "<tool name>",        // e.g. "bash", "question", "edit"
+//	  "callID": "<tool call id>",
+//	  "state": {
+//	    "status": "running" | "completed" | "error",
+//	    "input": { ... }              // tool-specific args
+//	    "output": "...",              // when completed
+//	    ...
+//	  }
+//	}
 type openCodePart struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type   string             `json:"type"`
+	Text   string             `json:"text"`
+	Tool   string             `json:"tool"`
+	CallID string             `json:"callID"`
+	State  openCodePartState  `json:"state"`
+}
+
+type openCodePartState struct {
+	Status string          `json:"status"`
+	Input  json.RawMessage `json:"input"`
+}
+
+// opencodeToolNameToInteractiveKind maps an OpenCode tool name (lowercase) to
+// the canonical interactive tool name understood by ParseInteractiveToolUse.
+// Returns ("", false) for non-interactive tools — the caller then leaves the
+// ConversationEvent.ToolUseName unset and the event renders as plain text.
+//
+// OpenCode's "question" tool is the equivalent of Claude Code's
+// "AskUserQuestion" — same input shape (questions[].question/header/options).
+// OpenCode does not currently have an "ExitPlanMode" equivalent.
+func opencodeToolNameToInteractiveKind(toolName string) (string, bool) {
+	switch toolName {
+	case "question":
+		return "AskUserQuestion", true
+	default:
+		return "", false
+	}
 }
 
 func (w *OpenCodeDBWatcher) poll() {
@@ -231,10 +270,13 @@ func (w *OpenCodeDBWatcher) poll() {
 
 	// Phase 2: Query parts for each message.
 	type msgInfo struct {
-		id      string
-		role    string
-		text    string
-		hasTool bool
+		id         string
+		role       string
+		text       string
+		hasTool    bool
+		toolName   string          // interactive tool name (e.g. "AskUserQuestion") if any
+		toolUseID  string          // opencode callID for the captured tool
+		toolInput  json.RawMessage // raw JSON of tool input
 	}
 	var msgs []msgInfo
 
@@ -255,6 +297,8 @@ func (w *OpenCodeDBWatcher) poll() {
 
 		var textParts []string
 		var hasToolUse bool
+		var capturedToolName, capturedToolID string
+		var capturedToolInput json.RawMessage
 		for partRows.Next() {
 			var partData string
 			if err := partRows.Scan(&partData); err != nil {
@@ -278,6 +322,21 @@ func (w *OpenCodeDBWatcher) poll() {
 				hasToolUse = true
 			case "tool-invocation", "tool-result", "tool":
 				hasToolUse = true
+				// Capture interactive tool metadata so the manager-side
+				// callback (makeWatcherCallback) can dispatch via
+				// ParseInteractiveToolUse and emit a structured event
+				// (kind=ask_user_question / exit_plan_mode) instead of a
+				// plain text bubble. Mirrors the Claude jsonl path.
+				// Only the FIRST interactive tool in the message is captured.
+				if capturedToolName == "" {
+					if mapped, ok := opencodeToolNameToInteractiveKind(part.Tool); ok {
+						capturedToolName = mapped
+						capturedToolID = part.CallID
+						if len(part.State.Input) > 0 {
+							capturedToolInput = append(json.RawMessage(nil), part.State.Input...)
+						}
+					}
+				}
 			}
 		}
 		partRows.Close()
@@ -289,7 +348,15 @@ func (w *OpenCodeDBWatcher) poll() {
 			}
 			text += t
 		}
-		msgs = append(msgs, msgInfo{id: h.id, role: msg.Role, text: text, hasTool: hasToolUse})
+		msgs = append(msgs, msgInfo{
+			id:        h.id,
+			role:      msg.Role,
+			text:      text,
+			hasTool:   hasToolUse,
+			toolName:  capturedToolName,
+			toolUseID: capturedToolID,
+			toolInput: capturedToolInput,
+		})
 	}
 
 	if len(msgs) == 0 {
@@ -306,11 +373,15 @@ func (w *OpenCodeDBWatcher) poll() {
 			w.streamingMsgID = ""
 			w.streamingMsgText = ""
 		}
-		if m.text != "" {
+		// Emit when there is visible text OR an interactive tool payload to dispatch.
+		if m.text != "" || m.toolName != "" {
 			ev := ConversationEvent{
-				Role:  m.role,
-				Text:  m.text,
-				MsgID: m.id,
+				Role:         m.role,
+				Text:         m.text,
+				MsgID:        m.id,
+				ToolUseName:  m.toolName,
+				ToolUseID:    m.toolUseID,
+				ToolUseInput: m.toolInput,
 			}
 			if m.role == "assistant" {
 				if m.hasTool {
@@ -346,11 +417,14 @@ func (w *OpenCodeDBWatcher) poll() {
 		// Text updated — emit update event
 		w.streamingUnchanged = 0
 		w.streamingMsgText = last.text
-		if last.text != "" {
+		if last.text != "" || last.toolName != "" {
 			ev := ConversationEvent{
-				Role:  last.role,
-				Text:  last.text,
-				MsgID: last.id,
+				Role:         last.role,
+				Text:         last.text,
+				MsgID:        last.id,
+				ToolUseName:  last.toolName,
+				ToolUseID:    last.toolUseID,
+				ToolUseInput: last.toolInput,
 			}
 			if last.role == "assistant" {
 				s := StatusWorking
@@ -364,11 +438,14 @@ func (w *OpenCodeDBWatcher) poll() {
 	// New streaming message
 	w.streamingMsgID = last.id
 	w.streamingMsgText = last.text
-	if last.text != "" {
+	if last.text != "" || last.toolName != "" {
 		ev := ConversationEvent{
-			Role:  last.role,
-			Text:  last.text,
-			MsgID: last.id,
+			Role:         last.role,
+			Text:         last.text,
+			MsgID:        last.id,
+			ToolUseName:  last.toolName,
+			ToolUseID:    last.toolUseID,
+			ToolUseInput: last.toolInput,
 		}
 		if last.role == "assistant" {
 			s := StatusWorking
