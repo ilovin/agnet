@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
 import '../models/node_model.dart';
@@ -434,14 +435,94 @@ Color providerColor(String provider) {
   }
 }
 
-IconData providerIcon(String provider) {
+String providerLogoAsset(String provider) {
   switch (provider.toLowerCase()) {
-    case 'hermes':
-      return Icons.flutter_dash;
+    case 'claude':
+    case 'claude-bedrock':
+    case 'claude-vertex':
+      return 'assets/logos/claude.svg';
     case 'opencode':
-      return Icons.terminal;
+      return 'assets/logos/opencode.svg';
+    case 'codex':
+      return 'assets/logos/codex.svg';
+    case 'hermes':
+      return 'assets/logos/hermes.png';
     default:
-      return Icons.smart_toy;
+      return '';
+  }
+}
+
+Color providerLogoColorFor(String agentId, {double saturation = 0.75, double lightness = 0.55}) {
+  var hash = 0;
+  for (final codeUnit in agentId.codeUnits) {
+    hash = ((hash << 5) - hash) + codeUnit;
+    hash = hash & 0x7fffffff;
+  }
+  final hue = (hash % 360).toDouble();
+  return HSLColor.fromAHSL(1.0, hue, saturation, lightness).toColor();
+}
+
+/// Mini provider logo widget: brand SVG/PNG when available, fallback Icon otherwise.
+class _ProviderLogo extends StatelessWidget {
+  final String provider;
+  final double size;
+  final String agentId;
+
+  const _ProviderLogo({
+    required this.provider,
+    required this.size,
+    required this.agentId,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final asset = providerLogoAsset(provider);
+    final color = agentId.isNotEmpty
+        ? providerLogoColorFor(agentId)
+        : providerColor(provider);
+    if (asset.isEmpty) {
+      return Icon(
+        Icons.smart_toy,
+        size: size,
+        color: color,
+      );
+    }
+    if (asset.endsWith('.png')) {
+      return SizedBox(
+        width: size,
+        height: size,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(5),
+          child: Container(
+            color: color.withValues(alpha: 0.12),
+            padding: const EdgeInsets.all(2),
+            child: Image.asset(
+              asset,
+              color: color,
+              colorBlendMode: BlendMode.srcIn,
+            ),
+          ),
+        ),
+      );
+    }
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Container(
+        padding: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: SvgPicture.asset(
+          asset,
+          colorFilter: ColorFilter.mode(
+            color,
+            BlendMode.srcIn,
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -2944,10 +3025,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                                 child: ListTile(
                                   dense: true,
                                   contentPadding: EdgeInsets.zero,
-                                  leading: Icon(
-                                    providerIcon(a.provider),
+                                  leading: _ProviderLogo(
+                                    provider: a.provider,
                                     size: 18,
-                                    color: providerColor(a.provider),
+                                    agentId: a.id,
                                   ),
                                   title: Text(
                                     _agentDisplayTitle(a),
@@ -3005,10 +3086,10 @@ class _NodeCardState extends ConsumerState<NodeCard> {
                               return ListTile(
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
-                                leading: Icon(
-                                  providerIcon(s.provider),
+                                leading: _ProviderLogo(
+                                  provider: s.provider,
                                   size: 18,
-                                  color: providerColor(s.provider),
+                                  agentId: '',
                                 ),
                                 title: Text(
                                   titleText,
@@ -3265,28 +3346,20 @@ Color providerLogoColorFor(String agentId, {double saturation = 0.75, double lig
     final colors = Theme.of(context).colorScheme;
     final unreadBadge = _buildUnreadBadge();
     final agent = widget.agent;
+    final logoColor = providerLogoColorFor(agent.id);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        // Provider brand logo: fixed icon per harness type, colour per agent.
-        Container(
-          width: 22,
-          height: 22,
-          margin: const EdgeInsets.only(right: 8),
-          decoration: BoxDecoration(
-            color: providerLogoColorFor(agent.id).withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(5),
-          ),
-          child: Icon(
-            providerLogoFor(agent.provider),
-            size: 14,
-            color: providerLogoColorFor(agent.id),
-          ),
-        ),
         if (unreadBadge is! SizedBox) ...[
           unreadBadge,
           const SizedBox(width: 6),
         ],
+        _ProviderLogo(
+          provider: agent.provider,
+          size: 22,
+          agentId: agent.id,
+        ),
+        const SizedBox(width: 8),
         Expanded(
           child: Text(
             displayTitle,
