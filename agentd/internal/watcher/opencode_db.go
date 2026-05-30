@@ -643,7 +643,13 @@ func (w *OpenCodeDBWatcher) poll() {
 				// No change for ~30s — treat as complete
 				s := StatusStandby
 				w.callback(ConversationEvent{StatusChange: &s})
-				w.lastMsgID = last.id
+				// Don't update lastMsgID here — the message may still receive new
+				// parts later (OpenCode writes parts progressively, sometimes with
+				// a large gap between message creation and text part arrival).
+				// If we set lastMsgID now, subsequent polls skip this message and
+				// never see the new parts.  Keep lastMsgID pointing at the last
+				// fully-processed message so the next poll still includes this one.
+				// w.lastMsgID = last.id
 				w.streamingMsgID = ""
 				w.streamingMsgText = ""
 				w.streamingMsgHasTool = false

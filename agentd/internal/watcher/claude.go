@@ -1002,7 +1002,14 @@ func parseLocalCommandContent(content string) (ConversationEvent, bool) {
 func parseLine(data []byte) (ConversationEvent, bool) {
 	var line claudeLine
 	if err := json.Unmarshal(data, &line); err != nil {
-		return ConversationEvent{}, false
+		return parseCodexLine(data)
+	}
+	// Codex JSONL rows can be valid JSON but do not match Claude's "user/assistant"
+	// top-level type shape. Fall back to Codex parsing before applying Claude rules.
+	if line.Type == "response_item" || line.Type == "event_msg" || line.Type == "session_meta" || line.Type == "turn_context" {
+		if ev, ok := parseCodexLine(data); ok {
+			return ev, true
+		}
 	}
 	if line.Type == "system" && line.Subtype == "local_command" {
 		if ev, ok := parseLocalCommandContent(line.Content); ok {
@@ -1112,5 +1119,49 @@ func parseLine(data []byte) (ConversationEvent, bool) {
 		ev.StatusChange = &s
 	}
 
+	return ev, true
+}
+
+func parseCodexLine(data []byte) (ConversationEvent, bool) {
+	var row struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &row); err != nil {
+		return ConversationEvent{}, false
+	}
+	if row.Type != "response_item" || row.Payload.Type != "message" {
+		return ConversationEvent{}, false
+	}
+	role := strings.TrimSpace(row.Payload.Role)
+	if role != "user" && role != "assistant" {
+		return ConversationEvent{}, false
+	}
+	var text strings.Builder
+	for _, c := range row.Payload.Content {
+		switch c.Type {
+		case "input_text", "output_text", "text":
+			text.WriteString(c.Text)
+		}
+	}
+	out := strings.TrimSpace(text.String())
+	if out == "" {
+		return ConversationEvent{}, false
+	}
+	ev := ConversationEvent{Role: role, Text: out}
+	if role == "assistant" {
+		s := StatusStandby
+		ev.StatusChange = &s
+	} else {
+		s := StatusStandby
+		ev.StatusChange = &s
+	}
 	return ev, true
 }

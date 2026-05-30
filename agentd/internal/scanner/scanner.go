@@ -2,6 +2,7 @@
 package scanner
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -21,14 +22,13 @@ type ProcessInfo struct {
 	Cmd         string
 	Args        []string
 	WorkDir     string
-	Provider    string // "claude" or "opencode"
+	Provider    string // "claude", "opencode", "hermes", or "codex"
 	Session     string // tmux/screen session name if available
 	Terminal    string // TTY device if available
 	TmuxTarget  string // tmux pane target (session:window.pane) if available
 	SessionID   string
 	SessionFile string
 }
-
 
 const (
 	AttachModeWatcher = "watcher"
@@ -46,6 +46,8 @@ func detectProvider(cmd string, args []string) string {
 		return "opencode"
 	case strings.HasPrefix(base, "hermes"):
 		return "hermes"
+	case strings.HasPrefix(base, "codex"):
+		return "codex"
 	case base == "node" || base == "nodejs":
 		// Node.js wrapper: check args for opencode reference
 		for _, arg := range args {
@@ -156,6 +158,8 @@ func (p *ProcessInfo) AttachReadOnlyReason() string {
 			return "" // Allow input via resume mode
 		}
 		return "no session ID available for OpenCode resume"
+	case "codex":
+		return "no safe input route found for codex; use the original terminal to interact"
 	case "hermes":
 		if p.TmuxTarget == "" {
 			return "no tmux pane found for hermes process; attach is observe-only (state.db history available)"
@@ -184,7 +188,6 @@ func (s *Scanner) Scan() ([]ProcessInfo, error) {
 	return s.scanDarwin()
 }
 
-
 // FindSessionFile returns the exact JSONL session file for a live Claude/OpenCode process.
 func (p *ProcessInfo) FindSessionFile() string {
 	if p.SessionFile != "" {
@@ -192,6 +195,10 @@ func (p *ProcessInfo) FindSessionFile() string {
 	}
 	if p.Provider == "claude" {
 		_, sessionFile := findClaudeSessionInfo(p.PID, p.WorkDir, p.TmuxTarget)
+		return sessionFile
+	}
+	if p.Provider == "codex" {
+		_, sessionFile := findCodexSessionInfo(p.PID, p.WorkDir)
 		return sessionFile
 	}
 	if p.Provider == "opencode" {
@@ -238,6 +245,10 @@ func finalizeProcessScan(processes []ProcessInfo) []ProcessInfo {
 			proc.SessionFile = sessionFile
 		} else if proc.Provider == "hermes" {
 			proc.SessionID = hermesSessionIDFromArgs(proc.Args)
+		} else if proc.Provider == "codex" {
+			sessionID, sessionFile := findCodexSessionInfo(proc.PID, proc.WorkDir)
+			proc.SessionID = sessionID
+			proc.SessionFile = sessionFile
 		}
 		out = append(out, proc)
 	}
@@ -286,7 +297,7 @@ func hasAIAgentAncestor(proc ProcessInfo, byPID map[int]ProcessInfo) bool {
 		if !ok {
 			break
 		}
-		if parent.Provider == "claude" || parent.Provider == "opencode" || parent.Provider == "hermes" {
+		if parent.Provider == "claude" || parent.Provider == "opencode" || parent.Provider == "hermes" || parent.Provider == "codex" {
 			return true
 		}
 		parentPID = parent.PPID
@@ -676,6 +687,82 @@ func findClaudeSessionFile(home, sessionID, workDir string) string {
 		}
 	}
 	return ""
+}
+
+func findCodexSessionInfo(pid int, workDir string) (string, string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+	baseDir := filepath.Join(home, ".codex", "sessions")
+	if _, err := os.Stat(baseDir); err != nil {
+		return "", ""
+	}
+
+	var (
+		bestID   string
+		bestFile string
+		bestTime time.Time
+	)
+	_ = filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		sessionID, ok := codexSessionMeta(path, workDir)
+		if !ok {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		if bestFile == "" || info.ModTime().After(bestTime) {
+			bestID = sessionID
+			bestFile = path
+			bestTime = info.ModTime()
+		}
+		return nil
+	})
+
+	if bestID == "" || bestFile == "" {
+		return "", ""
+	}
+	_ = pid // reserved for future pid-specific mapping support
+	return bestID, bestFile
+}
+
+func codexSessionMeta(path, workDir string) (string, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID  string `json:"id"`
+				Cwd string `json:"cwd"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return "", false
+		}
+		if row.Type != "session_meta" || row.Payload.ID == "" {
+			return "", false
+		}
+		if workDir == "" || row.Payload.Cwd == "" || filepath.Clean(row.Payload.Cwd) == filepath.Clean(workDir) {
+			return row.Payload.ID, true
+		}
+		return "", false
+	}
+	return "", false
 }
 
 func findOpenCodeSessionInfo(pid int, workDir string) (string, string) {

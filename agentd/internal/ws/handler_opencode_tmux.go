@@ -112,12 +112,16 @@ func (h *handler) captureOpenCodeTmuxResponses(ag *agent.Agent, userMessage stri
 			idleCount = 0
 
 			// Broadcast partial response for real-time display
-			h.server.broadcast(event("conversation.message", map[string]any{
-				"agentId": agentID,
-				"role":    "assistant",
-				"text":    newText,
-				"partial": true,
-			}), nil)
+			partialBroadcast := map[string]any{
+				"agentId":   agentID,
+				"nodeId":    h.server.nodeID,
+				"sessionId": ag.ResumeSessionID(),
+				"role":      "assistant",
+				"text":      newText,
+				"partial":   true,
+				"timestamp": time.Now().UnixMilli(),
+			}
+			h.server.broadcast(event("conversation.message", partialBroadcast), nil)
 		} else {
 			idleCount++
 		}
@@ -138,12 +142,16 @@ func (h *handler) captureOpenCodeTmuxResponses(ag *agent.Agent, userMessage stri
 		}); err != nil {
 			log.Printf("[OpenCodeTmux] record assistant message: %v", err)
 		}
-		h.server.broadcast(event("conversation.message", map[string]any{
-			"agentId": agentID,
-			"role":    "assistant",
-			"text":    finalText,
-			"final":   true,
-		}), nil)
+		finalBroadcast := map[string]any{
+			"agentId":   agentID,
+			"nodeId":    h.server.nodeID,
+			"sessionId": ag.ResumeSessionID(),
+			"role":      "assistant",
+			"text":      finalText,
+			"final":     true,
+			"timestamp": time.Now().UnixMilli(),
+		}
+		h.server.broadcast(event("conversation.message", finalBroadcast), nil)
 		log.Printf("[OpenCodeTmux] agent %s final response (len=%d)", agentID, len(finalText))
 	} else {
 		log.Printf("[OpenCodeTmux] agent %s no response captured", agentID)

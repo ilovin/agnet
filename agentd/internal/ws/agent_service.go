@@ -78,6 +78,12 @@ func (s *agentService) ResolveLaunch(provider, cmd string, args []string, sessio
 	case "hermes":
 		resolvedCmd = s.FindExecutable("hermes")
 		resolvedArgs = []string{"gateway", "run"}
+	case "codex":
+		resolvedCmd = s.FindExecutable("codex")
+		resolvedArgs = []string{}
+		if sessionID != "" {
+			resolvedArgs = []string{"resume", sessionID}
+		}
 	case "claude", "claude-bedrock", "claude-vertex":
 		resolvedCmd = s.FindExecutable("claude")
 		resolvedArgs = []string{

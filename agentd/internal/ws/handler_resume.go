@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/phone-talk/agentd/internal/agent"
 )
@@ -137,20 +138,28 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 	}
 
 	// Record user message
-	if _, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+	seq, err := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
 		"role": "user",
 		"text": message,
 		"raw":  false,
-	}); err != nil {
+	})
+	if err != nil {
 		return errResp(req.ID, -32000, "record user message: "+err.Error())
 	}
 
-	// Broadcast user message
-	h.server.broadcast(event("conversation.message", map[string]any{
-		"agentId": ag.ID,
-		"role":    "user",
-		"text":    message,
-	}), nil)
+	// Broadcast user message with full routing fields
+	userBroadcast := map[string]any{
+		"agentId":   ag.ID,
+		"nodeId":    h.server.nodeID,
+		"sessionId": ag.ResumeSessionID(),
+		"role":      "user",
+		"text":      message,
+		"timestamp": time.Now().UnixMilli(),
+	}
+	if seq > 0 {
+		userBroadcast["seq"] = seq
+	}
+	h.server.broadcast(event("conversation.message", userBroadcast), nil)
 
 	// Broadcast status change to working
 	log.Printf("[OpenCode] Broadcasting working status for agent %s", ag.ID)
@@ -250,12 +259,16 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 				log.Printf("[OpenCode] Got text (len=%d): %s", len(text), text[:min(len(text), 50)])
 				fullResponse.WriteString(text)
 				// Broadcast partial response for real-time display
-				h.server.broadcast(event("conversation.message", map[string]any{
-					"agentId": ag.ID,
-					"role":    "assistant",
-					"text":    text,
-					"partial": true,
-				}), nil)
+				partialBroadcast := map[string]any{
+					"agentId":   ag.ID,
+					"nodeId":    h.server.nodeID,
+					"sessionId": ag.ResumeSessionID(),
+					"role":      "assistant",
+					"text":      text,
+					"partial":   true,
+					"timestamp": time.Now().UnixMilli(),
+				}
+				h.server.broadcast(event("conversation.message", partialBroadcast), nil)
 			}
 
 			// Handle step_finish to detect completion
@@ -288,18 +301,25 @@ func (h *handler) openCodeSendWithResume(req RPCRequest, ag *agent.Agent, messag
 
 		// Record final assistant response
 		if fullResponse.Len() > 0 {
-			h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
+			seq, _ := h.server.manager.RecordConversationEvent(ag.ID, map[string]any{
 				"role": "assistant",
 				"text": fullResponse.String(),
 				"raw":  false,
 			})
-			// Broadcast final complete message
-			h.server.broadcast(event("conversation.message", map[string]any{
-				"agentId": ag.ID,
-				"role":    "assistant",
-				"text":    fullResponse.String(),
-				"final":   true,
-			}), nil)
+			// Broadcast final complete message with full routing fields
+			finalBroadcast := map[string]any{
+				"agentId":   ag.ID,
+				"nodeId":    h.server.nodeID,
+				"sessionId": ag.ResumeSessionID(),
+				"role":      "assistant",
+				"text":      fullResponse.String(),
+				"final":     true,
+				"timestamp": time.Now().UnixMilli(),
+			}
+			if seq > 0 {
+				finalBroadcast["seq"] = seq
+			}
+			h.server.broadcast(event("conversation.message", finalBroadcast), nil)
 		}
 
 		// Broadcast status change back to idle

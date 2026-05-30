@@ -455,6 +455,7 @@ Map<String, dynamic> normalizeHistoryEvent(Map<dynamic, dynamic> rawEvent) {
     if (map.containsKey('askUserQuestion'))
       'askUserQuestion': map['askUserQuestion'],
     if (map.containsKey('exitPlanMode')) 'exitPlanMode': map['exitPlanMode'],
+    if (map.containsKey('sessionId')) 'sessionId': map['sessionId'],
   };
   if (map['timestamp'] != null) {
     result['timestamp'] = (map['timestamp'] as num).toInt();

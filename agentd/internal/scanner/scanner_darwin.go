@@ -108,26 +108,31 @@ func (s *Scanner) parseDarwinProcess(line string, allProcs map[int]darwinProcInf
 	case len(args) > 0 && strings.HasPrefix(filepath.Base(args[0]), "opencode"):
 		provider = "opencode"
 		comm = "opencode"
+	case strings.HasPrefix(comm, "codex"):
+		provider = "codex"
+	case len(args) > 0 && strings.HasPrefix(filepath.Base(args[0]), "codex"):
+		provider = "codex"
+		comm = "codex"
 	default:
 		return ProcessInfo{}, false
 	}
 
-		// Filter out agentd's own children (use allProcs map)
-		if ppid > 0 {
-			if info, ok := allProcs[ppid]; ok && strings.Contains(info.comm, "agentd") {
-				return ProcessInfo{}, false
-			}
-		}
-
-		// Filter out claude -p sub-agents (child processes spawned by Claude Code Agent tool).
-		if provider == "claude" && isClaudeSubagentArgs(args) {
+	// Filter out agentd's own children (use allProcs map)
+	if ppid > 0 {
+		if info, ok := allProcs[ppid]; ok && strings.Contains(info.comm, "agentd") {
 			return ProcessInfo{}, false
 		}
+	}
 
-		// Filter out processes whose ancestor is a claude/opencode agent (uses pre-built map).
-		if ppid > 0 && s.isTrackedAgentCached(ppid, allProcs) {
-			return ProcessInfo{}, false
-		}
+	// Filter out claude -p sub-agents (child processes spawned by Claude Code Agent tool).
+	if provider == "claude" && isClaudeSubagentArgs(args) {
+		return ProcessInfo{}, false
+	}
+
+	// Filter out processes whose ancestor is a claude/opencode agent (uses pre-built map).
+	if ppid > 0 && s.isTrackedAgentCached(ppid, allProcs) {
+		return ProcessInfo{}, false
+	}
 
 	// Get working directory using lsof
 	workDir := s.getDarwinCWD(pid)
@@ -170,7 +175,7 @@ func (s *Scanner) isTrackedAgentCached(pid int, allProcs map[int]darwinProcInfo)
 		if !ok {
 			return false
 		}
-		if strings.HasPrefix(info.comm, "claude") || strings.HasPrefix(info.comm, "opencode") {
+		if strings.HasPrefix(info.comm, "claude") || strings.HasPrefix(info.comm, "opencode") || strings.HasPrefix(info.comm, "codex") {
 			return true
 		}
 		p = info.ppid
@@ -250,4 +255,3 @@ func (s *Scanner) detectDarwinTmuxFromTTY(terminal string) (target string, sessi
 func (s *Scanner) scanLinux() ([]ProcessInfo, error) {
 	return nil, nil
 }
-

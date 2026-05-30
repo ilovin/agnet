@@ -709,6 +709,7 @@ func TestDetectProvider(t *testing.T) {
 	}{
 		{"native claude binary", "/usr/local/bin/claude", nil, "claude"},
 		{"native opencode binary", "/usr/local/bin/opencode", nil, "opencode"},
+		{"native codex binary", "/usr/local/bin/codex", nil, "codex"},
 		{"node wrapper with opencode.js", "/usr/bin/node", []string{"/path/to/opencode.js"}, "opencode"},
 		{"node wrapper with opencode in path", "/usr/bin/node", []string{"/home/user/.nvm/versions/node/v20/opencode/bin/opencode"}, "opencode"},
 		{"nodejs wrapper", "/usr/bin/nodejs", []string{"/opt/opencode/dist/index.js"}, "opencode"},
@@ -726,6 +727,32 @@ func TestDetectProvider(t *testing.T) {
 				t.Fatalf("detectProvider(%q, %v) = %q, want %q", tt.cmd, tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFindCodexSessionInfoByWorkDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(home, ".codex", "sessions", "2026", "05", "30")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(sessionDir, "rollout-2026-05-30T12-26-57-019e7722-9bb3-7733-bb07-94fe9d0809a5.jsonl")
+	line := `{"timestamp":"2026-05-30T04:27:15.964Z","type":"session_meta","payload":{"id":"019e7722-9bb3-7733-bb07-94fe9d0809a5","cwd":"` + workDir + `"}}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionID, gotFile := findCodexSessionInfo(1234, workDir)
+	if sessionID != "019e7722-9bb3-7733-bb07-94fe9d0809a5" {
+		t.Fatalf("session id = %q, want %q", sessionID, "019e7722-9bb3-7733-bb07-94fe9d0809a5")
+	}
+	if gotFile != sessionFile {
+		t.Fatalf("session file = %q, want %q", gotFile, sessionFile)
 	}
 }
 

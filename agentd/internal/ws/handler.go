@@ -846,7 +846,6 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		return h.openCodeSendWithResume(req, ag, message)
 	}
 
-
 	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
 	ptyEventData := map[string]any{
 		"role":       "user",
@@ -1199,12 +1198,22 @@ func (h *handler) conversationHistory(req RPCRequest, p ConversationHistoryParam
 
 	// Flatten events: {seq, data: {role, text}} -> {seq, role, text}
 	flattened := make([]map[string]any, 0, len(events))
+	sessionID := ag.ResumeSessionID()
 	for _, e := range events {
 		flat := map[string]any{
 			"seq": e.Seq,
 		}
 		for k, v := range e.Data {
 			flat[k] = v
+		}
+		// Ensure every history message carries sessionId so the Flutter app
+		// routes it into the correct (nodeId, agentId, sessionId) bucket.
+		// Persisted records may have been written before sessionId was stamped
+		// on every event; inject the agent's current resume sessionId as a
+		// fallback.  (Do not overwrite an existing value — it came from the live
+		// event buffer which already carries the right id.)
+		if _, hasSession := flat["sessionId"]; !hasSession && sessionID != "" {
+			flat["sessionId"] = sessionID
 		}
 		flattened = append(flattened, flat)
 	}
@@ -1241,9 +1250,9 @@ func (h *handler) conversationPermissionResponse(req RPCRequest, p ConversationP
 	}
 
 	resp := &agent.PermissionResponse{
-		RequestID: requestID,
-		Behavior:  behavior,
-		Message:   p.Message,
+		RequestID:    requestID,
+		Behavior:     behavior,
+		Message:      p.Message,
 		UpdatedInput: p.UpdatedInput,
 	}
 
@@ -1316,7 +1325,6 @@ func (h *handler) conversationClear(req RPCRequest, p ConversationClearParams) R
 	}), nil)
 	return okResp(req.ID, map[string]any{"ok": true})
 }
-
 
 // agentScan discovers all existing Claude/OpenCode processes on the system.
 func (h *handler) agentScan(req RPCRequest) RPCResponse {
@@ -1630,8 +1638,8 @@ func (h *handler) deriveProviderScope(ag *agent.Agent) string {
 func (h *handler) deriveProviderSnapshot(ag *agent.Agent) providerSnapshot {
 	scope := h.deriveProviderScope(ag)
 
-	// opencode does not use cc-switch provider switching.
-	if ag != nil && ag.Provider == "opencode" {
+	// opencode/codex do not use cc-switch provider switching.
+	if ag != nil && (ag.Provider == "opencode" || ag.Provider == "codex") {
 		return providerSnapshot{
 			ProviderScope: scope,
 		}
@@ -2405,11 +2413,11 @@ func (h *handler) hermesSend(req RPCRequest, ag *agent.Agent, message string, im
 
 	// Broadcast user message to all clients
 	broadcastData := map[string]any{
-		"agentId":   agentID,
-		"role":      "user",
-		"text":      message,
+		"agentId":    agentID,
+		"role":       "user",
+		"text":       message,
 		"imageCount": len(imageFiles),
-		"timestamp": time.Now().UnixMilli(),
+		"timestamp":  time.Now().UnixMilli(),
 	}
 	if len(imagePaths) > 0 {
 		broadcastData["images"] = imagePaths

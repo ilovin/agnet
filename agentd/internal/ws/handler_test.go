@@ -68,6 +68,25 @@ func TestResolveLaunchOpencodeSession(t *testing.T) {
 	}
 }
 
+func TestResolveLaunchCodexSession(t *testing.T) {
+	provider, cmd, args, _ := testSvc.ResolveLaunch("codex", "", nil, "sess_codex", "", "")
+	if provider != "codex" {
+		t.Fatalf("provider = %q, want codex", provider)
+	}
+	if filepath.Base(cmd) != "codex" {
+		t.Fatalf("cmd = %q, want basename codex", cmd)
+	}
+	want := []string{"resume", "sess_codex"}
+	if len(args) != len(want) {
+		t.Fatalf("args len = %d, want %d (%v)", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q (all=%v)", i, args[i], want[i], args)
+		}
+	}
+}
+
 func TestResolveLaunchDefaultProviderUsesClaude(t *testing.T) {
 	provider, cmd, args, _ := testSvc.ResolveLaunch("", "", nil, "", "", "")
 	if provider != "" {

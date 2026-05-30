@@ -35,6 +35,19 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
+func isJSONLProvider(provider string) bool {
+	return provider == "claude" || provider == "codex"
+}
+
+func findSessionFileForProvider(provider string, pid int, workDir string) string {
+	info := scanner.ProcessInfo{
+		PID:      pid,
+		Provider: provider,
+		WorkDir:  workDir,
+	}
+	return info.FindSessionFile()
+}
+
 // newUUID generates a random UUID v4 string without external dependencies.
 func newUUID() string {
 	var b [16]byte
@@ -153,6 +166,7 @@ func (m *Manager) LoadFromStore() error {
 		workDir   string
 		pid       int
 		sessionID string
+		lastSeq   uint64
 	}
 	var claudeTodos []claudeWatcherTodo
 
@@ -238,6 +252,11 @@ func (m *Manager) LoadFromStore() error {
 			if r.ResumeSessionID != "" {
 				args = []string{"-s", r.ResumeSessionID}
 			}
+		case "codex":
+			cmd = "codex"
+			if r.ResumeSessionID != "" {
+				args = []string{"resume", r.ResumeSessionID}
+			}
 		case "hermes":
 			cmd = "hermes"
 			args = []string{"gateway", "run"}
@@ -263,7 +282,11 @@ func (m *Manager) LoadFromStore() error {
 		}
 
 		// Initialize buffer seq from persisted events so new appends continue after existing data
-		if lastSeq, err := m.store.LastConversationSeq(r.ID); err == nil && lastSeq > 0 {
+		var lastSeq uint64
+		if seq, err := m.store.LastConversationSeq(r.ID); err == nil {
+			lastSeq = seq
+		}
+		if lastSeq > 0 {
 			ag.InitSeq(lastSeq)
 		}
 		// Load Hermes CLI history from state.db on restart so conversation data
@@ -294,13 +317,14 @@ func (m *Manager) LoadFromStore() error {
 		// pre-restart state and live appends by the running Claude CLI are
 		// never reflected in the API. Mirrors the re-attach path's watcher
 		// startup logic (see manager.go ReAttach Claude branch).
-		if r.Provider == "claude" && r.PID > 0 {
+		if isJSONLProvider(r.Provider) && r.PID > 0 {
 			claudeTodos = append(claudeTodos, claudeWatcherTodo{
 				agentID:   r.ID,
 				ag:        ag,
 				workDir:   r.WorkDir,
 				pid:       r.PID,
 				sessionID: r.ResumeSessionID,
+				lastSeq:   lastSeq,
 			})
 		}
 
@@ -335,20 +359,48 @@ func (m *Manager) LoadFromStore() error {
 	// Spawn jsonl watchers for restored Claude agents now that the lock is
 	// released; newSessionWatcher() acquires m.mu.RLock internally.
 	for _, t := range claudeTodos {
-		sessionFile := scanner.FindClaudeSessionFile(t.pid, t.workDir)
+		sessionFile := findSessionFileForProvider(t.ag.Provider, t.pid, t.workDir)
 		if sessionFile == "" {
-			log.Printf("[LoadFromStore] Could not find jsonl session file for Claude agent %s (PID %d); watcher not started", t.agentID, t.pid)
+			log.Printf("[LoadFromStore] Could not find jsonl session file for agent %s (provider=%s pid=%d); watcher not started", t.agentID, t.ag.Provider, t.pid)
 			continue
 		}
+		historyEvents, err := watcher.LoadClaudeJSONLHistory(sessionFile)
+		if err != nil {
+			log.Printf("[LoadFromStore] History load failed for agent %s (provider=%s): %v", t.agentID, t.ag.Provider, err)
+		} else if len(historyEvents) > 0 {
+			// If persisted history is shorter than JSONL source (e.g. parser bug fixed
+			// later), rebuild from source to recover full history.
+			if t.lastSeq > 0 && int(t.lastSeq) < len(historyEvents) {
+				prevSeq := t.lastSeq
+				if err := m.ClearConversationEvents(t.agentID); err != nil {
+					log.Printf("[LoadFromStore] History rebuild clear failed for agent %s (provider=%s): %v", t.agentID, t.ag.Provider, err)
+				} else {
+					t.ag.EventBuf().Reset()
+					t.lastSeq = 0
+					log.Printf("[LoadFromStore] Rebuilding history for agent %s (provider=%s): persisted=%d jsonl=%d", t.agentID, t.ag.Provider, prevSeq, len(historyEvents))
+				}
+			}
+			if t.lastSeq == 0 {
+				for _, ev := range historyEvents {
+					data := map[string]any{
+						"role": ev.Role,
+						"text": ev.Text,
+						"raw":  false,
+					}
+					_ = m.appendAndPersistEvent(t.agentID, t.ag, data)
+				}
+				log.Printf("[LoadFromStore] Backfilled %d historical events for agent %s (provider=%s)", len(historyEvents), t.agentID, t.ag.Provider)
+			}
+		}
 		cb := m.makeWatcherCallback(t.agentID, t.ag)
-		w := m.newSessionWatcher("claude", t.sessionID, sessionFile, t.workDir, t.pid, cb, t.agentID)
+		w := m.newSessionWatcher(t.ag.Provider, t.sessionID, sessionFile, t.workDir, t.pid, cb, t.agentID)
 		w.SetSkipExisting(true)
 		if err := w.Start(); err != nil {
 			log.Printf("[LoadFromStore] Watcher start failed for Claude agent %s: %v", t.agentID, err)
 			continue
 		}
 		t.ag.setWatcher(w)
-		log.Printf("[LoadFromStore] Spawned jsonl watcher for Claude agent %s (PID %d, session %s)", t.agentID, t.pid, sessionFile)
+		log.Printf("[LoadFromStore] Spawned jsonl watcher for agent %s (provider=%s pid=%d session=%s)", t.agentID, t.ag.Provider, t.pid, sessionFile)
 	}
 
 	// Rescan attach metadata for restored Hermes agents. The Agent struct
@@ -391,7 +443,7 @@ func (m *Manager) LoadFromStore() error {
 			for _, t := range claudeTodos {
 				var info *scanner.ProcessInfo
 				for i := range procs {
-					if procs[i].PID == t.pid && procs[i].Provider == "claude" {
+					if procs[i].PID == t.pid && procs[i].Provider == t.ag.Provider {
 						info = &procs[i]
 						break
 					}
@@ -1472,7 +1524,7 @@ func (m *Manager) startSessionWatcher(agentID string, ag *Agent, pid int, workDi
 			return
 		}
 
-		sessionFile = scanner.FindClaudeSessionFile(pid, workDir)
+		sessionFile = findSessionFileForProvider(ag.Provider, pid, workDir)
 		if sessionFile == "" {
 			retryCount++
 			if retryCount%10 == 0 {
@@ -2368,13 +2420,13 @@ func (m *Manager) Attach(info scanner.ProcessInfo) (*Agent, error) {
 		}
 	}
 
-	// Load historical events for Claude sessions from JSONL file
-	if info.Provider == "claude" && sessionFile != "" {
+	// Load historical events for JSONL-backed providers (claude/codex)
+	if isJSONLProvider(info.Provider) && sessionFile != "" {
 		historyEvents, err := watcher.LoadClaudeJSONLHistory(sessionFile)
 		if err != nil {
-			log.Printf("[Attach] Warning: failed to load Claude history for %s: %v", id, err)
+			log.Printf("[Attach] Warning: failed to load %s history for %s: %v", info.Provider, id, err)
 		} else if len(historyEvents) > 0 {
-			log.Printf("[Attach] Loaded %d historical events for Claude agent %s", len(historyEvents), id)
+			log.Printf("[Attach] Loaded %d historical events for %s agent %s", len(historyEvents), info.Provider, id)
 			for _, ev := range historyEvents {
 				data := map[string]any{
 					"role": ev.Role,

@@ -269,6 +269,47 @@ func TestParseLineExitPlanModeCapturesPayload(t *testing.T) {
 	}
 }
 
+func TestParseLineCodexResponseItemMessage(t *testing.T) {
+	line := []byte(`{"timestamp":"2026-05-30T04:27:19.046Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello from codex"}]}}`)
+	ev, ok := parseLine(line)
+	if !ok {
+		t.Fatal("expected codex response_item message to be parsed")
+	}
+	if ev.Role != "assistant" {
+		t.Fatalf("expected role assistant, got %q", ev.Role)
+	}
+	if ev.Text != "hello from codex" {
+		t.Fatalf("expected text from codex content, got %q", ev.Text)
+	}
+}
+
+func TestLoadClaudeJSONLHistoryIncludesCodexEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-05-30T04:27:17.705Z","type":"session_meta","payload":{"id":"rollout-abc","timestamp":"2026-05-30T04:27:17.637Z","cwd":"/tmp/repo","originator":"codex_cli","git":{"commit_hash":"1111111","branch":"main","repository_url":"git@github.com:example/repo.git"}}}`,
+		`{"timestamp":"2026-05-30T04:27:18.535Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"用户消息"}]}}`,
+		`{"timestamp":"2026-05-30T04:27:19.046Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"助手回复"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write codex jsonl: %v", err)
+	}
+
+	events, err := LoadClaudeJSONLHistory(path)
+	if err != nil {
+		t.Fatalf("load history: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 conversation events, got %d", len(events))
+	}
+	if events[0].Role != "user" || events[0].Text != "用户消息" {
+		t.Fatalf("unexpected first event: %+v", events[0])
+	}
+	if events[1].Role != "assistant" || events[1].Text != "助手回复" {
+		t.Fatalf("unexpected second event: %+v", events[1])
+	}
+}
+
 func TestClaudeWatcherRefreshPrefersCurrentTaskSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
