@@ -618,6 +618,12 @@ bool _preferManagedAgent(AgentModel candidate, AgentModel? existing) {
 
   final candidatePid = candidate.pid ?? 0;
   final existingPid = existing.pid ?? 0;
+  final candidateMsgTime = candidate.lastMessageTime ?? 0;
+  final existingMsgTime = existing.lastMessageTime ?? 0;
+  if (candidateMsgTime != existingMsgTime) {
+    return candidateMsgTime > existingMsgTime;
+  }
+
   if (candidatePid != existingPid) {
     return candidatePid > existingPid;
   }
@@ -663,6 +669,9 @@ List<AgentModel> visibleManagedAgentsForNode(List<AgentModel> agents) {
 
   final visibleAgents = bySignature.values.toList()
     ..sort((a, b) {
+      final at = a.lastMessageTime ?? 0;
+      final bt = b.lastMessageTime ?? 0;
+      if (at != bt) return bt.compareTo(at);
       final cmp = managedAgentSortTitle(a).compareTo(managedAgentSortTitle(b));
       if (cmp != 0) return cmp;
       return a.id.compareTo(b.id);
@@ -696,6 +705,9 @@ List<DashboardSessionTarget> buildVisibleDashboardSessions(NodeState state) {
   }
 
   sessions.sort((a, b) {
+    final at = a.agent.lastMessageTime ?? 0;
+    final bt = b.agent.lastMessageTime ?? 0;
+    if (at != bt) return bt.compareTo(at);
     final nodeCmp = a.nodeName.toLowerCase().compareTo(b.nodeName.toLowerCase());
     if (nodeCmp != 0) return nodeCmp;
     final titleCmp = managedAgentSortTitle(a.agent).compareTo(managedAgentSortTitle(b.agent));
@@ -3215,14 +3227,62 @@ class _AgentRowState extends ConsumerState<AgentRow> {
     );
   }
 
+/// Provider → fixed brand icon mapping.
+/// Mirrors the public brand logos (Claude sparkle, OpenCode brackets,
+/// Codex terminal prompt, Hermes winged-sandal prompt).  Each provider
+/// gets a single recognisable icon so the dashboard row scan-reads like a
+/// colour-coded logotype.
+IconData providerLogoFor(String provider) {
+  switch (provider) {
+    case 'claude':
+    case 'claude-bedrock':
+    case 'claude-vertex':
+      return Icons.auto_fix_high; // spark / wand → Claude
+    case 'opencode':
+      return Icons.code; // angle brackets → OpenCode
+    case 'codex':
+      return Icons.terminal; // prompt cursor → Codex
+    case 'hermes':
+      return Icons.send; // winged message → Hermes
+    default:
+      return Icons.smart_toy;
+  }
+}
+
+/// Stable per-agent hue derived from the agent id hash, used so two agents
+/// of the same provider get visually distinct logo colours.
+Color providerLogoColorFor(String agentId, {double saturation = 0.75, double lightness = 0.55}) {
+  var hash = 0;
+  for (final codeUnit in agentId.codeUnits) {
+    hash = ((hash << 5) - hash) + codeUnit;
+    hash = hash & 0x7fffffff;
+  }
+  final hue = (hash % 360).toDouble();
+  return HSLColor.fromAHSL(1.0, hue, saturation, lightness).toColor();
+}
+
   Widget _buildTitleRow(BuildContext context, String displayTitle) {
     final colors = Theme.of(context).colorScheme;
     final unreadBadge = _buildUnreadBadge();
+    final agent = widget.agent;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        // Task #10: leading 槽不再用，把未读小红点前置到标题行起始（仅未读>0
-        // 时占位）。这是功能性提示，与 brand logo 无关。
+        // Provider brand logo: fixed icon per harness type, colour per agent.
+        Container(
+          width: 22,
+          height: 22,
+          margin: const EdgeInsets.only(right: 8),
+          decoration: BoxDecoration(
+            color: providerLogoColorFor(agent.id).withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(5),
+          ),
+          child: Icon(
+            providerLogoFor(agent.provider),
+            size: 14,
+            color: providerLogoColorFor(agent.id),
+          ),
+        ),
         if (unreadBadge is! SizedBox) ...[
           unreadBadge,
           const SizedBox(width: 6),
@@ -3232,11 +3292,6 @@ class _AgentRowState extends ConsumerState<AgentRow> {
             displayTitle,
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
-            // Primary anchor in the row hierarchy: explicitly larger and
-            // heavier than the timestamp / preview / subtitle so users can
-            // scan-read the agent name without effort. 14/w700 keeps a 4px
-            // gap to the node header (18) and a 3px gap to the status chip
-            // (11) — task#14 widened ladders.
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w700,

@@ -16,6 +16,8 @@
 /release/**/*.tar.gz
 /release/**/bin/
 /release/**/static/
+/release/**/manifest.json
+/agentapp/out/
 /bin/
 
 # Flutter build

@@ -19,6 +19,7 @@ import (
 
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	"github.com/phone-talk/agentd/internal/hermesclient"
+	"github.com/phone-talk/agentd/internal/provider"
 	agentpty "github.com/phone-talk/agentd/internal/pty"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/store"
@@ -191,6 +192,7 @@ func (m *Manager) LoadFromStore() error {
 		workDir   string
 		pid       int
 		sessionID string
+		lastSeq   uint64
 	}
 	var opencodeTodos []opencodeWatcherTodo
 
@@ -351,6 +353,7 @@ func (m *Manager) LoadFromStore() error {
 				workDir:   r.WorkDir,
 				pid:       r.PID,
 				sessionID: r.ResumeSessionID,
+				lastSeq:   lastSeq,
 			})
 		}
 	}
@@ -458,6 +461,26 @@ func (m *Manager) LoadFromStore() error {
 	// Spawn DB watchers for restored OpenCode agents now that the lock is
 	// released; newSessionWatcher() acquires m.mu.RLock internally.
 	for _, t := range opencodeTodos {
+		if t.sessionID != "" {
+			historyEvents, err := watcher.OpenCodeDBHistory(t.sessionID)
+			if err != nil {
+				log.Printf("[LoadFromStore] OpenCode history load failed for %s (session %s): %v", t.agentID, t.sessionID, err)
+			} else if len(historyEvents) > 0 {
+				if err := m.ClearConversationEvents(t.agentID); err != nil {
+					log.Printf("[LoadFromStore] OpenCode history rebuild clear failed for %s: %v", t.agentID, err)
+				} else {
+					t.ag.EventBuf().Reset()
+					loaded := 0
+					for _, ev := range historyEvents {
+						if data, ok := opencodeHistoryEventData(ev); ok {
+							_ = m.appendAndPersistEvent(t.agentID, t.ag, data)
+							loaded++
+						}
+					}
+					log.Printf("[LoadFromStore] Rebuilt OpenCode history for %s: persisted=%d db=%d loaded=%d", t.agentID, t.lastSeq, len(historyEvents), loaded)
+				}
+			}
+		}
 		cb := m.makeWatcherCallback(t.agentID, t.ag)
 		w := m.newSessionWatcher("opencode", t.sessionID, "", t.workDir, t.pid, cb, t.agentID)
 		if w == nil {
@@ -2486,47 +2509,10 @@ func (m *Manager) MakeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 	return m.makeWatcherCallback(agentID, ag)
 }
 
-// opencodeHistoryEventData converts a ConversationEvent loaded from the
-// OpenCode DB history into a persistable conversation-event data map. It
-// mirrors the kind/toolName/interactive-payload tagging that
-// makeWatcherCallback applies to live events, so that re-attach reproduces the
-// same thinking blocks, activity blocks and interactive cards as the live
-// poll path. Returns (nil, false) for events that carry no renderable content.
 func opencodeHistoryEventData(ev watcher.ConversationEvent) (map[string]any, bool) {
-	// Interactive tools (question → AskUserQuestion): emit the structured
-	// payload so the app can rebuild the card on history reload.
-	if ev.ToolUseName != "" {
-		if kind, payload, ok := ParseInteractiveToolUse(ev.ToolUseName, ev.ToolUseID, ev.ToolUseInput); ok {
-			payloadBytes, _ := json.Marshal(payload)
-			var payloadMap map[string]any
-			_ = json.Unmarshal(payloadBytes, &payloadMap)
-			data := map[string]any{
-				"role": "assistant",
-				"raw":  false,
-				"kind": kind,
-			}
-			if key := PayloadKeyForKind(kind); key != "" {
-				data[key] = payloadMap
-			}
-			return data, true
-		}
-	}
-
-	if ev.Text == "" {
-		return nil, false
-	}
-	data := map[string]any{
-		"role": ev.Role,
-		"text": ev.Text,
-		"raw":  false,
-	}
-	if ev.Kind != "" {
-		data["kind"] = ev.Kind
-	}
-	if ev.ToolName != "" {
-		data["toolName"] = ev.ToolName
-	}
-	return data, true
+	// Historical replay does not force sessionId on each event; conversation.history
+	// injects the active sessionId as a fallback.
+	return NormalizeWatcherEvent(ev, "")
 }
 
 // makeWatcherCallback builds the standard callback used by all session watchers.
@@ -2538,6 +2524,24 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 		// drop sessionId land in the wrong bucket and the rendered transcript
 		// freezes after a Hermes /clear-style session switch.
 		sessionID := ag.ResumeSessionID()
+
+		// Ignore heartbeat/status-only watcher ticks for conversation history.
+		// Keep status transitions on the agent itself, but don't persist empty
+		// chat events that render as blank rows in app/agentcli.
+		if strings.TrimSpace(e.Role) == "" &&
+			strings.TrimSpace(e.Text) == "" &&
+			e.ToolUseName == "" &&
+			e.Kind == "" &&
+			e.ToolName == "" {
+			if e.StatusChange != nil {
+				if *e.StatusChange == watcher.StatusWorking {
+					ag.setStatus(StatusWorking)
+				} else {
+					ag.setStatus(StatusIdle)
+				}
+			}
+			return
+		}
 
 		// Deduplicate user messages: if the last event in the buffer is an identical
 		// user message (already recorded by conversation.send), skip it. Otherwise,
@@ -2551,83 +2555,20 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 			}
 		}
 
-		// Interactive tools (AskUserQuestion / ExitPlanMode): the JSONL line
-		// carries tool_use payload that the Flutter app needs as a structured
-		// event (kind + camelCase payload), not just a "[ToolName]" text
-		// bubble. This mirrors makeStreamJSONCallback so both ingest paths
-		// (jsonl watcher + stream-json) deliver identical events. R-010 T2-bis.
-		if e.ToolUseName != "" {
-			if kind, payload, ok := ParseInteractiveToolUse(e.ToolUseName, e.ToolUseID, e.ToolUseInput); ok {
-				payloadBytes, _ := json.Marshal(payload)
-				var payloadMap map[string]any
-				_ = json.Unmarshal(payloadBytes, &payloadMap)
-				data := map[string]any{
-					"role": "assistant",
-					"raw":  false,
-					"kind": kind,
-				}
-				if sessionID != "" {
-					data["sessionId"] = sessionID
-				}
-				if key := PayloadKeyForKind(kind); key != "" {
-					data[key] = payloadMap
-				}
-				if e.StatusChange != nil {
-					data["statusChange"] = string(*e.StatusChange)
-					if *e.StatusChange == watcher.StatusWorking {
-						ag.setStatus(StatusWorking)
-					} else {
-						ag.setStatus(StatusIdle)
-					}
-				} else {
-					// Interactive tool_use without an explicit status change
-					// still means the agent is working (waiting on user).
-					ag.setStatus(StatusWorking)
-				}
-				seq := m.appendAndPersistEvent(agentID, ag, data)
-				data["seq"] = seq
-
-				m.mu.RLock()
-				cb := m.onOutput
-				m.mu.RUnlock()
-				if cb != nil {
-					cb(agentID, data)
-				}
-				return
-			}
-		}
-
-		data := map[string]any{
-			"role": e.Role,
-			"text": e.Text,
-			"raw":  false,
-		}
-		// Kind classifies reasoning (thinking) and non-interactive tool calls
-		// (tool_use) so the Flutter app routes them to its thinking/activity
-		// buckets — mirrors the Claude stream-json path. Plain assistant text
-		// leaves Kind empty (the app treats it as chat).
-		if e.Kind != "" {
-			data["kind"] = e.Kind
-		}
-		if e.ToolName != "" {
-			data["toolName"] = e.ToolName
-		}
-		if sessionID != "" {
-			data["sessionId"] = sessionID
-		}
-		if e.MsgID != "" {
-			data["msg_id"] = e.MsgID
-		}
-		if e.ToolSummary != "" {
-			data["toolSummary"] = e.ToolSummary
+		data, ok := NormalizeWatcherEvent(e, sessionID)
+		if !ok {
+			return
 		}
 		if e.StatusChange != nil {
-			data["statusChange"] = string(*e.StatusChange)
 			if *e.StatusChange == watcher.StatusWorking {
 				ag.setStatus(StatusWorking)
 			} else {
 				ag.setStatus(StatusIdle)
 			}
+		} else if e.ToolUseName != "" {
+			// Interactive tool_use without explicit status change still means
+			// the agent is waiting on user interaction.
+			ag.setStatus(StatusWorking)
 		}
 
 		// For events with a MsgID (opencode streaming), use update-or-append
@@ -2668,9 +2609,10 @@ func (m *Manager) makeWatcherCallback(agentID string, ag *Agent) func(watcher.Co
 // newSessionWatcher creates the appropriate watcher for the given provider.
 // For opencode it returns an OpenCodeDBWatcher that reads from the SQLite DB;
 // for claude (and others) it returns a ClaudeWatcher on the JSONL file.
-func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent), agentID string) watcher.SessionWatcher {
-	if provider == "hermes" {
+func (m *Manager) newSessionWatcher(providerName, sessionID, sessionFile, workDir string, pid int, cb func(watcher.ConversationEvent), agentID string) watcher.SessionWatcher {
+	if providerName == "hermes" {
 		w := watcher.NewHermesDBWatcher(agentID, sessionID, cb)
+		policy := provider.SessionLifecyclePolicyFor("hermes")
 		// Suppress switch detection while a hermesSend is in flight; chunk.Done
 		// is the authoritative source in that window. See plan §3.6.
 		w.SetSendingChecker(func() bool {
@@ -2710,15 +2652,21 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
 				log.Printf("[Watcher] Failed to update session ID for %s on hermes session switch: %v", agentID, err)
 			}
-			if err := m.ClearConversationEvents(agentID); err != nil {
-				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on hermes session switch: %v", agentID, err)
+			if policy.ClearPersistedEvents {
+				if err := m.ClearConversationEvents(agentID); err != nil {
+					log.Printf("[Watcher] Warning: failed to clear persisted history for %s on hermes session switch: %v", agentID, err)
+				}
 			}
-			ag.EventBuf().Reset()
-			if historyEvents, err := watcher.HermesStateDBLoadSession(newSessionID); err == nil && len(historyEvents) > 0 {
-				log.Printf("[Watcher] Loaded %d historical events for hermes session switch %s → %s", len(historyEvents), sessionID, newSessionID)
-				for _, ev := range historyEvents {
-					data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
-					m.appendAndPersistEvent(agentID, ag, data)
+			if policy.ResetEventBuffer {
+				ag.EventBuf().Reset()
+			}
+			if policy.ReloadHistory {
+				if historyEvents, err := watcher.HermesStateDBLoadSession(newSessionID); err == nil && len(historyEvents) > 0 {
+					log.Printf("[Watcher] Loaded %d historical events for hermes session switch %s → %s", len(historyEvents), sessionID, newSessionID)
+					for _, ev := range historyEvents {
+						data := map[string]any{"role": ev.Role, "text": ev.Text, "raw": false}
+						m.appendAndPersistEvent(agentID, ag, data)
+					}
 				}
 			}
 			// Tell the watcher about the new session so subsequent in-session
@@ -2729,12 +2677,15 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			m.mu.RLock()
 			onOut := m.onOutput
 			m.mu.RUnlock()
-			if onOut != nil {
-				onOut(agentID, map[string]any{
-					"type":      "conversation.cleared",
-					"agentId":   agentID,
-					"sessionId": newSessionID,
-				})
+			if policy.EmitClearedEvent && onOut != nil {
+				cleared := map[string]any{
+					"type":    "conversation.cleared",
+					"agentId": agentID,
+				}
+				if policy.EmitClearedSessionID {
+					cleared["sessionId"] = newSessionID
+				}
+				onOut(agentID, cleared)
 			}
 			derived := m.DeriveAgentState(agentID)
 			m.mu.RLock()
@@ -2765,8 +2716,9 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 		})
 		return w
 	}
-	if provider == "opencode" && sessionID != "" {
+	if providerName == "opencode" && sessionID != "" {
 		w := watcher.NewOpenCodeDBWatcher(sessionID, cb)
+		policy := provider.SessionLifecyclePolicyFor("opencode")
 		w.SetWorkDir(workDir)
 		w.OnSessionSwitch(func(newSessionID string) {
 			ag := m.Get(agentID)
@@ -2776,28 +2728,37 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 			if err := m.UpdateResumeSessionID(agentID, newSessionID); err != nil {
 				log.Printf("[Watcher] Failed to update session ID for %s on opencode session switch: %v", agentID, err)
 			}
-			ag.EventBuf().Reset()
-			if err := m.ClearConversationEvents(agentID); err != nil {
-				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+			if policy.ResetEventBuffer {
+				ag.EventBuf().Reset()
+			}
+			if policy.ClearPersistedEvents {
+				if err := m.ClearConversationEvents(agentID); err != nil {
+					log.Printf("[Watcher] Warning: failed to clear persisted history for %s on opencode session switch: %v", agentID, err)
+				}
 			}
 			// Load history for the new session so conversation.history has data
-			if historyEvents, err := watcher.OpenCodeDBHistory(newSessionID); err == nil && len(historyEvents) > 0 {
-				log.Printf("[Watcher] Loaded %d historical events for session switch %s → %s", len(historyEvents), sessionID, newSessionID)
-				for _, ev := range historyEvents {
-					if data, ok := opencodeHistoryEventData(ev); ok {
-						m.appendAndPersistEvent(agentID, ag, data)
+			if policy.ReloadHistory {
+				if historyEvents, err := watcher.OpenCodeDBHistory(newSessionID); err == nil && len(historyEvents) > 0 {
+					log.Printf("[Watcher] Loaded %d historical events for session switch %s → %s", len(historyEvents), sessionID, newSessionID)
+					for _, ev := range historyEvents {
+						if data, ok := opencodeHistoryEventData(ev); ok {
+							m.appendAndPersistEvent(agentID, ag, data)
+						}
 					}
 				}
 			}
 			m.mu.RLock()
 			onOut := m.onOutput
 			m.mu.RUnlock()
-			if onOut != nil {
-				onOut(agentID, map[string]any{
-					"type":      "conversation.cleared",
-					"agentId":   agentID,
-					"sessionId": newSessionID,
-				})
+			if policy.EmitClearedEvent && onOut != nil {
+				cleared := map[string]any{
+					"type":    "conversation.cleared",
+					"agentId": agentID,
+				}
+				if policy.EmitClearedSessionID {
+					cleared["sessionId"] = newSessionID
+				}
+				onOut(agentID, cleared)
 			}
 			derived := m.DeriveAgentState(agentID)
 			m.mu.RLock()
@@ -2835,6 +2796,7 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 		w.SetTmuxTarget(ag.TmuxTarget())
 	}
 	w.OnSessionSwitch(func(newPath string) {
+		policy := provider.SessionLifecyclePolicyFor(providerName)
 		newSessionID := strings.TrimSuffix(filepath.Base(newPath), ".jsonl")
 		ag := m.Get(agentID)
 		if ag == nil {
@@ -2842,8 +2804,8 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 		}
 		currentName := ag.Name
 		currentSessionID, _ := m.GetResumeSessionID(agentID)
-		newName := attachedDisplayName(pid, newSessionID, provider, workDir)
-		if isAttachedAutoName(currentName, pid, currentSessionID, provider, workDir) && currentName != newName {
+		newName := attachedDisplayName(pid, newSessionID, providerName, workDir)
+		if isAttachedAutoName(currentName, pid, currentSessionID, providerName, workDir) && currentName != newName {
 			if err := m.Rename(agentID, newName); err != nil {
 				log.Printf("[Watcher] Failed to rename agent %s on session switch: %v", agentID, err)
 			} else {
@@ -2855,18 +2817,26 @@ func (m *Manager) newSessionWatcher(provider, sessionID, sessionFile, workDir st
 				log.Printf("[Watcher] Failed to update session ID for %s: %v", agentID, err)
 			}
 		}
-		ag.EventBuf().Reset()
-		if err := m.ClearConversationEvents(agentID); err != nil {
-			log.Printf("[Watcher] Warning: failed to clear persisted history for %s on session switch: %v", agentID, err)
+		if policy.ResetEventBuffer {
+			ag.EventBuf().Reset()
+		}
+		if policy.ClearPersistedEvents {
+			if err := m.ClearConversationEvents(agentID); err != nil {
+				log.Printf("[Watcher] Warning: failed to clear persisted history for %s on session switch: %v", agentID, err)
+			}
 		}
 		m.mu.RLock()
 		onOut := m.onOutput
 		m.mu.RUnlock()
-		if onOut != nil {
-			onOut(agentID, map[string]any{
+		if policy.EmitClearedEvent && onOut != nil {
+			cleared := map[string]any{
 				"type":    "conversation.cleared",
 				"agentId": agentID,
-			})
+			}
+			if policy.EmitClearedSessionID && newSessionID != "" {
+				cleared["sessionId"] = newSessionID
+			}
+			onOut(agentID, cleared)
 		}
 		derived := m.DeriveAgentState(agentID)
 		m.mu.RLock()

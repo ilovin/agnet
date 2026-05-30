@@ -22,6 +22,7 @@ import (
 	"github.com/phone-talk/agentd/internal/agent"
 	"github.com/phone-talk/agentd/internal/eventbuf"
 	"github.com/phone-talk/agentd/internal/hermesclient"
+	"github.com/phone-talk/agentd/internal/provider"
 	"github.com/phone-talk/agentd/internal/scanner"
 	"github.com/phone-talk/agentd/internal/watcher"
 )
@@ -729,115 +730,62 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 
 	attachMode := ag.AttachMode()
 	isTmuxAttached := attachMode == "tmux"
-	isOpenCode := ag.Provider == "opencode"
-	isHermes := ag.Provider == "hermes"
-	log.Printf("[conversationSend] agent=%s provider=%s attachMode=%s isTmuxAttached=%v isOpenCode=%v readOnly=%v", agentID, ag.Provider, attachMode, isTmuxAttached, isOpenCode, ag.AttachReadOnly())
+	caps := provider.CapabilitiesFor(ag.Provider)
+	path := decideSendPath(ag.Provider, attachMode, ag.Process() != nil, caps)
+	log.Printf("[conversationSend] agent=%s provider=%s attachMode=%s path=%s readOnly=%v", agentID, ag.Provider, attachMode, path, ag.AttachReadOnly())
+	ctx := sendContext{
+		req:        req,
+		agentID:    agentID,
+		message:    message,
+		raw:        raw,
+		imageFiles: imageFiles,
+		imagePaths: imagePaths,
+		ag:         ag,
+		caps:       caps,
+	}
 	// Guard against Restart/Start on attached non-tmux agents (read-only watcher attach).
 	// OpenCode agents are exempt: openCodeSendWithResume uses `opencode run --session`,
 	// not PTY input, so the read-only watcher attach does not apply.
 	// Hermes was previously exempt because it used HTTP. Post-M3 hermes goes
 	// through the tmux send-keys path identical to Claude tmux-attached agents,
 	// so the generic guard correctly covers it (no special-case needed).
-	if attachMode != "" && !isTmuxAttached && !isOpenCode {
+	if attachMode != "" && !isTmuxAttached && path != sendPathResumeCmd {
 		reason := ag.AttachReadOnlyReason()
 		if reason == "" {
 			reason = "attached session is read-only"
 		}
-		log.Printf("[conversationSend] blocking non-tmux non-opencode attached agent: %s", reason)
+		log.Printf("[conversationSend] blocking attached non-tmux writable path: %s", reason)
 		return errResp(req.ID, -32000, reason)
 	}
-	isPipeMode := ag.Provider == "claude" && ag.Process() != nil && !isTmuxAttached
-	isFreshClaude := ag.Provider == "claude" && ag.Process() == nil && !isTmuxAttached
 
 	// Hermes images: rejected even under tmux because the CLI consumes only
 	// stdin, not file flags. (Same restriction as the previous HTTP path; the
 	// generic tmux branch below also rejects images so this check is mostly
 	// kept for a clearer error message, but the tmux branch covers it too.)
-	if isHermes && len(imageFiles) > 0 {
-		return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
+	if len(imageFiles) > 0 && !caps.SupportsImageAttachment {
+		return errResp(req.ID, -32000, fmt.Sprintf("%s sessions do not support image attachments", ag.Provider))
 	}
 
 	// For tmux-attached sessions, write directly to PTY via tmux send-keys.
-	if isTmuxAttached {
+	if path == sendPathTmux {
 		log.Printf("[conversationSend] taking tmux path for agent %s", agentID)
-		// tmux-attached interactive sessions cannot receive --file flags
-		// dynamically. Instead, we embed the saved image paths in the prompt
-		// text so Claude's REPL reads them via its Read tool. Hermes is the
-		// exception because its CLI consumes only stdin without file
-		// references and treats input as raw chat (no agentic file reads).
-		if isHermes && len(imageFiles) > 0 {
-			return errResp(req.ID, -32000, "hermes sessions do not support image attachments")
-		}
-		// Hermes-only: verify the pane's foreground process is not a shell
-		// before sending keys. After hermes CLI crashes, the pane falls back
-		// to its parent bash; subsequent send-keys would be executed as shell
-		// commands. Plan §M4 §2.2.
-		if isHermes {
-			tmuxTarget := ag.TmuxTarget()
-			if err := agent.ValidateNonShellPane(tmuxTarget); err != nil {
-				log.Printf("[conversationSend] hermes pane validation failed for agent %s: %v", agentID, err)
-				ag.SetStatus(agent.StatusStopped)
-				return errResp(req.ID, -32000, "hermes CLI not running in tmux pane: "+err.Error())
-			}
-		}
-		// Same as the generic PTY path below, but skip the opencode/fresh checks
-		eventData := map[string]any{
-			"role":       "user",
-			"text":       message,
-			"raw":        false,
-			"imageCount": len(imageFiles),
-		}
-		if len(imagePaths) > 0 {
-			eventData["images"] = imagePaths
-		}
-		seq, err := h.server.manager.RecordConversationEvent(agentID, eventData)
-		if err != nil {
-			return errResp(req.ID, -32000, "record user message: "+err.Error())
-		}
-		h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), seq)), nil)
-		// Build the actual prompt sent to the CLI: for non-hermes tmux-attached
-		// sessions (Claude/etc.) embed the persisted image paths so the REPL
-		// reads them via its Read tool. Hermes was already rejected above.
-		promptText := message
-		if !isHermes && len(imagePaths) > 0 {
-			promptText = formatTmuxMessageWithImages(message, imagePaths)
-		}
-		input := promptText
-		if !raw {
-			input = promptText + "\n"
-		}
-		// Hermes-only: tightly scope BeginSend to the actual write call so the
-		// HermesDBWatcher's session-switch suppression window is millisecond-
-		// scale instead of HTTP-round-trip-scale. Plan §M4 §2.1.
-		if isHermes {
-			ag.BeginSend()
-		}
-		err = ag.WriteInput(input)
-		if isHermes {
-			ag.EndSend()
-		}
-		if err != nil {
-			return errResp(req.ID, -32000, "write to tmux agent: "+err.Error())
-		}
-		// OpenCode responses are read by the OpenCodeDBWatcher polling the SQLite DB.
-		// No need for tmux pane capture (which contains TUI noise like plan headers).
-		return okResp(req.ID, map[string]any{"id": agentID})
+		return h.handleSendTmux(ctx)
 	}
 
 	// For Claude in -p mode with existing process, restart the process in-place and send prompt via stdin.
-	if isPipeMode {
+	if path == sendPathClaudePipe {
 		log.Printf("[conversationSend] taking pipe mode path for agent %s", agentID)
 		return h.agentRestartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For fresh Claude agent (no process yet), start with message
-	if isFreshClaude {
+	if path == sendPathClaudeInit {
 		log.Printf("[conversationSend] taking fresh claude path for agent %s", agentID)
 		return h.agentStartWithMessage(req, ag, message, imageFiles, imagePaths)
 	}
 
 	// For OpenCode attached sessions, use resume mode
-	if isOpenCode {
+	if path == sendPathResumeCmd {
 		log.Printf("[conversationSend] taking opencode resume path for agent %s", agentID)
 		// OpenCode resume mode does not support image attachments.
 		if len(imageFiles) > 0 {
@@ -846,71 +794,7 @@ func (h *handler) conversationSend(req RPCRequest, p ConversationSendParams) RPC
 		return h.openCodeSendWithResume(req, ag, message)
 	}
 
-	// Record user message to EventBuffer + persistent store BEFORE sending to PTY
-	ptyEventData := map[string]any{
-		"role":       "user",
-		"text":       message,
-		"raw":        false,
-		"imageCount": len(imageFiles),
-	}
-	if len(imagePaths) > 0 {
-		ptyEventData["images"] = imagePaths
-	}
-	ptySeq, err := h.server.manager.RecordConversationEvent(agentID, ptyEventData)
-	if err != nil {
-		return errResp(req.ID, -32000, "record user message: "+err.Error())
-	}
-
-	// Broadcast user message to all clients
-	h.server.broadcast(event("conversation.message", h.buildUserMessageBroadcast(ag, message, imagePaths, len(imageFiles), ptySeq)), nil)
-
-	input := message
-	if !raw {
-		input = message + "\n"
-	}
-
-	// For PTY-based providers, handle permission prompts
-	// If permission prompt is active, resolve it first
-	if ag.PermissionPromptActive() {
-		log.Printf("[Permission] conversation.send resolving existing prompt for agent %s", agentID)
-		if err := ag.WriteInput("\t\r\r"); err != nil {
-			return errResp(req.ID, -32000, "resolve permission prompt: "+err.Error())
-		}
-		ag.SetPermissionPromptActive(false)
-		time.Sleep(120 * time.Millisecond)
-	}
-
-	if err := ag.WriteInput(input); err != nil {
-		msg := err.Error()
-		if ag.AttachReadOnly() && ag.AttachReadOnlyReason() != "" {
-			msg = "write to agent: attached session is read-only: " + ag.AttachReadOnlyReason()
-		} else {
-			msg = "write to agent: " + msg
-		}
-		return errResp(req.ID, -32000, msg)
-	}
-
-	// Handle prompt that appears immediately after message send.
-	// Poll briefly so prompt detection has time to process subsequent PTY chunks.
-	for i := 0; i < 8; i++ {
-		time.Sleep(120 * time.Millisecond)
-		if !ag.PermissionPromptActive() {
-			continue
-		}
-		log.Printf("[Permission] conversation.send detected prompt after send for agent %s (poll=%d)", agentID, i)
-		if err := ag.WriteInput("\t\r\r"); err != nil {
-			return errResp(req.ID, -32000, "resolve permission prompt(after send): "+err.Error())
-		}
-		ag.SetPermissionPromptActive(false)
-		time.Sleep(120 * time.Millisecond)
-		if err := ag.WriteInput(input); err != nil {
-			return errResp(req.ID, -32000, "re-send after permission prompt: "+err.Error())
-		}
-		log.Printf("[Permission] conversation.send re-sent input after prompt resolve for agent %s", agentID)
-		break
-	}
-
-	return okResp(req.ID, map[string]any{"ok": true})
+	return h.handleSendPTY(ctx)
 }
 
 // agentRestartWithMessage restarts a Claude agent with a new message written to stdin.

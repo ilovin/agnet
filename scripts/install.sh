@@ -452,6 +452,90 @@ gateway_pid() {
   pgrep -f "agentgw start" 2>/dev/null || true
 }
 
+is_port_listening() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | awk -v p=":$port" '$4 ~ p {found=1} END{exit found?0:1}'
+    return
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -tln 2>/dev/null | awk -v p=":$port" '$4 ~ p {found=1} END{exit found?0:1}'
+    return
+  fi
+  return 1
+}
+
+wait_for_port() {
+  local port="$1"
+  local timeout_sec="${2:-10}"
+  local i
+  for ((i=0; i<timeout_sec; i++)); do
+    if is_port_listening "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_http_ok() {
+  local url="$1"
+  local timeout_sec="${2:-10}"
+  local i code
+  for ((i=0; i<timeout_sec; i++)); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$url" 2>/dev/null || echo "000")"
+    if [[ "$code" == "200" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+wait_process_alive() {
+  local pid="$1"
+  local seconds="${2:-5}"
+  local i
+  for ((i=0; i<seconds; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+start_detached() {
+  local logfile="$1"
+  shift
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" >"$logfile" 2>&1 < /dev/null &
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$logfile" "$@" <<'PY' >/dev/null 2>&1
+import subprocess
+import sys
+logfile = sys.argv[1]
+cmd = sys.argv[2:]
+with open(logfile, "ab", buffering=0) as out:
+    subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=out,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+PY
+  else
+    nohup "$@" >"$logfile" 2>&1 < /dev/null &
+  fi
+  disown >/dev/null 2>&1 || true
+}
+
 stop_services() {
   local pid
   pid="$(gateway_pid)"
@@ -744,12 +828,31 @@ restart_services() {
   if [[ -n "$local_bin" && -f "$local_bin" ]]; then
     sync_local_agentd_token
     step "启动本地 agentd (${local_bin##*/})..."
-    nohup "$local_bin" start > /tmp/agentd-local.log 2>&1 &
-    sleep 2
-    if lsof -nP -iTCP:"$AGENTD_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-      info "agentd 已启动 (PID $(local_agentd_pid))"
+    local agentd_started=0
+    local attempt
+    for attempt in 1 2 3; do
+      start_detached /tmp/agentd-local.log "$local_bin" start
+      if wait_for_port "$AGENTD_PORT" 8; then
+        local apid
+        apid="$(local_agentd_pid)"
+        if [[ -n "$apid" ]] && wait_process_alive "$apid" 3; then
+          agentd_started=1
+          break
+        fi
+      fi
+      warn "agentd 启动第 ${attempt}/3 次失败，重试中..."
+      local stale_apid
+      stale_apid="$(local_agentd_pid)"
+      if [[ -n "$stale_apid" ]]; then
+        kill "$stale_apid" 2>/dev/null || true
+        sleep 1
+      fi
+    done
+    if [[ "$agentd_started" == "1" ]]; then
+      info "agentd 已启动 (PID $(local_agentd_pid), port $AGENTD_PORT)"
     else
-      warn "agentd 启动失败，查看日志: tail -f /tmp/agentd-local.log"
+      err "agentd 启动失败，查看日志: tail -f /tmp/agentd-local.log"
+      tail -20 /tmp/agentd-local.log || true
     fi
   fi
 
@@ -799,24 +902,43 @@ restart_services() {
   fi
 
   local -a env_args=()
-  if [[ -f "$RUNTIME_ENV_FILE" ]]; then
-    env_args+=(env)
-    while IFS= read -r line; do
-      [[ -z "$line" ]] && continue
-      env_args+=("$line")
-    done < "$RUNTIME_ENV_FILE"
-    nohup "${env_args[@]}" "$gw_bin" "${gw_args[@]}" > /tmp/agentgw.log 2>&1 &
-  else
-    nohup "$gw_bin" "${gw_args[@]}" > /tmp/agentgw.log 2>&1 &
-  fi
-  sleep 2
+  local gw_started=0
   local gwpid
+  local gw_attempt
+  for gw_attempt in 1 2 3 4 5; do
+    if [[ -f "$RUNTIME_ENV_FILE" ]]; then
+      env_args=(env)
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        env_args+=("$line")
+      done < "$RUNTIME_ENV_FILE"
+      start_detached /tmp/agentgw.log "${env_args[@]}" "$gw_bin" "${gw_args[@]}"
+    else
+      start_detached /tmp/agentgw.log "$gw_bin" "${gw_args[@]}"
+    fi
+
+    if wait_for_port "$GW_PORT" 10 && wait_for_http_ok "http://localhost:$GW_PORT/" 10; then
+      gwpid="$(gateway_pid)"
+      if [[ -n "$gwpid" ]] && wait_process_alive "$gwpid" 5; then
+        gw_started=1
+        break
+      fi
+    fi
+
+    warn "agentgw 启动第 ${gw_attempt}/5 次失败，重试中..."
+    gwpid="$(gateway_pid)"
+    if [[ -n "$gwpid" ]]; then
+      kill "$gwpid" 2>/dev/null || true
+      sleep 1
+    fi
+  done
+
   gwpid="$(gateway_pid)"
-  if [[ -n "$gwpid" ]]; then
+  if [[ "$gw_started" == "1" && -n "$gwpid" ]]; then
     info "agentgw 已启动 (PID $gwpid, http://localhost:$GW_PORT)"
   else
-    err "agentgw 启动失败:"
-    tail -5 /tmp/agentgw.log
+    err "agentgw 启动失败（端口/HTTP 健康检查未通过）:"
+    tail -40 /tmp/agentgw.log || true
     exit 1
   fi
 }
