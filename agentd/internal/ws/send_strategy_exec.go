@@ -2,6 +2,7 @@ package ws
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/phone-talk/agentd/internal/agent"
@@ -57,7 +58,18 @@ func (h *handler) handleSendTmux(ctx sendContext) RPCResponse {
 	if ctx.ag.Provider == "hermes" {
 		ctx.ag.BeginSend()
 	}
-	err = ctx.ag.WriteInput(input)
+	// Codex TUI occasionally keeps text in composer without actually submitting
+	// when text and newline are sent in one burst. Split submit into two writes:
+	// text first, then explicit CR submit key.
+	if ctx.ag.Provider == "codex" && !ctx.raw {
+		err = ctx.ag.WriteInput(strings.TrimSuffix(input, "\n"))
+		if err == nil {
+			time.Sleep(35 * time.Millisecond)
+			err = ctx.ag.WriteInput("\r")
+		}
+	} else {
+		err = ctx.ag.WriteInput(input)
+	}
 	if ctx.ag.Provider == "hermes" {
 		ctx.ag.EndSend()
 	}
